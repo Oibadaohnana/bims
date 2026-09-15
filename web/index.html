@@ -54,10 +54,245 @@
         color: var(--muted);
       }
 
+      /* An order the Bim cannot carry out, in the one warm colour the room
+         keeps for things worth noticing. */
+      #status.refused {
+        color: #ff8f7a;
+      }
+
       main {
+        position: relative;
         flex: 1;
         min-height: 0;
         padding: 0 20px 20px;
+      }
+
+      /* The agenda: what the Bim is on, and what is waiting behind it. */
+      #agenda {
+        position: absolute;
+        z-index: 5;
+        top: 12px;
+        left: 32px;
+        margin: 0;
+        padding: 7px;
+        min-width: 216px;
+        list-style: none;
+        border: 1px solid var(--edge);
+        background: rgb(20 29 25 / 0.9);
+        font-size: 13px;
+      }
+
+      #agenda[hidden] {
+        display: none;
+      }
+
+      #agenda li {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 4px 3px;
+        color: var(--muted);
+      }
+
+      #agenda li.active {
+        color: var(--ink);
+      }
+
+      /* Progress sits at the left-hand end of every row. */
+      #agenda .bar {
+        flex: none;
+        width: 56px;
+        height: 6px;
+        border-radius: 3px;
+        background: #22332b;
+        overflow: hidden;
+      }
+
+      #agenda .bar i {
+        display: block;
+        height: 100%;
+        border-radius: 3px;
+        background: #4a6d5c;
+        transition: width 0.12s linear;
+      }
+
+      #agenda li.active .bar i {
+        background: var(--accent);
+      }
+
+      #agenda .box {
+        flex: none;
+        display: grid;
+        place-items: center;
+        width: 13px;
+        height: 13px;
+        border: 1px solid var(--edge);
+        border-radius: 3px;
+      }
+
+      #agenda li.active .box {
+        border-color: var(--accent);
+      }
+
+      #agenda li.active .box::after {
+        content: "";
+        width: 7px;
+        height: 7px;
+        border-radius: 2px;
+        background: var(--accent);
+      }
+
+      /* What the Bim wants, and how it is bearing up, down the right-hand
+         side: the needs first, then health underneath them. */
+      #side {
+        position: absolute;
+        z-index: 5;
+        top: 12px;
+        right: 32px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      #needs {
+        margin: 0;
+        padding: 7px;
+        min-width: 226px;
+        list-style: none;
+        border: 1px solid var(--edge);
+        background: rgb(20 29 25 / 0.9);
+        font-size: 13px;
+      }
+
+      #needs li {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 4px 3px;
+        color: var(--muted);
+      }
+
+      /* Wide enough for the longest name there is — "Cleanliness" — and no
+         wrapping, so a name can never run under the bar beside it. */
+      #needs .name {
+        flex: none;
+        width: 78px;
+        white-space: nowrap;
+      }
+
+      #needs .bar {
+        flex: 1;
+        height: 6px;
+        border-radius: 3px;
+        background: #22332b;
+        overflow: hidden;
+      }
+
+      #needs .bar i {
+        display: block;
+        height: 100%;
+        border-radius: 3px;
+        background: var(--accent);
+        transition: width 0.12s linear;
+      }
+
+      /* Past the trigger the Bim goes and does something about it, so the row
+         turns the one warm colour the palette keeps for things worth noticing. */
+      #needs li.urgent {
+        color: #ffb4a6;
+      }
+
+      #needs li.urgent .bar i {
+        background: #e2604a;
+      }
+
+      #needs .pct,
+      #health .pct {
+        flex: none;
+        width: 4ch;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+
+      #health {
+        padding: 7px;
+        min-width: 226px;
+        border: 1px solid var(--edge);
+        background: rgb(20 29 25 / 0.9);
+        font-size: 13px;
+      }
+
+      #health .row {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 4px 3px;
+        color: var(--ink);
+      }
+
+      /* The same column as the needs above it, so the two panels line up. */
+      #health .name {
+        flex: none;
+        width: 78px;
+        white-space: nowrap;
+      }
+
+      #health .bar {
+        flex: 1;
+        height: 6px;
+        border-radius: 3px;
+        background: #22332b;
+        overflow: hidden;
+      }
+
+      #health .bar i {
+        display: block;
+        height: 100%;
+        border-radius: 3px;
+        background: #7fd1a8;
+        transition: width 0.2s linear;
+      }
+
+      /* Losing health only happens at the worst stage, so the bar moving at
+         all is already bad news. */
+      #health.hurt .bar i {
+        background: #e2604a;
+      }
+
+      #condition,
+      #drowsiness,
+      #urge,
+      #discomfort {
+        margin: 2px 3px 0;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      #drowsiness:empty,
+      #urge:empty,
+      #discomfort:empty {
+        display: none;
+      }
+
+      #drowsiness.warn,
+      #urge.warn,
+      #discomfort.warn {
+        color: #ffd7a6;
+      }
+
+      #condition.warn {
+        color: #ffb4a6;
+      }
+
+      #condition.gone {
+        color: #ff8f7a;
+        font-weight: 600;
+      }
+
+      #agenda .pct {
+        margin-left: auto;
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
       }
 
       #stage {
@@ -81,6 +316,255 @@
         white-space: nowrap;
       }
 
+      /* Under direct orders. Its own colour, matching the ring drawn round the
+         Bim, so the badge and the deck agree. */
+      #recruited {
+        padding: 2px 9px;
+        border: 1px solid #ffd15a;
+        border-radius: 999px;
+        color: #ffd15a;
+        font-size: 12px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+
+      #recruited[hidden] {
+        display: none;
+      }
+
+      /* The tray: bottom-left of the deck, tabbed, and foldable away. */
+      #tray {
+        position: absolute;
+        z-index: 5;
+        bottom: 12px;
+        left: 32px;
+        width: 468px;
+        max-width: calc(100% - 64px);
+        border: 1px solid var(--edge);
+        background: rgb(20 29 25 / 0.92);
+        font-size: 13px;
+      }
+
+      #tray-tabs {
+        display: flex;
+        align-items: stretch;
+        gap: 2px;
+        padding: 4px 4px 0;
+      }
+
+      #tray .tab {
+        padding: 6px 12px;
+        border: 0;
+        background: none;
+        color: var(--muted);
+        font: inherit;
+        cursor: pointer;
+      }
+
+      #tray .tab.on {
+        background: #23372e;
+        color: var(--ink);
+      }
+
+      #tray .tab:hover:not(.on) {
+        color: var(--ink);
+      }
+
+      #tray-toggle {
+        margin-left: auto;
+        width: 26px;
+        border: 0;
+        border-radius: 6px;
+        background: none;
+        color: var(--muted);
+        font: inherit;
+        cursor: pointer;
+      }
+
+      #tray-toggle:hover {
+        color: var(--ink);
+      }
+
+      #tray:not(.open) #tray-body {
+        display: none;
+      }
+
+      #tray-body {
+        padding: 9px 10px 10px;
+        border-top: 1px solid var(--edge);
+      }
+
+      #brushes {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 8px;
+      }
+
+      /* The schedule's "?" sits at the end of the brush row, past Sleep and
+         Everything, rather than against either of them. */
+      #brushes .what {
+        margin-left: 2px;
+      }
+
+      #brushes .brush {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 9px;
+        border: 1px solid var(--edge);
+        border-radius: 7px;
+        background: none;
+        color: var(--muted);
+        font: inherit;
+        cursor: pointer;
+      }
+
+      #brushes .brush.on {
+        border-color: var(--accent);
+        color: var(--ink);
+      }
+
+      .swatch {
+        width: 11px;
+        height: 11px;
+        border-radius: 3px;
+      }
+
+      /* The two things an hour can be, and the only two colours in here. */
+      .swatch.sleep,
+      #hours li.sleep {
+        background: #3f6ea8;
+      }
+
+      .swatch.any,
+      #hours li {
+        background: #4a5560;
+      }
+
+      #hours {
+        display: flex;
+        gap: 2px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+
+      #hours li {
+        position: relative;
+        flex: 1;
+        height: 30px;
+        border-radius: 3px;
+        color: var(--muted);
+        font-size: 9px;
+        line-height: 30px;
+        text-align: center;
+        cursor: crosshair;
+      }
+
+      #hours li.sleep {
+        color: #dbe8f6;
+      }
+
+      /* Where the clock is now. */
+      #hours li.now::after {
+        content: "";
+        position: absolute;
+        inset: -3px;
+        border: 1px solid var(--accent);
+        border-radius: 5px;
+      }
+
+      /* Everything explanatory lives in here rather than on the page: one
+         floating box, filled and placed by the host, shown after a pause long
+         enough that sweeping the pointer across the panels sets nothing off. */
+      #tip {
+        position: fixed;
+        z-index: 40;
+        max-width: 280px;
+        padding: 7px 9px;
+        border: 1px solid var(--edge);
+        background: rgb(20 29 25 / 0.97);
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
+        pointer-events: none;
+      }
+
+      #tip[hidden] {
+        display: none;
+      }
+
+      /* A tooltip is always asked for, never stumbled into: it hangs off
+         either the word that names the thing, underlined, or a "?" beside
+         something that has no word of its own. Nothing else pops anything up. */
+      [data-tip] {
+        cursor: help;
+      }
+
+      .asks {
+        text-decoration: underline dotted;
+        text-decoration-color: var(--muted);
+        text-underline-offset: 3px;
+      }
+
+      .asks:hover {
+        color: var(--ink);
+        text-decoration-color: var(--accent);
+      }
+
+      .what {
+        display: inline-grid;
+        place-items: center;
+        width: 17px;
+        height: 17px;
+        padding: 0;
+        border: 1px solid var(--edge);
+        background: none;
+        color: var(--muted);
+        font: inherit;
+        font-size: 11px;
+        line-height: 1;
+      }
+
+      .what:hover,
+      .what:focus-visible {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+
+      #auto-control {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        color: var(--muted);
+        white-space: nowrap;
+        cursor: pointer;
+      }
+
+      /* The `:not([hidden])` is load-bearing. A panel is switched off by the
+         `hidden` attribute, and the UA rule behind that is only `display:
+         none` at the lowest specificity — so a bare `#tray [data-panel=…] {
+         display: flex }` outranks it and the panel shows under every tab.
+         That is exactly what happened: the management row sat under the
+         schedule strip as well as under its own tab. */
+      #tray [data-panel="management"]:not([hidden]) {
+        display: flex;
+        align-items: center;
+        gap: 22px;
+        flex-wrap: wrap;
+        padding: 2px 1px 4px;
+      }
+
+      #auto-control input {
+        accent-color: var(--accent);
+      }
+
+      /* The speed lives in the header, beside the clock it is speeding up,
+         rather than in a tray you have to open to reach it. */
       #speed-control {
         display: flex;
         align-items: center;
@@ -88,6 +572,7 @@
         margin-left: auto;
         color: var(--muted);
         white-space: nowrap;
+        cursor: pointer;
       }
 
       #speed-control input {
@@ -99,6 +584,63 @@
         min-width: 3ch;
         color: var(--ink);
         font-variant-numeric: tabular-nums;
+      }
+
+      /* What the place is told to keep in stock. One row for now; the manager
+         grows a row per automated job as they arrive. */
+      #food-control {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 6px;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+
+      #food-control input {
+        width: 5.5ch;
+        padding: 2px 4px;
+        border: 1px solid var(--edge);
+        background: none;
+        color: var(--ink);
+        font: inherit;
+        font-variant-numeric: tabular-nums;
+      }
+
+      #food-split {
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* What is aboard: one row per thing, and room for more as more turn up.
+         Name, how many, and where it is. */
+      #stock {
+        flex-basis: 100%;
+        margin-top: 4px;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+
+      #stock th {
+        padding: 2px 14px 3px 0;
+        border-bottom: 1px solid var(--edge);
+        color: var(--muted);
+        font-weight: 500;
+        text-align: left;
+      }
+
+      #stock td {
+        padding: 2px 14px 2px 0;
+        color: var(--ink);
+      }
+
+      #stock td.qty {
+        color: var(--accent);
+        font-variant-numeric: tabular-nums;
+      }
+
+      #stock td.where {
+        color: var(--muted);
       }
 
       #menu {
@@ -162,6 +704,7 @@
     <header>
       <h1>Bims</h1>
       <span id="clock">Day 1 · 08:00</span>
+      <span id="recruited" hidden>◆ Recruited — orders only</span>
       <p id="status">
         Click a fixture for its menu · 1 or drag to select · right-click the
         floor to move
@@ -172,7 +715,7 @@
           id="speed"
           type="range"
           min="1"
-          max="12"
+          max="24"
           step="1"
           value="1"
           aria-label="Simulation speed"
@@ -180,8 +723,87 @@
         <output id="speed-value" for="speed">1x</output>
       </label>
     </header>
-    <main><canvas id="stage"></canvas></main>
+    <main>
+      <canvas id="stage"></canvas>
+      <ul id="agenda" aria-label="What the Bim is doing" hidden></ul>
+      <section id="tray" class="open">
+        <div id="tray-tabs">
+          <button type="button" class="tab on" data-tab="schedule">
+            Schedule
+          </button>
+          <button type="button" class="tab" data-tab="management">
+            Management
+          </button>
+          <button
+            type="button"
+            id="tray-toggle"
+            aria-expanded="true"
+            aria-controls="tray-body"
+            title="Hide the panel"
+          >
+            ▾
+          </button>
+        </div>
+        <div id="tray-body">
+          <div data-panel="schedule">
+            <div id="brushes">
+              <button type="button" class="brush on" data-slot="1">
+                <i class="swatch sleep"></i>Sleep
+              </button>
+              <button type="button" class="brush" data-slot="0">
+                <i class="swatch any"></i>Everything
+              </button>
+            </div>
+            <ol id="hours" aria-label="The day, one slot an hour"></ol>
+          </div>
+          <div data-panel="management" hidden>
+            <label id="auto-control">
+              <input id="autonomy" type="checkbox" checked />
+              <span>Let the Bim decide</span>
+            </label>
+            <label id="food-control">
+              <span>Food to keep</span>
+              <input
+                id="food-target"
+                type="number"
+                min="0"
+                max="999"
+                step="1"
+                value="21"
+                aria-label="Food units to keep in stock"
+              />
+              <output id="food-split" for="food-target"></output>
+            </label>
+            <table id="stock" aria-label="What is aboard">
+              <thead>
+                <tr>
+                  <th>Item</th>
+                  <th>Held</th>
+                  <th>Where</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+      <aside id="side">
+        <ul id="needs" aria-label="What the Bim wants"></ul>
+        <div id="health" aria-label="How the Bim is bearing up">
+          <div class="row">
+            <span class="name">Health</span>
+            <span class="bar"><i></i></span>
+            <span class="pct"></span>
+          </div>
+          <p id="condition"></p>
+          <p id="drowsiness"></p>
+          <p id="urge"></p>
+          <p id="discomfort"></p>
+        </div>
+      </aside>
+    </main>
     <div id="menu" role="menu" hidden></div>
+    <div id="tip" role="tooltip" hidden></div>
     <p id="error" role="alert"></p>
     <script>
       // A failure to even parse bims.js cannot be caught by bims.js, and

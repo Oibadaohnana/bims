@@ -5,7 +5,7 @@
 //! how fast a day passes rather than a rate copied into each caller.
 //!
 //! The clock runs off the same `dt` as the rest of the simulation, which means
-//! the speed slider carries it along too: at 12x a day takes two minutes.
+//! the speed slider carries it along too: at 24x a day takes one minute.
 
 use crate::math::smoothstep;
 

@@ -7,9 +7,7 @@
 
 use crate::draw::{Color, DrawList};
 use crate::math::{PI, Rect, TAU, Vec2, clamp, lerp, vec2};
-use crate::room::{
-    DECK, DECK_SEAM, GLOW, GLOW_DIM, HULL, PANEL, PANEL_EDGE, PANEL_LIT, STEEL, WARN,
-};
+use crate::room::{DECK_SEAM, GLOW, GLOW_DIM, HULL, PANEL, PANEL_EDGE, PANEL_LIT, STEEL, WARN};
 
 /// Thickness of the compartment's own bulkheads.
 const WALL: f32 = 16.0;

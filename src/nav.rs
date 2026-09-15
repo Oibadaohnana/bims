@@ -221,10 +221,28 @@ impl Nav {
     }
 
     /// True when a body can walk straight from `a` to `b`.
+    /// Whether a body can actually walk the straight line from `a` to `b`.
+    ///
+    /// Sampled along the line *and* a half-cell either side of it, because a
+    /// cell is marked blocked by its centre alone: a line can pass within half
+    /// a cell of an obstacle and still find every sample free. The Bim then
+    /// walks that line, the collision push-out shoves it back, and where the
+    /// push is exactly opposite the walk — a waypoint straight through the
+    /// corner of the table — the two cancel and the Bim stands there for ever,
+    /// marching on the spot, with the chain waiting on an arrival that cannot
+    /// come. That is not a hypothetical: it stood against the table for ten
+    /// hours of game time with a trip to the heads on its agenda.
+    ///
+    /// The width costs two extra samples per step and buys a route the body
+    /// can hold to without the physics arguing with it.
     fn line_clear(&self, a: Vec2, b: Vec2) -> bool {
         let span = b - a;
         let steps = (span.len() / (CELL * 0.4)).ceil().max(1.0) as usize;
-        (0..=steps).all(|i| self.is_free(a.lerp(b, i as f32 / steps as f32)))
+        let side = span.normalize_or_zero().perp() * (CELL * 0.5);
+        (0..=steps).all(|i| {
+            let p = a.lerp(b, i as f32 / steps as f32);
+            self.is_free(p) && self.is_free(p + side) && self.is_free(p - side)
+        })
     }
 
     /// Drop every waypoint that can be skipped without hitting anything. A raw

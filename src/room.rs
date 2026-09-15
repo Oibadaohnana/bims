@@ -6,7 +6,10 @@
 //! proportions instead of stretching a table when someone widens the window.
 
 use crate::bath::Bath;
+use crate::clock::MINUTES_PER_SECOND;
+use crate::dish::Dishwasher;
 use crate::draw::{Color, DrawList};
+use crate::hydro::Bay;
 use crate::math::{PI, Rect, TAU, Vec2, clamp, lerp, vec2};
 
 pub const ROOM_W: f32 = 860.0;
@@ -81,6 +84,9 @@ const VEG: Color = Color::rgb(0.44, 0.68, 0.24);
 const VEG_DARK: Color = Color::rgb(0.30, 0.50, 0.16);
 const PLATE: Color = Color::rgb(0.86, 0.89, 0.91);
 const PLATE_RIM: Color = Color::rgb(0.64, 0.70, 0.75);
+const TOFU: Color = Color::rgb(0.93, 0.91, 0.82);
+const TOFU_EDGE: Color = Color::rgb(0.78, 0.76, 0.66);
+const SALAD: Color = Color::rgb(0.36, 0.62, 0.30);
 
 const BUNK_FRAME: Color = PANEL;
 const BUNK_LOWER: Color = Color::rgb(0.13, 0.15, 0.18);
@@ -97,6 +103,44 @@ const BLANKET_LOW: Color = Color::rgb(0.15, 0.25, 0.37);
 pub const STEEL: Color = Color::rgb(0.78, 0.83, 0.87);
 pub const GRIP: Color = Color::rgb(0.12, 0.14, 0.17);
 
+/// What is on a plate. A bowl is tofu and salad, uncooked; a stew has been in
+/// the pot. They are drawn from the same shapes in different colours, which is
+/// as much difference as a plate seen from above can carry.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Dish {
+    Stew,
+    Bowl,
+}
+
+/// What the cold store starts with, counted separately because the two are
+/// not interchangeable: a stew is two vegetables, a bowl is a block of tofu
+/// with a salad beside it. Two to one, which is the ratio the Bim eats at and
+/// the ratio the manager's food units divide into.
+pub const START_VEG: u32 = 20;
+pub const START_TOFU: u32 = 10;
+/// How full the shelves are drawn as, at the most.
+const SHELF_FULL: f32 = (START_VEG + START_TOFU) as f32;
+
+/// Something the Bim can walk up to and work with its hands.
+///
+/// Nothing aboard is remote-controlled: asking for any of these starts an
+/// errand that walks the Bim over, and the state only changes at the moment
+/// its hand arrives. That is why each one is a place as well as an effect.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Switch {
+    Hob,
+    FridgeDoor,
+    /// Wanted open, and wanted locked. These two carry what was asked for
+    /// rather than being read off the door when the hand arrives, because the
+    /// act of asking can change the door itself: dropping a trip to the heads
+    /// unlocks and opens the door the Bim locked behind itself, so a toggle
+    /// would find the lock already off and put it straight back on. A Bim
+    /// asked to unlock while sitting on the pan locked itself back in.
+    BathDoor(bool),
+    BathLock(bool),
+    Dishwasher,
+}
+
 /// Fixtures a click can land on.
 pub const HIT_NONE: u32 = 0;
 pub const HIT_FRIDGE: u32 = 1;
@@ -104,11 +148,21 @@ pub const HIT_STOVE: u32 = 2;
 pub const HIT_BED: u32 = 3;
 pub const HIT_TOILET: u32 = 4;
 pub const HIT_DOOR: u32 = 5;
+pub const HIT_DISHWASHER: u32 = 6;
+pub const HIT_HYDRO: u32 = 7;
 
 /// How far the lower bunk sits down and to the right of the upper one. It is
 /// the only part of it you can see from above, so the whole thing reading as a
 /// bunk bed rather than a bed rests on this.
 const BUNK_DROP: Vec2 = vec2(10.0, 22.0);
+
+/// How long the hob will sit lit with nothing coming up to heat before it
+/// shuts itself off, in game minutes.
+///
+/// It has to clear the gap a normal meal leaves: the stew finishes about ten
+/// minutes before the Bim has served it and reached for the knob, and cutting
+/// out in the middle of that would be a bug rather than a safety feature.
+const HOB_TIMEOUT: f32 = 15.0;
 
 /// How fast doors and drawers travel, in fractions of open per second.
 const SWING_RATE: f32 = 3.0;
@@ -125,6 +179,13 @@ pub struct Room {
     pub bed: Rect,
     /// The heads, which owns its own walls, door and fittings.
     pub bath: Bath,
+    /// The galley dishwasher, which runs on the clock rather than on the Bim.
+    pub dishwasher: Dishwasher,
+    /// The hydroponic bay. It lives here because it is furniture — something
+    /// to walk round, click on and draw — but the game drives its clock,
+    /// because the target it works to is the manager's rather than the
+    /// room's.
+    pub bay: Bay,
 
     /// 0 shut, 1 wide open. Animated towards `fridge_target`.
     pub fridge_door: f32,
@@ -135,15 +196,29 @@ pub struct Room {
     pub stove_on: bool,
     /// Lags `stove_on` so the burner glows up and fades rather than snapping.
     pub stove_heat: f32,
+    /// Game minutes the hob has been lit with nothing cooking on it.
+    stove_idle: f32,
 
     /// How full the pot is, and how far along the cooking is.
     pub pot_contents: f32,
+    /// Helpings left in the pot. A stew is cooked once and eaten twice, so
+    /// this is what says whether the Bim has to cook at all.
+    pub pot_servings: u32,
     pub pot_cooked: f32,
 
     /// The whole vegetable on the board, and the slices piling up beside it.
     pub board_veg: f32,
     pub board_slices: u32,
     pub knife_on_board: bool,
+    /// What is being chopped, which is all that separates tofu from a carrot
+    /// as far as the board is concerned.
+    pub board_tofu: bool,
+    /// What the meal in progress is, for the plate and the bowl.
+    pub dish: Dish,
+    /// Produce left in the cold store.
+    /// The cold store, counted in the two things that go into a meal.
+    pub veg: u32,
+    pub tofu: u32,
 
     /// Plates in the world, carrying how full they are.
     pub plate_on_counter: Option<f32>,
@@ -196,17 +271,25 @@ impl Room {
             chair,
             bed,
             bath: Bath::new(interior),
+            dishwasher: Dishwasher::new(counter),
+            bay: Bay::new(interior),
             fridge_door: 0.0,
             fridge_target: 0.0,
             drawer_open: 0.0,
             drawer_target: 0.0,
             stove_on: false,
             stove_heat: 0.0,
+            stove_idle: 0.0,
             pot_contents: 0.0,
+            pot_servings: 0,
             pot_cooked: 0.0,
             board_veg: 0.0,
             board_slices: 0,
             knife_on_board: false,
+            board_tofu: false,
+            dish: Dish::Stew,
+            veg: START_VEG,
+            tofu: START_TOFU,
             plate_on_counter: None,
             plate_on_table: None,
             blanket: 0.0,
@@ -233,6 +316,63 @@ impl Room {
 
     pub fn drawer_station(&self) -> Vec2 {
         self.station_at(self.drawer.center().x)
+    }
+
+    pub fn dishwasher_station(&self) -> Vec2 {
+        self.station_at(self.dishwasher.face.center().x)
+    }
+
+    /// The thing itself: where the Bim's hand has to end up.
+    fn switch_target(&self, which: Switch) -> Vec2 {
+        match which {
+            Switch::Hob => self.knob_pos(),
+            Switch::FridgeDoor => self.fridge.center(),
+            Switch::BathDoor(_) | Switch::BathLock(_) => self.bath.door.center(),
+            Switch::Dishwasher => self.dishwasher.face.center(),
+        }
+    }
+
+    /// Where it stands to reach that. The bathroom door has a panel on both
+    /// sides, so which one depends on where the Bim is when it sets off — a
+    /// Bim shut inside would otherwise be sent to a handle it cannot reach.
+    pub fn switch_station(&self, which: Switch, from: Vec2) -> Vec2 {
+        match which {
+            Switch::Hob => self.stove_station(),
+            Switch::FridgeDoor => self.fridge_station(),
+            Switch::BathDoor(_) | Switch::BathLock(_) => {
+                if self.bath.shell.contains(from) {
+                    self.bath.inside_station()
+                } else {
+                    self.bath.outside_station()
+                }
+            }
+            Switch::Dishwasher => self.dishwasher_station(),
+        }
+    }
+
+    /// Which way it turns to work it: towards the thing itself.
+    pub fn switch_facing(&self, which: Switch, from: Vec2) -> f32 {
+        (self.switch_target(which) - self.switch_station(which, from)).angle()
+    }
+
+    /// Work it. Called the instant the Bim's hand reaches it, so what it does
+    /// happens then and not when the player asked. The hob, the fridge and the
+    /// dishwasher read the state they find; the bathroom door and its lock are
+    /// set to what was asked for instead — see [`Switch`].
+    pub fn work_switch(&mut self, which: Switch) {
+        match which {
+            Switch::Hob => {
+                let on = self.stove_on;
+                self.set_stove(!on);
+            }
+            Switch::FridgeDoor => {
+                let open = self.fridge_is_open();
+                self.set_fridge_open(!open);
+            }
+            Switch::BathDoor(open) => self.bath.set_open(open),
+            Switch::BathLock(locked) => self.bath.set_locked(locked),
+            Switch::Dishwasher => self.dishwasher.start(),
+        }
     }
 
     pub fn stove_station(&self) -> Vec2 {
@@ -299,13 +439,14 @@ impl Room {
     /// Everything fixed that the Bim has to walk around. The bathroom door is
     /// not in here: it comes and goes, and the pathfinder handles it
     /// separately through [`Room::closed_door`].
-    pub fn solids(&self) -> [Rect; 7] {
+    pub fn solids(&self) -> [Rect; 8] {
         let [north_left, north_right, west] = self.bath.solids();
         [
             self.counter,
             self.fridge,
             self.table,
             self.bed,
+            self.bay.frame,
             north_left,
             north_right,
             west,
@@ -324,8 +465,12 @@ impl Room {
             HIT_STOVE
         } else if self.fridge.expand(4.0).contains(p) {
             HIT_FRIDGE
+        } else if self.dishwasher.face.expand(6.0).contains(p) {
+            HIT_DISHWASHER
         } else if self.bed.expand(4.0).contains(p) {
             HIT_BED
+        } else if self.bay.frame.expand(6.0).contains(p) {
+            HIT_HYDRO
         } else {
             self.bath.hit(p)
         }
@@ -347,6 +492,24 @@ impl Room {
 
     pub fn set_stove(&mut self, on: bool) {
         self.stove_on = on;
+        // Lighting it starts the clock again, however it was lit.
+        self.stove_idle = 0.0;
+    }
+
+    /// Game minutes before the hob gives up and turns itself off, or zero when
+    /// it is not counting — off already, or with something actually cooking.
+    pub fn stove_idle_left(&self) -> f32 {
+        if !self.stove_on || self.is_cooking() {
+            return 0.0;
+        }
+        (HOB_TIMEOUT - self.stove_idle).max(0.0)
+    }
+
+    /// Something in the pot that has not finished coming up to heat. A stew
+    /// already done is not cooking — it is just sitting on a live ring, which
+    /// is the case the timeout is there to catch.
+    fn is_cooking(&self) -> bool {
+        self.pot_contents > 0.0 && self.pot_cooked < 1.0
     }
 
     /// Pull the blanket up over a sleeper, or make the bed again.
@@ -355,17 +518,56 @@ impl Room {
     }
 
     /// Clear the worktop so a fresh cook does not inherit the last one's mess.
-    pub fn reset_for_cooking(&mut self) {
+    pub fn reset_for_cooking(&mut self, dish: Dish) {
         self.board_veg = 0.0;
         self.board_slices = 0;
         self.knife_on_board = false;
+        self.board_tofu = dish == Dish::Bowl;
+        self.dish = dish;
         self.plate_on_counter = None;
         self.plate_on_table = None;
+    }
+
+    /// One trip to the fridge for `dish`, taking what that trip carries: a
+    /// vegetable for a stew — twice, once per portion — and for a bowl the
+    /// block of tofu and the salad together.
+    pub fn take_from_fridge(&mut self, dish: Dish) {
+        match dish {
+            Dish::Stew => self.veg = self.veg.saturating_sub(1),
+            Dish::Bowl => {
+                self.tofu = self.tofu.saturating_sub(1);
+                self.veg = self.veg.saturating_sub(1);
+            }
+        }
+    }
+
+    /// Whether the store holds what this recipe needs, all of it: a chain that
+    /// starts without one of its halves ends with the Bim eating an empty
+    /// plate.
+    pub fn can_cook(&self, dish: Dish) -> bool {
+        match dish {
+            Dish::Stew => self.veg >= 2,
+            Dish::Bowl => self.tofu >= 1 && self.veg >= 1,
+        }
+    }
+
+    /// Whether there is enough left for a meal of some sort.
+    pub fn has_ingredients(&self) -> bool {
+        self.can_cook(Dish::Stew) || self.can_cook(Dish::Bowl)
+    }
+
+    /// Put a crop from the bay away.
+    pub fn store(&mut self, crop: crate::hydro::Crop) {
+        match crop {
+            crate::hydro::Crop::Veg => self.veg += 1,
+            crate::hydro::Crop::Soy => self.tofu += 1,
+        }
     }
 
     pub fn update(&mut self, dt: f32) {
         self.time += dt;
         self.bath.update(dt);
+        self.dishwasher.update(dt);
 
         let step = SWING_RATE * dt;
         self.fridge_door += clamp(self.fridge_target - self.fridge_door, -step, step);
@@ -383,6 +585,18 @@ impl Room {
         if self.pot_contents > 0.0 && self.stove_heat > 0.4 {
             self.pot_cooked = (self.pot_cooked + dt * 0.22).min(1.0);
         }
+
+        // A hob left lit with nothing coming up to heat shuts itself off. The
+        // count only runs while nothing is cooking, so a meal in progress
+        // keeps resetting it and is never cut short.
+        if self.stove_on && !self.is_cooking() {
+            self.stove_idle += dt * MINUTES_PER_SECOND;
+            if self.stove_idle >= HOB_TIMEOUT {
+                self.set_stove(false);
+            }
+        } else if self.stove_on {
+            self.stove_idle = 0.0;
+        }
     }
 
     // --- drawing ---------------------------------------------------------
@@ -394,6 +608,7 @@ impl Room {
         self.draw_fridge(list);
         self.draw_table(list);
         self.draw_bunk(list);
+        self.bay.draw(list);
         self.bath.draw(list);
     }
 
@@ -741,26 +956,45 @@ impl Room {
         let b = self.board;
         list.rect(b.center(), b.size(), 0.0, 4.0, BOARD);
         list.stroke_rect(b.center(), b.size(), 0.0, 4.0, 1.5, GLOW.alpha(0.35));
+        // Tofu is a block and chops into cubes; a vegetable is a lump and
+        // chops into rounds. Same board, same knife, same counter of slices.
+        let (whole, bits) = if self.board_tofu {
+            (TOFU, TOFU_EDGE)
+        } else {
+            (VEG, VEG_DARK)
+        };
         if self.board_veg > 0.0 {
             let grow = 0.35 + 0.65 * self.board_veg;
             let at = vec2(b.min.x + 26.0, b.center().y);
-            list.ellipse(at, vec2(30.0 * grow, 17.0), 0.0, VEG);
-            list.ellipse(at + vec2(-13.0 * grow, 0.0), vec2(8.0, 12.0), 0.0, VEG_DARK);
+            if self.board_tofu {
+                list.rect(at, vec2(30.0 * grow, 20.0), 0.0, 3.0, whole);
+                list.stroke_rect(at, vec2(30.0 * grow, 20.0), 0.0, 3.0, 1.5, bits);
+            } else {
+                list.ellipse(at, vec2(30.0 * grow, 17.0), 0.0, whole);
+                list.ellipse(at + vec2(-13.0 * grow, 0.0), vec2(8.0, 12.0), 0.0, bits);
+            }
         }
         for i in 0..self.board_slices {
-            // Slices pile up to the right of what is left of the vegetable.
+            // Slices pile up to the right of what is left of it.
             let col = (i % 5) as f32;
             let row = (i / 5) as f32;
             let at = vec2(b.min.x + 48.0 + col * 9.5, b.center().y - 6.0 + row * 11.0);
-            list.circle(at, 9.0, VEG);
-            list.circle(at, 4.0, VEG_DARK);
+            if self.board_tofu {
+                list.rect(at, vec2(9.0, 9.0), 0.0, 2.0, whole);
+                list.stroke_rect(at, vec2(9.0, 9.0), 0.0, 2.0, 1.0, bits);
+            } else {
+                list.circle(at, 9.0, whole);
+                list.circle(at, 4.0, bits);
+            }
         }
         if self.knife_on_board {
             draw_knife(list, b.center() + vec2(26.0, 13.0), 0.35);
         }
 
+        self.dishwasher.draw(list);
+
         if let Some(fill) = self.plate_on_counter {
-            draw_plate(list, self.serving_pos(), fill, self.pot_cooked);
+            draw_plate(list, self.serving_pos(), fill, self.pot_cooked, self.dish);
         }
     }
 
@@ -886,7 +1120,14 @@ impl Room {
                     1.0,
                     SHELF,
                 );
+                // Eight places on the shelves for twenty items, so each one
+                // stands for a couple and the shelves visibly empty out.
+                let stock = (self.veg + self.tofu) as f32;
+                let shown = (stock * 8.0 / SHELF_FULL).ceil().min(8.0) as usize;
                 for i in 0..4 {
+                    if row * 4 + i >= shown {
+                        continue;
+                    }
                     let at = vec2(f.min.x + 16.0 + i as f32 * 15.0, *y - 7.0);
                     let c = STOCK[(row * 4 + i) % STOCK.len()];
                     list.ellipse(at, vec2(10.0, 11.0), 0.0, c.alpha(self.fridge_door));
@@ -946,7 +1187,13 @@ impl Room {
         );
 
         if let Some(fill) = self.plate_on_table {
-            draw_plate(list, self.table_plate_pos(), fill, self.pot_cooked);
+            draw_plate(
+                list,
+                self.table_plate_pos(),
+                fill,
+                self.pot_cooked,
+                self.dish,
+            );
             // Cutlery laid either side of the plate.
             let p = self.table_plate_pos();
             list.rect(p + vec2(-27.0, 0.0), vec2(4.0, 26.0), 0.0, 2.0, STEEL);
@@ -966,21 +1213,42 @@ const STOCK: [Color; 6] = [
 ];
 
 /// A plate, optionally with a helping of stew on it.
-pub fn draw_plate(list: &mut DrawList, at: Vec2, fill: f32, cooked: f32) {
+pub fn draw_plate(list: &mut DrawList, at: Vec2, fill: f32, cooked: f32, dish: Dish) {
     list.circle(at, 44.0, PLATE_RIM);
     list.circle(at, 38.0, PLATE);
-    if fill > 0.0 {
-        let stew = Color::rgb(
-            lerp(BROTH_RAW.r, BROTH_DONE.r, cooked),
-            lerp(BROTH_RAW.g, BROTH_DONE.g, cooked),
-            lerp(BROTH_RAW.b, BROTH_DONE.b, cooked),
-        );
-        list.circle(at, 30.0 * fill.clamp(0.0, 1.0).sqrt(), stew);
-        // A few chunks so the helping reads as food rather than a disc.
-        for i in 0..4 {
-            let a = i as f32 * (TAU / 4.0) + 0.6;
-            let p = at + Vec2::from_angle(a) * (9.0 * fill);
-            list.circle(p, 7.0 * fill, VEG.alpha(0.85));
+    if fill <= 0.0 {
+        return;
+    }
+    let spread = 30.0 * fill.clamp(0.0, 1.0).sqrt();
+    match dish {
+        Dish::Stew => {
+            let stew = Color::rgb(
+                lerp(BROTH_RAW.r, BROTH_DONE.r, cooked),
+                lerp(BROTH_RAW.g, BROTH_DONE.g, cooked),
+                lerp(BROTH_RAW.b, BROTH_DONE.b, cooked),
+            );
+            list.circle(at, spread, stew);
+            // A few chunks so the helping reads as food rather than a disc.
+            for i in 0..4 {
+                let a = i as f32 * (TAU / 4.0) + 0.6;
+                let p = at + Vec2::from_angle(a) * (9.0 * fill);
+                list.circle(p, 7.0 * fill, VEG.alpha(0.85));
+            }
+        }
+        // A bowl is loose: leaves underneath, cubes of tofu on top, and no
+        // broth to pool, so it reads as cold food rather than a helping.
+        Dish::Bowl => {
+            list.circle(at, spread, SALAD);
+            for i in 0..5 {
+                let a = i as f32 * (TAU / 5.0) + 0.3;
+                let p = at + Vec2::from_angle(a) * (11.0 * fill);
+                list.ellipse(p, vec2(15.0, 9.0) * fill, a, SALAD);
+            }
+            for i in 0..4 {
+                let a = i as f32 * (TAU / 4.0) + 1.1;
+                let p = at + Vec2::from_angle(a) * (8.0 * fill);
+                list.rect(p, vec2(10.0, 10.0) * fill, a, 2.0, TOFU);
+            }
         }
     }
 }

@@ -4,7 +4,7 @@
 use crate::draw::{Color, DrawList};
 use crate::math::{PI, Rect, TAU, Vec2, angle_lerp, approach, clamp, lerp, vec2, wrap_angle};
 use crate::rng::Rng;
-use crate::room::{GRIP, STEEL, draw_knife, draw_plate, draw_spoon};
+use crate::room::{Dish, GRIP, STEEL, draw_knife, draw_plate, draw_spoon};
 
 // --- behaviour tuning ---------------------------------------------------
 
@@ -63,11 +63,24 @@ const OUTLINE: Color = Color::rgba(0.05, 0.08, 0.07, 0.55);
 const SHADOW: Color = Color::rgba(0.0, 0.0, 0.0, 0.20);
 const VEG: Color = Color::rgb(0.44, 0.68, 0.24);
 const VEG_DARK: Color = Color::rgb(0.30, 0.50, 0.16);
+const TOFU: Color = Color::rgb(0.93, 0.91, 0.82);
+const TOFU_EDGE: Color = Color::rgb(0.78, 0.76, 0.66);
+/// What a Bim that has had an accident is covered in. The same colour as the
+/// mess on the deck, so the two read as the same substance.
+const GRIME: Color = Color::rgb(0.24, 0.18, 0.09);
 /// The Zs that float off a sleeping Bim.
 const SLEEP_Z: Color = Color::rgb(0.80, 0.90, 0.95);
+/// The same body, with everything warm taken out of it.
+const GONE_SHIRT: Color = Color::rgb(0.30, 0.36, 0.42);
+const GONE_SLEEVE: Color = Color::rgb(0.25, 0.30, 0.36);
+const GONE_SKIN: Color = Color::rgb(0.55, 0.53, 0.50);
+const GONE_HAIR: Color = Color::rgb(0.18, 0.17, 0.16);
 /// Shared with the trail and the order marker, so everything the player is
 /// steering reads as one colour.
 pub const ACCENT: Color = Color::rgb(0.50, 0.82, 0.66);
+/// A Bim under direct orders. Its own colour, so being recruited reads at a
+/// glance and does not have to be told apart from being merely selected.
+const COMMAND: Color = Color::rgb(1.0, 0.82, 0.35);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Activity {
@@ -82,11 +95,14 @@ enum Activity {
 pub enum Held {
     Nothing,
     Vegetable,
+    /// A block of tofu, which is a vegetable as far as the chain is concerned
+    /// and a different shape as far as the eye is.
+    Tofu,
     Slices,
     Knife,
     Spoon,
-    /// A plate, carrying how full it is.
-    Plate(f32),
+    /// A plate or a bowl, carrying how full it is and which it is.
+    Plate(f32, Dish),
 }
 
 /// What the hands are busy doing. Each one drives its own arm animation.
@@ -105,10 +121,19 @@ pub enum Action {
     Sleep,
     /// Both hands together under the tap, turning over one another.
     Wash,
+    /// Hopping on the spot: what a Bim that needs the heads does while it
+    /// waits, and the only warning the player gets before an accident.
+    Fidget,
+    /// Doubled over, being sick on the deck.
+    Retch,
 }
 
 /// One turn of the hands under the tap.
 const SCRUB_PERIOD: f32 = 0.55;
+
+/// One hop on the spot, and one heave.
+const HOP_PERIOD: f32 = 0.42;
+const HEAVE_PERIOD: f32 = 0.75;
 
 /// How long one breath takes while asleep, in seconds.
 const BREATH_PERIOD: f32 = 5.4;
@@ -150,6 +175,24 @@ pub struct Character {
     tool: Held,
     action: Action,
     action_phase: f32,
+
+    /// How fast it walks, as a fraction of its usual pace. Hunger slows it.
+    pace: f32,
+    /// Once dead it does nothing at all, and is drawn where it fell.
+    dead: bool,
+    /// Dropped off standing up. Holds still, keeps whatever it was carrying
+    /// and whatever route it was on, and picks both up again on waking.
+    napping: bool,
+    /// Under direct orders: it stands where it is put rather than pottering
+    /// about, and nothing starts of its own accord.
+    recruited: bool,
+    /// How filthy the Bim itself is, 0 clean to 1 covered. Kept here rather
+    /// than with the deck's own mess because this is the share that walks
+    /// away with it.
+    filth: f32,
+    /// Seconds left of a hop or a heave. Both are short and both end by
+    /// themselves, so nothing else has to remember to stop them.
+    antic: f32,
 }
 
 impl Character {
@@ -175,6 +218,12 @@ impl Character {
             tool: Held::Nothing,
             action: Action::None,
             action_phase: 0.0,
+            pace: 1.0,
+            dead: false,
+            napping: false,
+            recruited: false,
+            filth: 0.0,
+            antic: 0.0,
         };
         c.begin_walk(rng);
         c
@@ -192,6 +241,15 @@ impl Character {
     /// True once an ordered walk has finished, so a task can move on.
     pub fn arrived(&self) -> bool {
         self.path.is_empty()
+    }
+
+    /// Where the route the Bim is on ends, or `None` if it is not on one.
+    ///
+    /// A route is planned once and not replanned, so anything that would put
+    /// something in the Bim's way — a door shutting itself, say — has to know
+    /// where it was going before it does.
+    pub fn destination(&self) -> Option<Vec2> {
+        self.path.last().copied()
     }
 
     // --- orders and scripting -------------------------------------------
@@ -283,11 +341,105 @@ impl Character {
         self.main
     }
 
+    pub fn tool_held(&self) -> Held {
+        self.tool
+    }
+
+    /// Where the Bim is sitting or lying and which way it faces, if it is on
+    /// anything at all. Saved when a task is put down, because standing up is
+    /// part of letting go of one.
+    pub fn seat(&self) -> Option<(Vec2, f32)> {
+        if self.seated {
+            Some((self.pos, self.face_target.unwrap_or(self.heading)))
+        } else {
+            None
+        }
+    }
+
+    /// How fast it walks, as a fraction of its usual pace.
+    pub fn set_pace(&mut self, pace: f32) {
+        self.pace = pace;
+    }
+
+    /// Drop off on the spot, or come round again. Unlike dying or being sent
+    /// to bed this keeps the path and the hands exactly as they were, so the
+    /// Bim carries on with whatever it was doing.
+    pub fn nod_off(&mut self, napping: bool) {
+        self.napping = napping;
+        self.speed = 0.0;
+        self.target_speed = 0.0;
+        self.set_action(if napping { Action::Sleep } else { Action::None });
+    }
+
+    pub fn is_napping(&self) -> bool {
+        self.napping
+    }
+
+    pub fn set_recruited(&mut self, recruited: bool) {
+        self.recruited = recruited;
+    }
+
+    pub fn is_recruited(&self) -> bool {
+        self.recruited
+    }
+
+    /// It stops where it stands, and stays there.
+    pub fn die(&mut self) {
+        self.dead = true;
+        self.path.clear();
+        self.speed = 0.0;
+        self.target_speed = 0.0;
+        self.seated = false;
+        self.main = Held::Nothing;
+        self.tool = Held::Nothing;
+        self.action = Action::None;
+    }
+
+    pub fn is_dead(&self) -> bool {
+        self.dead
+    }
+
     pub fn set_action(&mut self, action: Action) {
         if self.action != action {
             self.action = action;
             self.action_phase = 0.0;
         }
+    }
+
+    // --- mess -------------------------------------------------------------
+
+    /// How filthy the Bim itself is, 0 to 1.
+    pub fn filth(&self) -> f32 {
+        self.filth
+    }
+
+    /// Cover it in something. Takes the worse of what it has on it already and
+    /// what it has just picked up: an accident cannot make a Bim cleaner.
+    pub fn soil(&mut self, amount: f32) {
+        self.filth = self.filth.max(amount).clamp(0.0, 1.0);
+    }
+
+    /// Get some of it off again. Washing at the basin is the only thing that
+    /// does this so far, and it is worth what a basin is worth.
+    pub fn wash(&mut self, amount: f32) {
+        self.filth = (self.filth - amount).max(0.0);
+    }
+
+    /// Hop about on the spot for a moment, or be sick. Neither disturbs what
+    /// the Bim was doing — they are things that happen *to* it — so both are
+    /// refused outright while it is in the middle of a scripted step, where
+    /// the pose belongs to the chain.
+    pub fn antic(&mut self, action: Action, seconds: f32) {
+        if self.scripted || self.seated || self.dead || self.napping {
+            return;
+        }
+        self.set_action(action);
+        self.antic = seconds;
+    }
+
+    /// Whether one is running, so the game does not start another over it.
+    pub fn in_antic(&self) -> bool {
+        self.antic > 0.0
     }
 
     // --- behaviour ------------------------------------------------------
@@ -303,7 +455,7 @@ impl Character {
             rng.gaussian() * 0.8
         };
         self.intent = wrap_angle(self.intent + turn);
-        self.target_speed = rng.range(34.0, 78.0);
+        self.target_speed = self.pace * rng.range(34.0, 78.0);
     }
 
     fn begin_pause(&mut self, rng: &mut Rng) {
@@ -426,11 +578,12 @@ impl Character {
         self.intent = to.angle();
         // Ease off on the final approach so it settles on the spot instead of
         // overshooting and circling back. Intermediate corners keep full speed.
-        self.target_speed = if last_leg {
-            MARCH_SPEED * clamp(distance / SLOWDOWN_RADIUS, 0.3, 1.0)
-        } else {
-            MARCH_SPEED
-        };
+        self.target_speed = self.pace
+            * if last_leg {
+                MARCH_SPEED * clamp(distance / SLOWDOWN_RADIUS, 0.3, 1.0)
+            } else {
+                MARCH_SPEED
+            };
         self.intent
     }
 
@@ -441,12 +594,23 @@ impl Character {
     }
 
     pub fn update(&mut self, dt: f32, interior: Rect, solids: &[Rect], rng: &mut Rng) {
+        if self.dead || self.napping {
+            // Nothing moves, but the clock still runs so the shadow, the
+            // breathing and the selection ring do not freeze mid-pulse.
+            self.idle += dt;
+            self.select_pulse = (self.select_pulse + dt * 2.2) % TAU;
+            self.action_phase += dt;
+            return;
+        }
         // A task outranks a player order, which outranks the Bim's own plans.
         let goal = if self.seated {
             self.hold_still()
         } else if self.activity == Activity::Marching {
             self.follow_order()
-        } else if self.scripted {
+        } else if self.scripted || self.recruited {
+            // Recruited, it waits to be told. The wander is the one thing it
+            // does unprompted, so that is the one thing being under orders
+            // takes away.
             self.hold_still()
         } else {
             self.wander(dt, interior, solids, rng)
@@ -472,6 +636,17 @@ impl Character {
         self.idle += dt;
         self.select_pulse = (self.select_pulse + dt * 2.2) % TAU;
         self.action_phase += dt;
+
+        // A hop or a heave runs itself down and puts the Bim back to standing.
+        if self.antic > 0.0 {
+            self.antic -= dt;
+            if self.antic <= 0.0 {
+                self.antic = 0.0;
+                if matches!(self.action, Action::Fidget | Action::Retch) {
+                    self.set_action(Action::None);
+                }
+            }
+        }
     }
 
     // --- rendering ------------------------------------------------------
@@ -560,10 +735,36 @@ impl Character {
                     reach: 0.6,
                 }
             }
+            Action::Fidget => {
+                // Arms tucked in and swapping, the way you do.
+                let turn = (p * TAU / HOP_PERIOD).sin();
+                Pose {
+                    left: 2.0 + turn * 3.0,
+                    right: 2.0 - turn * 3.0,
+                    tool: vec2(15.0, 12.0),
+                    tool_rot: 0.0,
+                    reach: 0.0,
+                }
+            }
+            Action::Retch => {
+                // Both arms forward and down, hands on the knees.
+                let heave = (p * TAU / HEAVE_PERIOD).sin().abs();
+                Pose {
+                    left: 6.0 + heave * 3.0,
+                    right: 6.0 + heave * 3.0,
+                    tool: vec2(18.0, 8.0),
+                    tool_rot: 0.0,
+                    reach: 0.8,
+                }
+            }
         }
     }
 
     pub fn draw(&self, list: &mut DrawList) {
+        if self.dead {
+            self.draw_fallen(list);
+            return;
+        }
         let swing = self.stride.sin();
         let moving = clamp(self.speed / 60.0, 0.0, 1.0);
         // Breathing while still, a light bounce while walking.
@@ -580,7 +781,7 @@ impl Character {
         };
         let pose = self.pose(swing, moving);
 
-        if self.selected {
+        if self.selected && !self.dead {
             // A ring on the ground under the Bim, breathing gently so it stays
             // legible against the floor.
             let pulse = (1.0 + self.select_pulse.sin() * 0.04) * BODY_SCALE;
@@ -588,15 +789,44 @@ impl Character {
             list.ring(self.pos, 40.0 * pulse, 2.5, ACCENT.alpha(0.85));
         }
 
+        if self.recruited && !self.dead {
+            // A wider ring outside the selection one, broken into four arcs so
+            // the two never read as the same thing. Shown whether or not the
+            // Bim is selected: being under orders outlasts a click elsewhere.
+            let pulse = (1.0 + self.select_pulse.sin() * 0.05) * BODY_SCALE;
+            let span = 52.0 * pulse;
+            list.ring(self.pos, span, 1.5, COMMAND.alpha(0.35));
+            for i in 0..4 {
+                let a = i as f32 * (TAU / 4.0) + self.select_pulse * 0.25;
+                let at = self.pos + Vec2::from_angle(a) * (span * 0.5);
+                list.rect(at, vec2(9.0, 3.0), a + PI * 0.5, 1.5, COMMAND.alpha(0.9));
+            }
+        }
+
+        // Hopping on the spot, or doubled over. Seen from above a jump is the
+        // figure growing and its shadow shrinking away underneath it, and a
+        // heave is the reverse: hunched down and small.
+        let (hop, heave) = match self.action {
+            Action::Fidget => (
+                (self.action_phase * TAU / HOP_PERIOD).sin().max(0.0),
+                0.0f32,
+            ),
+            Action::Retch => (0.0, (self.action_phase * TAU / HEAVE_PERIOD).sin().abs()),
+            _ => (0.0, 0.0),
+        };
+        let lift = 1.0 + 0.16 * hop - 0.10 * heave;
+        let scale = BODY_SCALE * lift;
+
         // Cast under the body and turned with it, so the halo always fits.
+        // It pulls in and darkens as the Bim leaves the deck.
         list.ellipse(
-            self.pos + vec2(0.0, 4.5 * BODY_SCALE),
-            vec2(28.0, 36.0) * BODY_SCALE,
+            self.pos + vec2(0.0, (4.5 + 7.0 * hop) * BODY_SCALE),
+            vec2(28.0, 36.0) * BODY_SCALE * (1.0 - 0.22 * hop),
             self.heading,
             SHADOW,
         );
 
-        let mut b = list.brush(self.pos, self.heading, BODY_SCALE);
+        let mut b = list.brush(self.pos, self.heading, scale);
 
         // Boots, under the body: one strides forward as the other trails. A
         // seated Bim tucks them in.
@@ -617,6 +847,34 @@ impl Character {
         };
         b.ellipse(Vec2::ZERO, vec2(25.0, 33.0) * breath, 0.0, OUTLINE);
         b.ellipse(Vec2::ZERO, vec2(22.0, 30.0) * breath, 0.0, SHIRT);
+
+        // What it has got on itself. Down the front and around the legs, where
+        // it would be, and in the same colour as the mess on the deck so the
+        // two read as the same substance.
+        if self.filth > 0.001 {
+            let deep = self.filth.clamp(0.0, 1.0);
+            for (i, local) in [
+                vec2(-4.0, 5.0),
+                vec2(2.0, -6.5),
+                vec2(-8.0, -3.0),
+                vec2(6.0, 4.0),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                // The worse it is, the more of the four show.
+                if (i as f32 + 1.0) / 4.0 > deep + 0.25 {
+                    continue;
+                }
+                let size = 7.0 + 4.0 * deep;
+                b.ellipse(
+                    local,
+                    vec2(size, size * 0.85),
+                    0.0,
+                    GRIME.alpha(0.55 + 0.4 * deep),
+                );
+            }
+        }
 
         // Arms: swinging while walking, reaching or working otherwise.
         for (side, forward) in [(-1.0f32, pose.left), (1.0f32, pose.right)] {
@@ -657,6 +915,28 @@ impl Character {
         }
     }
 
+    /// Face down where it dropped. Drawn cold and flat — no bob, no breath,
+    /// no glancing about — because every other state has one of those, and
+    /// the absence is what reads as dead.
+    fn draw_fallen(&self, list: &mut DrawList) {
+        list.ellipse(
+            self.pos + vec2(3.0, 5.0),
+            vec2(34.0, 40.0) * BODY_SCALE,
+            self.heading,
+            SHADOW,
+        );
+        let mut b = list.brush(self.pos, self.heading, BODY_SCALE);
+        b.ellipse(Vec2::ZERO, vec2(26.0, 34.0), 0.0, OUTLINE);
+        b.ellipse(Vec2::ZERO, vec2(22.0, 30.0), 0.0, GONE_SHIRT);
+        for side in [-1.0f32, 1.0] {
+            b.ellipse(vec2(-4.0, 14.0 * side), vec2(10.0, 10.0), 0.0, GONE_SLEEVE);
+        }
+        // Head turned aside, face down.
+        b.ellipse(vec2(3.0, 4.0), vec2(15.5, 15.5), 0.0, OUTLINE);
+        b.ellipse(vec2(3.0, 4.0), vec2(13.0, 13.0), 0.0, GONE_SKIN);
+        b.ellipse(vec2(1.0, 4.0), vec2(11.0, 12.5), 0.4, GONE_HAIR);
+    }
+
     /// Whatever is in the hands, placed in front of the body.
     fn draw_held(&self, list: &mut DrawList, pose: Pose) {
         let to_world = |local: Vec2| self.pos + (local * BODY_SCALE).rotate(self.heading);
@@ -684,12 +964,18 @@ impl Character {
                     list.circle(at, 4.0, VEG_DARK);
                 }
             }
-            Held::Plate(fill) => {
+            Held::Tofu => {
+                let at = to_world(vec2(18.0 + pose.reach * 13.0, -6.0));
+                list.rect(at, vec2(28.0, 20.0), self.heading, 3.0, TOFU);
+                list.stroke_rect(at, vec2(28.0, 20.0), self.heading, 3.0, 1.5, TOFU_EDGE);
+            }
+            Held::Plate(fill, dish) => {
                 draw_plate(
                     list,
                     to_world(vec2(23.0 + pose.reach * 5.0, 0.0)),
                     fill,
                     1.0,
+                    dish,
                 );
             }
             Held::Knife => draw_knife(list, to_world(vec2(20.0, -6.0)), self.heading),

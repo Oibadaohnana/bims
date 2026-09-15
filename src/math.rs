@@ -32,6 +32,11 @@ impl Vec2 {
         self.y.atan2(self.x)
     }
 
+    /// Turned a quarter turn: the same length, at right angles to itself.
+    pub fn perp(self) -> Vec2 {
+        vec2(-self.y, self.x)
+    }
+
     pub fn normalize_or_zero(self) -> Vec2 {
         let l = self.len();
         if l > 1e-6 {

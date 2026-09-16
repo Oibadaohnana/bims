@@ -405,11 +405,32 @@ function boot() {
 
   // --- starting ---------------------------------------------------------
   //
-  // Where the ship builder will open. Until it exists this shows what it
-  // would have been handed, so the whole path from the menu to a configured
-  // game is real and can be tested.
+  // Start hands the game over to the ship designer — `web/ship.html`, a page
+  // of its own with its own wasm. What crosses is four numbers in a query
+  // string and nothing else: the stockpile factor, the build area in tiles,
+  // how many players there are, and which slot you are.
+  //
+  // Numbers rather than ids on purpose. `"double"` and `"large"` exist for the
+  // buttons; what a game is *started with* is what will cross into wasm, and
+  // no strings do. The designer reads the same four, clamps them, and falls
+  // back to its own defaults for anything missing.
 
   const chosen = byId("chosen");
+
+  /** Everything the designer needs, as numbers. */
+  function started() {
+    return {
+      stock: settings.stockpile,
+      area: settings.ship,
+      players: net.code ? Math.max(1, net.players.length) : 1,
+      slot: 0,
+    };
+  }
+
+  function startQuery() {
+    const it = started();
+    return `?stock=${it.stock}&area=${it.area}&players=${it.players}&slot=${it.slot}`;
+  }
 
   function describe() {
     const ship = SHIPS.find((s) => s.tiles === settings.ship);
@@ -423,6 +444,10 @@ function boot() {
   }
 
   function startGame() {
+    // The page it is going to, said out loud first. `location` is guarded
+    // rather than assumed — it is missing under the node harness, the same
+    // way `navigator` and `crypto` are, and a Start that throws leaves the
+    // player looking at a lobby that has stopped responding.
     const lines = [];
     for (const [name, said] of describe()) {
       const line = document.createElement("div");
@@ -435,6 +460,11 @@ function boot() {
     }
     chosen.replaceChildren(...lines);
     show("build");
+
+    const going = `ship.html${startQuery()}`;
+    if (typeof location !== "undefined" && typeof location.assign === "function") {
+      location.assign(going);
+    }
   }
 
   for (const button of document.querySelectorAll("[data-start]")) {

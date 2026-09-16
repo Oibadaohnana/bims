@@ -17,7 +17,7 @@ function check(what, ok, extra = "") {
   }
 }
 
-const { byId, root, click, dispatch, advance } = bootPage();
+const { byId, root, click, dispatch, advance, visited } = bootPage();
 
 const screen = (name) => root.querySelector(`[data-screen=${name}]`);
 const showing = () =>
@@ -146,11 +146,34 @@ check("the refusal clears itself", note.textContent === "", note.textContent);
 
 click("play");
 screen("setup").querySelector("[data-start]").dispatch("click");
-check("Start opens the builder placeholder", showing().join() === "build", showing().join());
+check("Start shows the handover", showing().join() === "build", showing().join());
 
 const said = byId.get("chosen").textContent;
 check("it names the ship that was chosen", said.includes("60 × 60"), said);
 check("and the stores", said.includes("×0.5"), said);
+
+// And then it actually goes there. The designer is a page of its own, so
+// Start is a navigation — and what crosses is **numbers in a query string**,
+// which is the same rule the wasm boundary is under. A query carrying "large"
+// and "half" would be a string setting that had got out of the builder.
+const went = visited[visited.length - 1] ?? "";
+check("Start navigates to the ship designer", went.startsWith("ship.html?"), went);
+
+const query = new Map(
+  went
+    .slice(went.indexOf("?") + 1)
+    .split("&")
+    .map((pair) => pair.split("=")),
+);
+check("it carries the stockpile factor", query.get("stock") === "0.5", went);
+check("and the build area in tiles", query.get("area") === "60", went);
+check("and how many are playing", query.get("players") === "1", went);
+check("and which slot you are", query.get("slot") === "0", went);
+check(
+  "and nothing that is not a number",
+  [...query.values()].every((v) => Number.isFinite(Number(v))),
+  went,
+);
 
 screen("build").querySelector("[data-goto]").dispatch("click");
 check("and it goes back to the menu", showing().join() === "menu", showing().join());

@@ -1,0 +1,501 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bims — Ship design</title>
+    <style>
+      /* The room's palette, the same as the builder's: the menus, the design
+         phase and the deck are one game and should not look like three
+         products. */
+      :root {
+        color-scheme: dark;
+        --ink: #e7efe9;
+        --muted: #8fa89a;
+        --accent: #7fd1a8;
+        --glow: #61dbf2;
+        --warn: #fa7352;
+        --panel: #18211d;
+        --edge: #2b3a32;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        display: flex;
+        flex-direction: column;
+        background: #0c1210;
+        color: var(--ink);
+        font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+          sans-serif;
+        overflow: hidden;
+      }
+
+      /* One screen at a time, switched with the `hidden` attribute. Every
+         rule that gives one a `display` carries `:not([hidden])` — the UA rule
+         behind `hidden` is only `display: none` at the lowest specificity and
+         loses to anything else. scratchpad/tray-check.mjs fails this file if
+         one is forgotten. */
+      main {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+      }
+
+      section[data-screen]:not([hidden]) {
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        min-height: 0;
+        min-width: 0;
+      }
+
+      /* --- the top bar --------------------------------------------------- */
+
+      #bar {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        padding: 8px 14px;
+        border-bottom: 1px solid var(--edge);
+        background: #101614;
+      }
+
+      #bar h1 {
+        margin: 0;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.2em;
+        text-transform: uppercase;
+      }
+
+      .spacer {
+        flex: 1;
+      }
+
+      #stores {
+        display: flex;
+        gap: 14px;
+      }
+
+      #stores .store {
+        display: flex;
+        align-items: baseline;
+        gap: 5px;
+      }
+
+      #stores .store .name {
+        color: var(--muted);
+        font-size: 11px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      #stores .store .left {
+        font-variant-numeric: tabular-nums;
+        font-weight: 600;
+      }
+
+      #stores .store .of {
+        color: var(--muted);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      #stores .store.short .left {
+        color: var(--warn);
+      }
+
+      /* --- the three columns --------------------------------------------- */
+
+      #work {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+      }
+
+      aside {
+        width: 220px;
+        flex: none;
+        overflow-y: auto;
+        background: var(--panel);
+        padding: 10px;
+      }
+
+      #palette {
+        border-right: 1px solid var(--edge);
+      }
+
+      #checks {
+        border-left: 1px solid var(--edge);
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      h2 {
+        margin: 0 0 7px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .group {
+        margin-bottom: 12px;
+      }
+
+      .part {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        width: 100%;
+        margin-bottom: 3px;
+        padding: 5px 7px;
+        border: 1px solid transparent;
+        border-radius: 5px;
+        background: none;
+        color: var(--ink);
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .part:hover {
+        background: #202b26;
+      }
+
+      .part.on {
+        border-color: var(--accent);
+        background: #1d2b24;
+      }
+
+      .part[disabled] {
+        cursor: default;
+        opacity: 0.45;
+      }
+
+      .part .swatch {
+        width: 13px;
+        height: 13px;
+        flex: none;
+        border-radius: 3px;
+      }
+
+      .part .size {
+        margin-left: auto;
+        color: var(--muted);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* --- the grid ------------------------------------------------------- */
+
+      #stage-wrap {
+        position: relative;
+        flex: 1;
+        min-width: 0;
+      }
+
+      #stage {
+        display: block;
+        width: 100%;
+        height: 100%;
+        touch-action: none;
+      }
+
+      #readout {
+        position: absolute;
+        left: 10px;
+        top: 10px;
+        display: flex;
+        gap: 14px;
+        padding: 5px 9px;
+        border: 1px solid var(--edge);
+        border-radius: 5px;
+        background: rgba(12, 18, 16, 0.85);
+        font-variant-numeric: tabular-nums;
+        pointer-events: none;
+      }
+
+      #readout .what {
+        font-weight: 600;
+      }
+
+      /* The tool will not go down where the pointer is. The ghost on the deck
+         says the same thing in the same colour; this says it where the
+         pointer is looking. */
+      #readout.refused {
+        border-color: var(--warn);
+        color: var(--warn);
+      }
+
+      #readout.refused .price {
+        color: var(--warn);
+      }
+
+      #readout .price {
+        color: var(--muted);
+      }
+
+      #keys {
+        position: absolute;
+        left: 10px;
+        bottom: 10px;
+        color: var(--muted);
+        pointer-events: none;
+      }
+
+      #said {
+        position: absolute;
+        right: 10px;
+        bottom: 10px;
+        max-width: 340px;
+        padding: 5px 9px;
+        border: 1px solid var(--warn);
+        border-radius: 5px;
+        background: rgba(12, 18, 16, 0.9);
+        color: var(--warn);
+        text-align: right;
+      }
+
+      #said:empty {
+        display: none;
+      }
+
+      /* --- what is wrong with it ------------------------------------------ */
+
+      #issues ul {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      #issues li {
+        display: flex;
+        gap: 7px;
+        padding: 5px 6px;
+        border-radius: 5px;
+        border-left: 2px solid transparent;
+      }
+
+      #issues li:hover {
+        background: #202b26;
+      }
+
+      #issues li.error {
+        border-left-color: var(--warn);
+      }
+
+      #issues li.warning {
+        border-left-color: var(--glow);
+      }
+
+      #issues .clean {
+        color: var(--accent);
+      }
+
+      /* --- the crew and their accepts -------------------------------------- */
+
+      #crew ol {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      #crew li {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 4px 0;
+      }
+
+      #crew .pip {
+        width: 8px;
+        height: 8px;
+        flex: none;
+        border-radius: 50%;
+        background: var(--edge);
+      }
+
+      #crew li.yes .pip {
+        background: var(--accent);
+      }
+
+      #crew .role {
+        margin-left: auto;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      button.big {
+        width: 100%;
+        padding: 10px;
+        border: 1px solid var(--edge);
+        border-radius: 6px;
+        background: #202b26;
+        color: var(--ink);
+        font: inherit;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        cursor: pointer;
+      }
+
+      button.big.on {
+        border-color: var(--accent);
+        background: #1d3a2c;
+        color: var(--accent);
+      }
+
+      button.big[disabled] {
+        cursor: default;
+        opacity: 0.45;
+      }
+
+      #accept-note {
+        margin: 0;
+        color: var(--muted);
+        text-align: center;
+      }
+
+      /* --- the handoff ----------------------------------------------------- */
+
+      #done-screen:not([hidden]) {
+        align-items: center;
+        justify-content: center;
+        padding: 28px;
+      }
+
+      .card {
+        max-width: 560px;
+        padding: 18px;
+        border: 1px solid var(--edge);
+        border-radius: 8px;
+        background: var(--panel);
+      }
+
+      .card p {
+        margin: 0 0 9px;
+      }
+
+      .card .muted {
+        color: var(--muted);
+      }
+
+      .debug {
+        margin-top: 12px;
+        padding-top: 10px;
+        border-top: 1px solid var(--edge);
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .debug div {
+        display: flex;
+        gap: 10px;
+      }
+
+      .debug b {
+        min-width: 150px;
+        color: var(--ink);
+        font-weight: 500;
+      }
+
+      #error {
+        margin: 0;
+        padding: 8px 14px;
+        background: #3a1d18;
+        color: #ffd9cf;
+      }
+
+      #error:empty {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <!-- The design phase: a palette, a grid, and everything that says
+           whether the ship is finished. -->
+      <section id="design-screen" data-screen="design">
+        <header id="bar">
+          <h1>Ship design</h1>
+          <span class="muted" id="area"></span>
+          <span class="spacer"></span>
+          <div id="stores" aria-label="What is left at the station"></div>
+        </header>
+        <div id="work">
+          <aside id="palette" aria-label="Parts"></aside>
+          <div id="stage-wrap">
+            <canvas id="stage"></canvas>
+            <div id="readout">
+              <span class="what" id="readout-what"></span>
+              <span class="price" id="readout-price"></span>
+              <span class="price" id="readout-tile"></span>
+            </div>
+            <div id="keys">
+              R turns · drag to fill · right-drag to clear · middle-drag or
+              WASD to pan · wheel to zoom
+            </div>
+            <div id="said" role="status"></div>
+          </div>
+          <aside id="checks">
+            <div id="issues">
+              <h2>Checks</h2>
+              <ul id="issue-list"></ul>
+            </div>
+            <div id="crew">
+              <h2>Crew</h2>
+              <ol id="slots"></ol>
+            </div>
+            <div class="spacer"></div>
+            <button type="button" id="accept" class="big">Accept</button>
+            <p id="accept-note"></p>
+          </aside>
+        </div>
+      </section>
+
+      <!-- Where the play phase will open. Stage 5 takes the design; until it
+           exists this says so, and shows the numbers flight will want so that
+           they are computed and looked at now. -->
+      <section id="done-screen" data-screen="done" hidden>
+        <div class="card">
+          <p><strong>The ship is settled.</strong></p>
+          <p class="muted">
+            Everybody accepted the same design, so the design phase is over
+            and nothing can be moved any more. The play phase — Bims aboard,
+            and every change built or pulled apart by hand — is not
+            implemented yet.
+          </p>
+          <div class="debug" id="handoff"></div>
+        </div>
+      </section>
+    </main>
+    <p id="error" role="alert"></p>
+    <script>
+      // A failure to even parse ship.js cannot be caught by ship.js, and
+      // leaves a blank page. This is the only place that can report it.
+      window.addEventListener("error", (event) => {
+        const box = document.getElementById("error");
+        if (box && !box.textContent) {
+          box.textContent = `Could not start the ship designer: ${event.message}`;
+        }
+      });
+
+      const build = Date.now();
+      window.BIMS_BUILD = build;
+      const tag = document.createElement("script");
+      tag.src = `ship.js?v=${build}`;
+      document.body.appendChild(tag);
+    </script>
+  </body>
+</html>

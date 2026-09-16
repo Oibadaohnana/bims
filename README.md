@@ -20,20 +20,21 @@ That builds the game, serves it, and opens it in a browser tab. `Ctrl+C` stops
 the server. Pass a port to pin one (`nix run . -- 3000`), or `--no-open` to keep
 it out of your browser.
 
-There are two things to run, and more will follow:
+There are three things to run, and more will follow:
 
 ```sh
 nix run .#game        # the room: the simulation, on a canvas — port 8080
 nix run .#builder     # the start menu, game setup and the lobby — port 8081
+nix run .#ship        # the ship design phase, on a tile grid — port 8082
 ```
 
-`nix run .` is `nix run .#game`. Both serve the same directory and differ only
-in which page they open, so they have separate default ports and can be up at
-the same time.
+`nix run .` is `nix run .#game`. All three serve the same directory and differ
+only in which page they open, so they have separate default ports and can be up
+at the same time.
 
-While editing, `./run game` and `./run builder` do the same against the live
-`web/` directory rather than the frozen copy in the Nix store — see
-[The builder](#the-builder).
+While editing, `./run game`, `./run builder` and `./run ship` do the same
+against the live `web/` directory rather than the frozen copy in the Nix store
+— see [The builder](#the-builder) and [The ship designer](#the-ship-designer).
 
 Running it again while it is already up starts neither a second server nor a
 second tab. It recognises its own build by the wasm being served and just tells
@@ -55,7 +56,9 @@ nix build              # the playable site lands in result/share/bims
 nix flake check        # builds the wasm and checks formatting
 ```
 
-`./build.sh` alone compiles the wasm into `web/`. Both scripts drop into
+`./build.sh` alone compiles the wasm modules into `web/` — there are two of
+them now, `bims.wasm` for the room and `ship.wasm` for the designer. Both
+scripts drop into
 `shell.nix` for the toolchain if `cargo` and `lld` are not already on PATH, so
 no global install is needed. `nix develop` uses that same `shell.nix`, so there
 is one list of development tools rather than two that drift apart.
@@ -98,10 +101,13 @@ tabbed tool the setup screen uses:
 One settings object sits behind both copies of the tool, so what you pick on
 the setup screen is what the lobby shows and the other way about.
 
-Starting opens a placeholder that lists what the ship builder will be handed.
-The builder proper is the next thing to be written; the path from the menu to a
-configured game is real and covered by `scratchpad/builder-check.mjs` in the
-meantime.
+**Start** hands the game to the ship designer, which is a page of its own —
+see below. What crosses is four numbers in a query string and nothing else:
+the stockpile factor, the build area in tiles, how many players there are, and
+which slot you are. `"large"` and `"half"` exist for the buttons; what a game
+is *started with* is what will cross into wasm, and no strings do.
+`scratchpad/builder-check.mjs` asserts that, query parameter by query
+parameter.
 
 ### The multiplayer seam
 
@@ -116,6 +122,123 @@ Two things it already does properly, because they are easy to get wrong later:
 the settings tool knows how to be read-only, for a guest in somebody else's
 lobby, and the settings themselves are plain numbers — a factor and a tile
 count. Nothing but numbers can cross into the simulation anyway.
+
+## The ship designer
+
+`nix run .#ship` opens what the lobby's **Start** goes to: the whole crew
+laying out **one ship** together, on a tile grid, before anybody is aboard.
+It is `web/ship.html` and `web/ship.js` with a wasm of its own, `ship.wasm`,
+out of `crates/ship`.
+
+**No Bims exist during this phase.** Placing a part and taking it off again
+are both instant and free: nothing has been welded yet, and the station's
+stockpile is only being promised. That stops the moment everybody accepts —
+after that, every change is a Bim's work.
+
+A tile is 52 world units and holds at most two things: the **deck plating**
+under your boots, and the one thing standing on it. A wall is on the object
+layer like everything else, because a wall and a bunk in one tile is equally
+nonsense; a wall is the only object that can stand where there is no deck,
+which is what lets a hull be drawn before it is floored.
+
+### Laying one out
+
+The palette down the left is grouped the way a ship is thought about —
+structure, engines, crew, galley, heads, bay — rather than the way the enum is
+numbered. The rows are built from what the wasm says exists, so a part added
+and forgotten in the grouping turns up under **Anything else** instead of
+quietly not existing.
+
+- **Click** to place. **Drag a rectangle** for deck plating, **drag a line**
+  for walls, **right-drag a rectangle** to clear — objects first and the deck
+  underneath afterwards, because the other way round every tile with something
+  standing on it would be refused and the drag would look half broken.
+- **R** turns the ghost a quarter clockwise. The footprint and the use spots
+  turn with it, and the palette shows the turned size.
+- **Middle-drag** or **WASD** pans; the **wheel** zooms. The view is clamped
+  to the build area and a margin, and starts showing all of it.
+
+A drag is applied as a run of single edits, and **a failing one is skipped and
+counted rather than fatal**: a rectangle of deck over a half-floored room is
+meant to fill the gaps and pass over the rest.
+
+The ghost is green where the tool would go down and red where it would not,
+and the readout by the pointer says the same thing in the same colour before
+the click rather than after it. Resting on a placed part rings it and shows
+its **use spots** — the tiles a Bim will stand in to use it. Those are only
+ever shown for the part under the pointer; drawn permanently they would fill
+the deck with markers.
+
+### What it costs, and what it checks
+
+Across the top is what is left of the station's stockpile, per resource,
+beside what there was to start with. The lobby's factor decides that and
+nothing else does. A removal hands back the **whole** cost, and what is left
+over at the end **stays at the station** — it is not cargo, it is not aboard,
+and it does not count towards what the ship weighs.
+
+Down the right is what is wrong with it. An **error** blocks Accept; a
+**warning** is the design saying what it will be like to live with. Resting on
+a row rings the tiles it names — a highlight, not a tooltip: nothing is said,
+and it goes the moment the pointer moves.
+
+The errors are:
+
+- the ship is in more than one piece;
+- fewer bunks or chairs than there are players;
+- no table, cold store, worktop, hob, dishwasher, toilet or basin;
+- somewhere a Bim has to stand is off the ship, has no deck, or is blocked;
+- parts nobody could walk between — over deck, through doors, which count as a
+  way through.
+
+The warnings are no engine, no engine on some axis, no hydroponic bay and no
+broom locker. **Engines are never an error**: a ship that cannot fly is still
+a ship you can live on, and refusing to let a player accept one would be the
+design phase having an opinion about how to play.
+
+That required list is a **mirror of what the room's chains walk to today** — a
+meal is a cold store, a worktop, a hob, a table with a chair and a dishwasher;
+a night is a bunk; a trip to the heads is a toilet and then a basin. It is not
+a design. If the chains change, the list changes with them, and
+`crates/shipdesign/src/validate.rs` says so at the top.
+
+### Accepting
+
+Each player has an Accept, disabled while anything is an error. An Accept is
+recorded **against a hash** of the design — the parts sorted by position and
+kind, with the ids left out, so the same layout gives the same number whatever
+order it was built in. Any successful edit by anybody changes that hash and
+clears every Accept, so there is no way to be holding one for a ship that is
+no longer on screen.
+
+When everybody's Accept matches the current hash the phase ends: editing locks
+and the handoff screen takes over. It says the play phase is not implemented
+yet, and shows what would be handed on — the part count, the ship's mass and
+its acceleration on each axis, all of it out of `physics`, so the numbers
+flight will one day want are computed and looked at now rather than discovered
+to be wrong later.
+
+Solo, one Accept settles it.
+
+### The two crates behind it
+
+- **`crates/shipdesign`** is the rules and nothing else: the part table, one
+  `apply` that is the only way a design ever changes, `validate`, and
+  `design_hash`. It renders nothing, exports nothing to wasm, and compiles
+  natively as well as for wasm32 — the native server that will one day be
+  authoritative has to agree with the browser about what a legal ship is, and
+  `design_hash` has to come out **identical on both**. That is why nothing in
+  its data or its hash is a `usize` or a float. Its unit tests are plain
+  `cargo test`; the wasm half of the hash check is `ship_self_check`, read by
+  `scratchpad/ship-check.mjs`.
+- **`crates/ship`** is the browser's half: the camera, the pointer, the ghost,
+  the draw buffer. It decides nothing about what may be placed — it asks.
+
+Its multiplayer seam is the same idea as the builder's. `net` in
+`web/ship.js` has a transport's shape, every Edit and every Accept goes
+through it carrying the design hash it was made against, and the host end
+applies messages in arrival order and reports a refusal back to whoever sent
+it. No click handler touches the wasm's editing exports directly.
 
 ## The crew
 
@@ -1150,8 +1273,25 @@ it entirely by hand; the levels carry on moving, they just stop giving orders.
 ## Socializing
 
 The fifth bar, and the only one that wants **another Bim** rather than a
-fixture. It runs down like the others, twice a waking day, and past its trigger
-the Bim goes and finds the other one.
+fixture. Past its trigger the Bim goes and finds the other one — which happens
+**about four times in a waking day**, roughly thirty conversations a week.
+
+Two numbers make it that talkative, and both are unlike every other need here:
+
+- **The trigger is half a bar**, not the tenth everything else uses. Company is
+  filled by the *other* Bim being free at the same moment, so waiting until the
+  bar is nearly empty would mean waiting until the one thing that fixes it is
+  least likely to be available. Asking early is how two people sharing one
+  compartment actually behave.
+- **A conversation only puts three tenths of the bar back.** It is a word on
+  the deck, not a meal. So the next one is never far off, and the bar hovers
+  around its trigger instead of swinging the whole way down and back — a Bim
+  aboard a working ship should never see this one anywhere near empty.
+
+The drain is written against those two rather than against `URGENT`, which is
+the one place in `needs.rs` that departs from the house rule: the span it
+travels between one chat and the next is what a chat restores, over the time
+that is meant to take.
 
 ### Talking
 

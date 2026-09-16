@@ -304,187 +304,123 @@ function makeDom(html, ctx2d) {
   return { byId, doc, root };
 }
 
-/** Boot web/bims.js against the real wasm and a stub page. */
-export async function boot({ frames = 0 } = {}) {
-  const html = readFileSync(HTML, "utf8");
-  // Text the host paints onto the canvas, newest last. Cleared each frame by
-  // the harness when it wants only this frame's worth.
-  const drawn = [];
-  const ctx2d = makeCtx(drawn);
 
-  const { byId, doc, root } = makeDom(html, ctx2d);
-
-  // --- the clock, and the timers hung off it ---------------------------
-
-  let clock = 0;
+/** The clock, and the timer queue hung off it.
+ *
+ * One of these per booted page, and **not** Node's: a timer fires when the
+ * harness says enough time has gone by, so a harness stays synchronous and
+ * "300ms" is a number of frames rather than a real wait.
+ *
+ * Both ways of moving it on share the queue. `step(n)` walks whole frames,
+ * which is what a page with a render loop wants; `advance(ms)` jumps to each
+ * timer in turn, which is what a page that is only a page wants. A page with
+ * both — the ship designer has a frame loop *and* timed remarks — uses
+ * whichever fits the thing being checked. */
+function makeClock() {
+  let now = 0;
+  let next = 1;
   const timers = new Map();
-  let nextTimer = 1;
-  let frameCb = null;
 
-  const win = {
-    devicePixelRatio: 1,
-    innerWidth: 1280,
-    innerHeight: 800,
-    listeners: new Map(),
-    addEventListener(type, fn) {
-      if (!win.listeners.has(type)) win.listeners.set(type, []);
-      win.listeners.get(type).push(fn);
-    },
-    removeEventListener() {},
-    BIMS_BUILD: 1,
-  };
+  const clock = {
+    timers,
+    now: () => now,
 
-  const bytes = readFileSync(WASM);
-
-  // The host keeps its wasm exports inside boot()'s closure, so the only way
-  // to get at the same instance is to hand it over as it is made.
-  //
-  // What is handed to the host is a recording wrapper: every export it calls
-  // goes through and its arguments are kept. That is how a harness checks
-  // something the host only ever *tells* wasm — "ring this fixture" — without
-  // wasm needing a getter that nothing in the game would otherwise want.
-  let wasm = null;
-  const calls = new Map();
-  const instantiate = async (buf, imports) => {
-    const result = await WebAssembly.instantiate(buf, imports);
-    const real = result.instance.exports;
-    wasm = real;
-    // A plain copy, not a Proxy: an exports object holds its entries as
-    // read-only non-configurable data properties, and a `get` trap that
-    // returns anything but the real function is a TypeError on the first
-    // read. `memory` and anything else that is not a function is passed
-    // straight through, so the draw buffer is still the live one.
-    const watched = {};
-    for (const name of Object.keys(real)) {
-      const held = real[name];
-      watched[name] =
-        typeof held === "function"
-          ? (...args) => {
-              calls.set(name, args);
-              return held(...args);
-            }
-          : held;
-    }
-    return { ...result, instance: { ...result.instance, exports: watched } };
-  };
-
-  const sandbox = {
-    document: doc,
-    window: win,
-    console,
-    Math,
-    JSON,
-    Date,
-    Set,
-    Map,
-    Number,
-    String,
-    Array,
-    Object,
-    Float32Array,
-    Error,
-    WebAssembly: { ...WebAssembly, instantiate },
-    performance: { now: () => clock },
-    requestAnimationFrame(fn) {
-      frameCb = fn;
-      return 1;
-    },
     setTimeout(fn, ms) {
-      const id = nextTimer++;
-      timers.set(id, { at: clock + (ms ?? 0), fn });
+      const id = next++;
+      timers.set(id, { at: now + (ms ?? 0), fn });
       return id;
     },
+
     clearTimeout(id) {
       timers.delete(id);
     },
-    fetch: async () => ({ arrayBuffer: async () => bytes }),
-  };
-  sandbox.globalThis = sandbox;
 
-  const ctx = vm.createContext(sandbox);
-  vm.runInContext(readFileSync(HOST, "utf8"), ctx, { filename: HOST });
-
-  // boot() is async: let its promise chain run to the first frame request.
-  //
-  // Waited on a real clock rather than a count of ticks. `WebAssembly
-  // .instantiate` resolves off-thread, so a fixed number of `setImmediate`
-  // turns is a race it sometimes loses — and losing it reads exactly like the
-  // page failing to boot, which is a whole afternoon wasted on the wrong file.
-  // `setTimeout` here is Node's own; the sandbox's fake one is a different
-  // function and only exists inside `vm`.
-  const deadline = Date.now() + 15000;
-  while (frameCb === null && Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 1));
-  }
-  if (frameCb === null) {
-    const said = byId.get("error")?.textContent;
-    throw new Error(
-      `boot() never asked for a frame in 15s: ${said || "and said nothing about why"}`,
-    );
-  }
-
-  const MS_PER_FRAME = 1000 / 60;
-
-  function step(n = 1) {
-    for (let i = 0; i < n; i++) {
-      clock += MS_PER_FRAME;
-      // Anything due fires from inside the frame, so a harness stays
-      // synchronous and a 300ms tooltip delay is 19 steps rather than a wait.
+    /** Fire everything due at or before `now`. */
+    fire() {
       for (const [id, t] of [...timers]) {
-        if (t.at <= clock) {
+        if (t.at <= now) {
           timers.delete(id);
           t.fn();
         }
       }
-      const cb = frameCb;
-      frameCb = null;
-      cb(clock);
-      if (frameCb === null) throw new Error("the frame loop stopped");
-    }
-  }
+    },
 
-  function dispatch(id, type, event) {
-    const el = byId.get(id);
-    if (!el) throw new Error(`no element #${id}`);
-    return el.dispatch(type, event);
-  }
+    /** Move to `at` and fire what falls due on the way. */
+    to(at) {
+      now = at;
+      clock.fire();
+    },
 
-  /** The arguments of the last call the host made to `name`, or undefined. */
-  function lastCall(name) {
-    return calls.get(name);
-  }
-
-  step(frames);
-  return { byId, doc, root, win, step, dispatch, timers, wasm, lastCall, drawn };
+    /** Let `ms` go by, stopping at each timer so one can set another. */
+    advance(ms) {
+      const until = now + ms;
+      for (;;) {
+        let soonest = null;
+        for (const [id, t] of timers) {
+          if (t.at <= until && (soonest === null || t.at < timers.get(soonest).at)) {
+            soonest = id;
+          }
+        }
+        if (soonest === null) break;
+        const t = timers.get(soonest);
+        timers.delete(soonest);
+        now = t.at;
+        t.fn();
+      }
+      now = until;
+    },
+  };
+  return clock;
 }
 
-/** Run frames until `check()` is true, or give up. */
-export function settle(step, check, limit = 20000) {
-  for (let i = 0; i < limit; i++) {
-    if (check()) return i;
-    step(1);
-  }
-  throw new Error("never settled");
-}
-
-/** Boot a page that is only a page: markup and one script, no wasm and no
- * frame loop. `web/builder.html` is the first of them — the start menu, the
- * setup screen and the lobby run entirely in the host, so there is nothing
- * for the room's `boot()` above to instantiate or to step.
+/** A recording wrapper round a page's wasm exports.
  *
- * Time still has to pass, though: the builder hangs remarks off `setTimeout`.
- * `advance(ms)` fires whatever is due, so a harness stays synchronous and
- * "four seconds" is a number rather than a wait. */
-export function bootPage({
-  html = "web/builder.html",
-  host = "web/builder.js",
-} = {}) {
-  const { byId, doc, root } = makeDom(readFileSync(html, "utf8"), makeCtx([]));
+ * The host keeps its exports inside its own `boot()`'s closure, so the only
+ * way to get at the same instance is to hand it over as it is made. What the
+ * host gets is a copy in which every export it calls is remembered, which is
+ * how a harness checks something the host only ever *tells* wasm — "ring this
+ * fixture" — without wasm needing a getter nothing in the game would want.
+ *
+ * It has to be a **plain copied object**, not a `Proxy`. An exports object
+ * holds its entries as read-only non-configurable data properties, and a
+ * `get` trap that returns anything but the real function is a `TypeError` on
+ * the first read — which kills `boot()` before the first frame and reports
+ * as "boot never asked for a frame". */
+function recordingWasm(bytes) {
+  const calls = new Map();
+  const held = { exports: null };
 
-  let clock = 0;
-  const timers = new Map();
-  let nextTimer = 1;
+  const instantiate = async (buf, imports) => {
+    const result = await WebAssembly.instantiate(buf, imports);
+    const real = result.instance.exports;
+    held.exports = real;
+    const watched = {};
+    for (const name of Object.keys(real)) {
+      const member = real[name];
+      watched[name] =
+        typeof member === "function"
+          ? (...args) => {
+              calls.set(name, args);
+              return member(...args);
+            }
+          : member;
+    }
+    return { ...result, instance: { ...result.instance, exports: watched } };
+  };
 
+  return {
+    calls,
+    instantiate,
+    bytes,
+    get exports() {
+      return held.exports;
+    },
+  };
+}
+
+/** The window object a page gets. Enough of one for a host to hang listeners
+ * off and read a pixel ratio from; the harness fires those listeners itself. */
+function makeWindow() {
   const win = {
     devicePixelRatio: 1,
     innerWidth: 1280,
@@ -494,13 +430,53 @@ export function bootPage({
       if (!win.listeners.has(type)) win.listeners.set(type, []);
       win.listeners.get(type).push(fn);
     },
-    removeEventListener() {},
+    removeEventListener(type, fn) {
+      const list = win.listeners.get(type);
+      if (list) win.listeners.set(type, list.filter((f) => f !== fn));
+    },
     BIMS_BUILD: 1,
   };
+  return win;
+}
 
+/** A `location` a page can read a query string off and navigate with.
+ *
+ * Real browsers always have one, so unlike `navigator` and `crypto` — which
+ * are deliberately missing below — this is provided. `assign` records where
+ * it was sent rather than going there, which is how a harness checks that
+ * Start hands the designer the right numbers.
+ *
+ * The pages still guard it. A host that assumed `location` would be there
+ * cannot be booted by anything but a browser, and the one place that matters
+ * is exactly the one a harness needs to exercise. */
+function makeLocation(page, search) {
+  const visited = [];
+  const location = {
+    search,
+    pathname: `/${page}`,
+    href: `http://stub/${page}${search}`,
+    assign(url) {
+      visited.push(String(url));
+      location.href = String(url);
+    },
+    replace(url) {
+      location.assign(url);
+    },
+  };
+  return { location, visited };
+}
+
+/** Everything a page's script runs against, bar the page itself.
+ *
+ * Deliberately **no `navigator` and no `crypto`**. Both are genuinely missing
+ * in real browsers often enough — the clipboard over plain http, older
+ * engines — that a host has to cope, and the harness is where that gets found
+ * out rather than in somebody's browser. */
+function makeSandbox({ doc, win, clock, location }) {
   const sandbox = {
     document: doc,
     window: win,
+    location,
     console,
     Math,
     JSON,
@@ -514,47 +490,92 @@ export function bootPage({
     Uint8Array,
     Float32Array,
     Error,
-    // Deliberately no `navigator` and no `crypto`: both are missing in real
-    // browsers often enough (http, older engines) that the host has to cope,
-    // and the harness is where that is found out.
-    performance: { now: () => clock },
-    setTimeout(fn, ms) {
-      const id = nextTimer++;
-      timers.set(id, { at: clock + (ms ?? 0), fn });
-      return id;
-    },
-    clearTimeout(id) {
-      timers.delete(id);
-    },
+    decodeURIComponent,
+    encodeURIComponent,
+    performance: { now: () => clock.now() },
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
   };
   sandbox.globalThis = sandbox;
+  return sandbox;
+}
+
+/** Build a page, run its script, and hand back the harness's handle on it
+ * along with whatever still has to be waited for.
+ *
+ * `wasm` is a path or null. With one, the page is given `WebAssembly`, a
+ * `fetch` that hands back those bytes, and a `requestAnimationFrame` whose
+ * callback the harness drives through `step()`; `ready()` then waits until
+ * the page has asked for its first frame. Without one, the page is only a
+ * page — markup and a script — there is nothing to instantiate or step, and
+ * `ready` is null so the caller can stay synchronous.
+ *
+ * Both go through the same `makeDom`, the same clock and the same sandbox,
+ * which is the point of this file: a second copy of any of them is how a stub
+ * drifts from the host it is meant to stand in for. */
+function startPage({ html, host, wasm = null, search = "" }) {
+  // Text the host paints onto the canvas, newest last. A stub has no glyphs,
+  // so this is the only part of the rendering it can see at all.
+  const drawn = [];
+  const ctx2d = makeCtx(drawn);
+  const { byId, doc, root } = makeDom(readFileSync(html, "utf8"), ctx2d);
+
+  const clock = makeClock();
+  const win = makeWindow();
+  const page = host.replace(/^.*\//, "").replace(/\.js$/, ".html");
+  const { location, visited } = makeLocation(page, search);
+  const sandbox = makeSandbox({ doc, win, clock, location });
+
+  let frameCb = null;
+  const module = wasm === null ? null : recordingWasm(readFileSync(wasm));
+  if (module) {
+    sandbox.WebAssembly = { ...WebAssembly, instantiate: module.instantiate };
+    sandbox.fetch = async () => ({ arrayBuffer: async () => module.bytes });
+    sandbox.requestAnimationFrame = (fn) => {
+      frameCb = fn;
+      return 1;
+    };
+  }
 
   const ctx = vm.createContext(sandbox);
   vm.runInContext(readFileSync(host, "utf8"), ctx, { filename: host });
 
-  /** Let `ms` go by, firing anything due on the way. */
-  function advance(ms) {
-    const until = clock + ms;
-    for (;;) {
-      let soonest = null;
-      for (const [id, t] of timers) {
-        if (t.at <= until && (soonest === null || t.at < timers.get(soonest).at)) {
-          soonest = id;
+  /** Wait until the page's own `boot()` has asked for its first frame.
+   *
+   * On a real clock rather than a count of ticks. `WebAssembly.instantiate`
+   * resolves off-thread, so a fixed number of `setImmediate` turns is a race
+   * it sometimes loses — and losing it reads exactly like the page failing to
+   * start, which is an afternoon on the wrong file. `setTimeout` here is
+   * Node's own; the sandbox's is a different function and only exists inside
+   * `vm`. */
+  const ready = module
+    ? async () => {
+        const deadline = Date.now() + 15000;
+        while (frameCb === null && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 1));
+        }
+        if (frameCb === null) {
+          const said = byId.get("error")?.textContent;
+          throw new Error(
+            `boot() never asked for a frame in 15s: ${said || "and said nothing about why"}`,
+          );
         }
       }
-      if (soonest === null) break;
-      const t = timers.get(soonest);
-      timers.delete(soonest);
-      clock = t.at;
-      t.fn();
-    }
-    clock = until;
-  }
+    : null;
 
-  function click(id, event = {}) {
-    const el = byId.get(id);
-    if (!el) throw new Error(`no element #${id}`);
-    return el.dispatch("click", event);
+  const MS_PER_FRAME = 1000 / 60;
+
+  function step(n = 1) {
+    if (!module) throw new Error("this page has no frame loop to step");
+    for (let i = 0; i < n; i++) {
+      // Anything due fires from inside the frame, so a harness stays
+      // synchronous and a 300ms tooltip delay is 19 steps rather than a wait.
+      clock.to(clock.now() + MS_PER_FRAME);
+      const cb = frameCb;
+      frameCb = null;
+      cb(clock.now());
+      if (frameCb === null) throw new Error("the frame loop stopped");
+    }
   }
 
   function dispatch(id, type, event) {
@@ -563,5 +584,88 @@ export function bootPage({
     return el.dispatch(type, event);
   }
 
-  return { byId, doc, root, win, click, dispatch, advance, timers };
+  function click(id, event = {}) {
+    return dispatch(id, "click", event);
+  }
+
+  /** Fire a window listener — `keydown`, `blur`, `resize`. Pages hang those
+   * off `window` rather than off an element, so there is nothing to
+   * `dispatch` on. */
+  function fire(type, event = {}) {
+    const e = { type, preventDefault() {}, ...event };
+    for (const fn of win.listeners.get(type) ?? []) fn(e);
+    return e;
+  }
+
+  /** The arguments of the last call the host made to `name`, or undefined. */
+  function lastCall(name) {
+    return module?.calls.get(name);
+  }
+
+  /** The harness's handle. Built on demand rather than up front because
+   * `wasm` is not there until the module has finished instantiating, and a
+   * handle handed out before that would carry a null in the one field every
+   * assertion goes through. */
+  const handle = () => ({
+    byId,
+    doc,
+    root,
+    win,
+    location,
+    visited,
+    step,
+    dispatch,
+    click,
+    fire,
+    advance: clock.advance,
+    timers: clock.timers,
+    wasm: module?.exports ?? null,
+    lastCall,
+    drawn,
+  });
+
+  return { handle, ready };
+}
+
+/** Boot web/bims.js — the room — against the real wasm and a stub page. */
+export async function boot(options = {}) {
+  return bootWasmPage({ html: HTML, host: HOST, wasm: WASM, ...options });
+}
+
+/** Boot a page that is only a page: markup and one script, no wasm and no
+ * frame loop. `web/builder.html` is the one of them — the start menu, the
+ * setup screen and the lobby run entirely in the host, so there is nothing to
+ * instantiate or to step.
+ *
+ * Synchronous, because a page with no wasm has nothing to wait for. Time
+ * still has to pass, though: the builder hangs remarks off `setTimeout`, and
+ * `advance(ms)` fires whatever is due. */
+export function bootPage({ html = "web/builder.html", host = "web/builder.js", search = "" } = {}) {
+  const { handle, ready } = startPage({ html, host, search });
+  if (ready !== null) {
+    throw new Error("bootPage: that page has wasm behind it — use bootWasmPage");
+  }
+  return handle();
+}
+
+/** Boot a page that has its own wasm. `web/ship.html` is the first — a third
+ * front end, with `ship.wasm` behind it rather than the room's.
+ *
+ * Everything `boot()` returns, plus `advance` for the timed remarks and
+ * `fire` for the keyboard. Async, because instantiating resolves off-thread. */
+export async function bootWasmPage({ frames = 0, ...options }) {
+  const { handle, ready } = startPage(options);
+  await ready();
+  const page = handle();
+  if (frames) page.step(frames);
+  return page;
+}
+
+/** Run frames until `check()` is true, or give up. */
+export function settle(step, check, limit = 20000) {
+  for (let i = 0; i < limit; i++) {
+    if (check()) return i;
+    step(1);
+  }
+  throw new Error("never settled");
 }

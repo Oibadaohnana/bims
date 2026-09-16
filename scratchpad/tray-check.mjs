@@ -10,10 +10,11 @@
 
 import { readFileSync } from "node:fs";
 
-/** The attributes a page switches with `hidden`: the room's tray panels, and
- * the builder's screens and its tool's tabs. */
+/** The attributes a page switches with `hidden`: the room's tray panels, the
+ * builder's screens and its tool's tabs, and the ship designer's two
+ * screens. */
 const SWITCHED = ["data-panel", "data-screen", "data-tab"];
-const PAGES = ["web/index.html", "web/builder.html"];
+const PAGES = ["web/index.html", "web/builder.html", "web/ship.html"];
 
 const fails = [];
 let looked = 0;

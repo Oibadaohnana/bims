@@ -44,18 +44,23 @@ def build_id(data):
     return hashlib.sha256(data).hexdigest()[:12]
 
 
-def build_on_disk(directory):
-    with open(os.path.join(directory, "bims.wasm"), "rb") as f:
+def build_on_disk(directory, wasm):
+    with open(os.path.join(directory, wasm), "rb") as f:
         return build_id(f.read())
 
 
-def build_being_served(port):
+def build_being_served(port, wasm):
     """Which build of Bims is already on `port`, or None if what is listening
     there is not Bims at all. Identified by the served wasm, so an unrelated
-    server on the same port cannot be mistaken for one of ours."""
+    server on the same port cannot be mistaken for one of ours.
+
+    **Its own front end's wasm**, not always the room's. There is more than one
+    cdylib now, and a server identified by a module its page does not load
+    would look unchanged after a rebuild that changed everything it serves —
+    which is exactly the stale-server trap this check exists to close."""
     try:
         with urllib.request.urlopen(
-            f"http://localhost:{port}/bims.wasm", timeout=2
+            f"http://localhost:{port}/{wasm}", timeout=2
         ) as response:
             data = response.read()
     except (urllib.error.URLError, OSError, ValueError):
@@ -109,6 +114,15 @@ def main():
         help="page under the served directory to open (default index.html)",
     )
     parser.add_argument(
+        "--wasm",
+        default="bims.wasm",
+        help=(
+            "the module this front end loads (default bims.wasm), used to tell "
+            "one build from another. Each front end passes its own, or a "
+            "rebuild of one would look like no change to the other's server"
+        ),
+    )
+    parser.add_argument(
         "--default-port",
         type=int,
         default=DEFAULT_PORT,
@@ -127,11 +141,11 @@ def main():
     args = parser.parse_args()
 
     port = args.port or args.default_port
-    mine = build_on_disk(args.directory)
+    mine = build_on_disk(args.directory, args.wasm)
 
     # Running the command twice should take you to the game, not start a second
     # copy of it on another port and open a second browser tab.
-    running = build_being_served(port)
+    running = build_being_served(port, args.wasm)
     if running == mine:
         url = f"http://localhost:{port}/{args.page}"
         print(f"Bims is already running at {url}", flush=True)

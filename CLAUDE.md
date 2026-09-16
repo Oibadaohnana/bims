@@ -18,16 +18,24 @@ There is now more than one thing to run, and each is a name rather than a flag:
 | --- | --- | --- |
 | `nix run .` / `nix run .#game` | the room — the simulation on a canvas | `:8080/index.html` |
 | `nix run .#builder` | the start menu, the setup screen and the lobby | `:8081/builder.html` |
+| `nix run .#ship` | the design phase the lobby starts — a ship on a tile grid | `:8082/ship.html` |
 
-Both come out of **one served directory** and differ only in which page is
+All three come out of **one served directory** and differ only in which page is
 opened, so they must not share a default port: the second one started would
 find the first already there, decide Bims was running, and hand you the wrong
 page. `--default-port` in `dev-server.py` is what keeps them apart, and a new
 front end needs its own.
 
-`./run game` and `./run builder` are the same two against the **live** `web/`
-rather than the store copy — that is the one to use while editing. Anything
-after the name (`--no-open`, a port) goes to the server.
+`--wasm` is the other half of that, and it is newer. The server tells one
+build from another by **hashing the module it serves**, and there is more than
+one module now. A front end pointed at somebody else's wasm looks unchanged
+after a rebuild that changed every line it serves — which is exactly the stale
+server this check exists to catch. Each front end passes its own; the builder
+has none of its own yet and rides along with the room's.
+
+`./run game`, `./run builder` and `./run ship` are the same three against the
+**live** `web/` rather than the store copy — that is the one to use while
+editing. Anything after the name (`--no-open`, a port) goes to the server.
 
 Run it in the foreground, in a real terminal. A server launched as a background
 job from a non-interactive shell inherits `SIGINT` set to `SIG_IGN`, so Python
@@ -36,7 +44,10 @@ never sees the interrupt and Ctrl+C (or `kill -INT`) will not stop it — check
 
 `./serve.sh` is `./run game` without the dispatcher, kept because it is in
 muscle memory; it takes the same arguments. `./build.sh` alone just compiles
-the wasm into `web/`.
+the wasm into `web/` — **both modules**. `cargo build` at the root builds every
+member, so one command does it, but each cdylib has to be *copied*, and a front
+end whose wasm was never copied is a page that fetches a 404 and shows nothing.
+`flake.nix` copies them one by one for the same reason.
 
 ### `nix run .` serves a frozen copy
 
@@ -53,17 +64,20 @@ The page loads `bims.js` and `bims.wasm` under a per-load query string and the
 server sends `no-store`, so a stale *browser* cache is not usually the culprit —
 a stale *server* is.
 
-## It is a workspace now, and the room is one crate of four
+## It is a workspace now, and the room is one crate of six
 
-Everything is under `crates/`. `game` is the room — the simulation and the wasm
-exports, the only cdylib, and what used to be `src/`. Beside it are three
-libraries that have to give the same answer in more than one place: `worldgen`
-(the galaxy, systems and station blueprints, which a native server will one day
-generate identically), `physics` (ship mass, thrust and travel time, wanted by
-`worldgen` now and by the builder and flight steps later) and `time` (how long
-a day is).
+Everything is under `crates/`. There are **two cdylibs**: `game` is the room —
+the simulation and its wasm exports, what used to be `src/` — and `ship` is the
+design phase, the camera and pointer and draw buffer behind `web/ship.html`.
+Beside them are four libraries that have to give the same answer in more than
+one place: `worldgen` (the galaxy, systems and station blueprints, which a
+native server will one day generate identically), `physics` (ship mass, thrust
+and travel time, wanted by `worldgen` now and by the designer and the flight
+step later), `shipdesign` (what a ship is made of and the rules for putting one
+together, wanted by the designer now and by the play phase later) and `time`
+(how long a day is).
 
-Four things about that are easy to get wrong:
+Five things about that are easy to get wrong:
 
 - **Profiles only work at the workspace root.** A `[profile.release]` in
   `crates/game/Cargo.toml` is *silently ignored* — the `opt-level = "z"`,
@@ -72,11 +86,20 @@ Four things about that are easy to get wrong:
 - **`cargo build` at the root builds every member.** `nix flake check` passes
   `--workspace` on purpose: without it only `bims` is built and `worldgen`
   breaking for wasm would go unnoticed until something imported it.
-- **The libraries' tests are `cargo test`, the room's are the probes.** Running
-  them wants a target: `.cargo/config.toml` pins `wasm32-unknown-unknown`, so
-  it is
-  `cargo test --target x86_64-unknown-linux-gnu -p physics -p worldgen`.
+- **The libraries' tests are `cargo test`, the cdylibs' are the probes and the
+  harnesses.** Running them wants a target: `.cargo/config.toml` pins
+  `wasm32-unknown-unknown`, so it is `cargo test --target
+  x86_64-unknown-linux-gnu -p physics -p worldgen -p shipdesign`.
   `nix flake check` runs exactly that as `checks.tests`.
+- **The rules go in `shipdesign`, never in `ship`.** `ship` may ask whether a
+  part can be placed; it may not decide. A native server has to give the same
+  answer, and `design_hash` — which is what an Accept is recorded against — has
+  to come out **identical on native and on wasm32**. That is why nothing in
+  `shipdesign`'s data or its hash is a `usize` or a float and why no `HashMap`
+  is iterated in it. Both ends of that are pinned: the native half is
+  `crates/shipdesign/src/tests.rs`, the wasm half is `ship_self_check`, and
+  both compare against the same written-down constants in
+  `shipdesign::fixture`. A target that drifted fails exactly one of the two.
 - **`crate::time`, never `time::`.** `clock.rs` reaches the `time` crate
   through the crate root, because the probes link nothing and stand a plain
   `mod time;` over the same file — see `scratchpad/modules.rs`. Spelled
@@ -93,8 +116,8 @@ way. So:
 
 - `nix flake check` — builds the wasm and gates `cargo fmt`. Necessary, not
   sufficient.
-- `nix-shell -p nodejs --run "node --check web/bims.js web/builder.js"` —
-  catches the parse errors that produce a black page.
+- `nix-shell -p nodejs --run "node --check web/bims.js web/builder.js web/ship.js"`
+  — catches the parse errors that produce a black page.
 - Actually execute the host. Node with a stub DOM (`document.getElementById`,
   a no-op 2D context, captured event listeners) can load `web/bims.js` through
   `vm.runInContext`, boot it against the real `web/bims.wasm`, dispatch
@@ -131,6 +154,11 @@ that is only on disk is invisible to them — the build fails with
 `failed to resolve mod <name>: /build/source/crates/game/src/<name>.rs does not exist` even
 though `cargo build` is perfectly happy. `git add -N crates/game/src/<name>.rs` is enough;
 it does not commit anything.
+
+A whole new crate is the same trap with a louder failure: `members = ["crates/*"]`
+matches a directory the git tree does not have, and the build stops on a
+missing `Cargo.toml`. `git add -N crates/<name>` before the first
+`nix flake check`.
 
 ## The stub DOM has to keep up with the host
 
@@ -541,6 +569,13 @@ bunk half inside the heads, a chair inside the table, a station on top of the
 furniture are all obvious here and invisible in every assertion. It is how the
 second bunk's placement was settled.
 
+`scratchpad/ship-layout.mjs` is the same thing for the designer, in node
+because that page's draw buffer is only reachable through the host:
+`node scratchpad/ship-layout.mjs ship > /tmp/ship.svg`, with `empty`, `ghost`
+and `spots` for the other three moments worth catching. It is how the ring
+round every deck tile the pointer crossed was found — a light flashing on and
+off across the whole grid, which no assertion was ever going to mention.
+
 ## A probe that stages a meeting has to ask where a body fits
 
 `spot_at(..) == SPOT_DECK` means "this is floor". It does **not** mean "a body
@@ -749,18 +784,34 @@ Three rules the page already follows and that are cheap to break:
 lobby, join refusal, start — through `bootPage` in the stub. It is the only
 thing that executes that file at all, so run it after touching it.
 
-## The stub has two ways in now
+## The stub has three ways in now, and one of everything behind them
 
-`boot()` is the room: wasm, a frame loop, a canvas. `bootPage()` is a page that
-is only a page — markup and one script, no wasm to instantiate and no frame to
-step, with `advance(ms)` to let timers fire. Both build their DOM with the same
-`makeDom`, which is the point: a third copy of the element builder is how the
-stub drifts.
+`boot()` is the room. `bootPage()` is a page that is only a page — markup and
+one script, no wasm to instantiate and no frame to step, with `advance(ms)` to
+let timers fire; it is synchronous, and the builder harness depends on that.
+`bootWasmPage()` is a page with a wasm of its own, which is the ship designer,
+and `boot()` is now that called with the room's three files.
 
-`bootPage` deliberately provides **no `navigator` and no `crypto`**. Both are
-genuinely missing in real browsers often enough — the clipboard over plain
-http, older engines — that the host has to cope, and the harness is where that
-gets found out rather than in somebody's browser.
+Behind all three there is **one** `makeDom`, **one** `makeClock` and **one**
+`recordingWasm`. That is the whole point of the file: a second copy of any of
+them is how a stub drifts from the host it stands in for. `startPage` is where
+they come together, and it hands back a `ready` that is `null` when there is
+nothing to instantiate — which is what lets `bootPage` stay synchronous
+without a second code path.
+
+The clock has two ways to move: `step(n)` walks whole frames, for a page with
+a render loop, and `advance(ms)` jumps to each timer in turn, for a page that
+is only a page. They share the queue, so a page with both — the designer has a
+frame loop *and* timed remarks — can use whichever fits.
+
+`navigator` and `crypto` are deliberately **absent**. Both are genuinely
+missing in real browsers often enough — the clipboard over plain http, older
+engines — that a host has to cope, and the harness is where that gets found
+out rather than in somebody's browser. `location` **is** provided, because a
+real browser always has one; its `assign` records where it was sent rather than
+going there, which is how `builder-check` sees that Start hands the designer
+the right numbers. The pages still guard it, because the node stub is the one
+place it is missing.
 
 ## Staging a walk over a particular tile
 
@@ -846,6 +897,9 @@ comm -12 <(command grep -o "^const [A-Z_]*" web/bims.js | sed 's/const //' | sor
 
 Anything that prints is shadowed. It should print nothing.
 
+`web/ship.js` has the same one-big-scope `boot()` and wants both checks run
+against it too.
+
 ## Health mends every frame, so a sudden nothing is not nothing
 
 `Health::update` runs before `Game` looks at whether the Bim is dead, and a fed
@@ -875,3 +929,128 @@ upper one's body — `./layout talk` shows it immediately and nothing else does.
 `Game::chat` therefore always stands them **left and right**, `TALKING_GAP`
 apart, and that gap is set by the *names* rather than by the bodies: a body is
 `BODY_MARGIN` across the radius, but two labels need a good deal more.
+
+## A new part needs five edits, and the compiler catches two
+
+`PartKind` for the variant, `PARTS` in `crates/shipdesign/src/parts.rs` for
+the row, `PART_COLORS` in `crates/ship/src/paint.rs` for the colour,
+`PART_NAMES` in `web/ship.js` for the word, and `PART_GROUPS` beside it for
+which heading it lives under. Same shape as `memory.rs`'s `What` and
+`work.rs`'s `Job`, and for the same reason: no strings cross the boundary, so
+the ship knows `PartKind::Hob` and only the host knows "Hob".
+
+The first three are fixed-size arrays, so leaving one out is a compile error.
+The last two are not, and both fail quietly — which is what
+`scratchpad/ship-check.mjs` is for. It counts palette buttons against
+`ship_part_count()` and fails a name that is missing or still reads `Part 7`,
+and the page builds its rows off that count rather than off `PART_NAMES`, so a
+part left out of `PART_GROUPS` turns up under **Anything else** instead of
+disappearing. Same arrangement as the room's work panel.
+
+An `IssueCode` is the same trap with worse consequences: an issue whose code
+has no line in `ISSUE_LINES` is **dropped from the page**, exactly as a diary
+entry with no `MEMORY_LINES` is. What catches it is the row count against
+`ship_issue_count()`, and nothing else would.
+
+## The designer's rules are in `shipdesign`, and `apply` is the only door
+
+`crates/shipdesign` renders nothing and exports nothing to wasm. `crates/ship`
+draws and takes input. The split is not tidiness: a native server has to be
+able to say whether a ship is legal without a canvas, and two implementations
+of that would be two different games.
+
+Three rules the crate is built around:
+
+- **`apply(&design, &budget, edit) -> Result<ShipDesign, EditError>` is the
+  only way a design ever changes.** It hands back a new design, so a refused
+  edit cannot leave a half-changed one behind. Nothing in the UI mutates
+  `parts` directly, and neither should anything else.
+- **Remaining stores are derived, never decremented.** `Budget` holds the
+  stockpile and nothing else; what is left is worked out from the design every
+  time it is asked. A counter kept alongside would drift from the ship the
+  first time an edit was refused or replayed.
+- **The occupancy grid is rebuilt from `parts` on demand.** A cached one is a
+  second source of truth about what is where.
+
+## An Accept is for a hash, not for "the design"
+
+`design_hash` sorts the parts by `(y, x, kind)` and leaves the **ids out**, so
+the same layout built in two orders gives the same number. That is what makes
+an Accept comparable between players. Any successful edit by anybody clears
+every Accept, which is the whole protocol — there is no way to be holding one
+for a ship that is no longer on screen.
+
+Three things this depends on and that are easy to undo:
+
+- **Part ids only ever climb**, and a removed one is never reissued. An Edit
+  in flight that names it is then refused rather than landing on whatever took
+  its place. Stage 5 also wants that order: Bim *i* spawns at bunk *i*, bunks
+  in id order.
+- **The hash is written out by hand** — FNV-1a over little-endian `u32`s. Not
+  a `Hash` derive and not `DefaultHasher`: those are explicitly allowed to
+  differ between builds, and this number crosses between machines.
+- **The build area is in the hash.** The same parts in a bigger square are a
+  different ship, and an Accept must not carry across a resize.
+
+## "Is it finished" is one export, not three
+
+`ship_phase()` and nothing else. "Is it finished", "may I still edit" and
+"which phase is it" are the same question, and three exports answering it are
+three things that can disagree — there were three for about an hour, and the
+boundary check in `scratchpad/ship-check.mjs` is what said so. `PHASE_DESIGN`
+in `web/ship.js` is the host's half of the pair.
+
+That check is worth keeping in mind generally: it reads `web/ship.js` with
+`readFileSync`, collects every `wasm.ship_*` it calls, and compares both ways
+against the real exports. An export nothing calls fails it unless it is named
+in `FOR_THE_HARNESS`. It is deliberately **not** built on the shell's `grep`,
+which here is `ugrep --ignore-files` and returns nothing at all for files under
+`web/` — a boundary check built on that comes back clean because it never read
+the file.
+
+## A drag is geometry; the edits go out one at a time
+
+`ship_drag_*` works out which tiles a drag covers and, for a clearing drag,
+which parts it would take off. The host reads that list and sends **each tile
+as its own Edit through `net`**. There is deliberately no bulk operation, so a
+transport has nothing extra to learn later.
+
+Two things in that order matter:
+
+- **Read the whole list before applying any of it.** The parts a clearing drag
+  names are looked up in the design it was drawn over; applying as you go has
+  the list shifting under itself.
+- **Objects come off before deck.** The other way round, every floor tile with
+  something standing on it is refused as `FloorUnderObject` and a right-drag
+  over the galley leaves the deck behind and looks half broken. That ordering
+  is in `Editor::drag_parts`, not in the host.
+
+A failing Edit inside a drag is **skipped and counted, never fatal**: a
+rectangle of deck over a half-floored room is meant to fill the gaps.
+
+## The play phase cannot assume the room's navigation
+
+`validate` passes a design whose use spots are all reachable over floor tiles
+whose object layer is empty or non-blocking — one-tile corridors and doorways
+included. The room's `nav.rs` **cannot be assumed to walk that**: it is a
+10-unit cell grid inflating every obstacle by a `BODY_MARGIN` of 23, over a
+tile that is 52 units. A one-tile gap between two walls leaves 6 units of
+clearance, and the centre-sampled line test already has a known failure mode at
+about that width — see "A route the body cannot hold to" above.
+
+So stage 5 needs tile-based navigation, or has to prove the existing one walks
+every design this crate accepts. Accepting a ship the crew cannot cross reads
+as a Bim frozen mid-errand, which is the hardest failure aboard to diagnose.
+The contract is written out at the top of `crates/shipdesign/src/lib.rs`; keep
+the two in step.
+
+## The required-fixture list is a mirror of the chains
+
+`REQUIRED` in `crates/shipdesign/src/validate.rs` is table, cold store,
+worktop, hob, dishwasher, toilet, basin, with bunks and chairs counted against
+the crew. That is **exactly what the room's chains walk to today** and nothing
+else. It is not a design decision about what a ship should have.
+
+If stage 5 changes what a chain walks to, this list changes with it. A ship
+validated against a stale list is a ship whose crew starve standing in front of
+the fixture nobody required.

@@ -1,0 +1,16 @@
+# The ship design contract: what a ship is made of, what the rules for putting
+# one together are, and what it weighs when it is done.
+#
+# Pure data and pure functions. No rendering, no wasm exports, no `Game` — the
+# cdylib beside it (`ship`) draws a design and the play phase will one day fly
+# it, and neither may have its own idea of what a legal ship is. It compiles
+# for native and for wasm32, and `design_hash` has to give the same answer on
+# both, which is why nothing in here is a `usize` or a float.
+[package]
+name = "shipdesign"
+version = "0.1.0"
+edition = "2024"
+description = "Ship parts, the rules for placing them, and what the result weighs"
+
+[dependencies]
+physics = { path = "../physics" }

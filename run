@@ -3,31 +3,44 @@
 #
 #   ./run game       the room — the simulation, on a canvas
 #   ./run builder    the menus in front of it: start, setup, lobby
+#   ./run ship       the design phase: a ship laid out on a tile grid
 #
-# Both serve the *live* web/ directory, which is the difference between this
-# and `nix run .#game` / `nix run .#builder`: those serve a frozen copy out of
-# the Nix store and will not notice an edit until they are restarted.
+# All three serve the *live* web/ directory, which is the difference between
+# this and `nix run .#game` / `.#builder` / `.#ship`: those serve a frozen copy
+# out of the Nix store and will not notice an edit until they are restarted.
 #
-# Each front end has its own default port, so the two can be up at once.
+# Each front end has its own default port, so they can all be up at once.
 # Anything after the name is passed on to dev-server.py — a port, --no-open.
 set -euo pipefail
 cd "$(dirname "$0")"
 
 usage() {
-  echo "usage: ./run <game|builder> [port] [--no-open]" >&2
+  echo "usage: ./run <game|builder|ship> [port] [--no-open]" >&2
   exit 2
 }
 
 [ $# -ge 1 ] || usage
 
+# Each front end carries the module it loads as well as its page and its port.
+# The server tells one build from another by hashing that module, so a front
+# end pointed at somebody else's wasm would look unchanged after a rebuild
+# that changed everything it serves. The builder has no wasm of its own yet
+# and rides along with the room's.
 case "$1" in
   game)
     page=index.html
+    wasm=bims.wasm
     port=8080
     ;;
   builder)
     page=builder.html
+    wasm=bims.wasm
     port=8081
+    ;;
+  ship)
+    page=ship.html
+    wasm=ship.wasm
+    port=8082
     ;;
   -h | --help) usage ;;
   *)
@@ -40,8 +53,9 @@ shift
 ./build.sh
 
 if command -v python3 >/dev/null; then
-  exec python3 dev-server.py --page "$page" --default-port "$port" "$@"
+  exec python3 dev-server.py \
+    --page "$page" --wasm "$wasm" --default-port "$port" "$@"
 else
   exec nix-shell shell.nix --run \
-    "python3 dev-server.py --page $page --default-port $port $*"
+    "python3 dev-server.py --page $page --wasm $wasm --default-port $port $*"
 fi

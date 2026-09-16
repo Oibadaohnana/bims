@@ -17,6 +17,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ship"
+version = "0.1.0"
+dependencies = [
+ "physics",
+ "shipdesign",
+]
+
+[[package]]
+name = "shipdesign"
+version = "0.1.0"
+dependencies = [
+ "physics",
+]
+
+[[package]]
 name = "time"
 version = "0.1.0"
 

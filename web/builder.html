@@ -550,20 +550,23 @@
         </div>
       </section>
 
-      <!-- Where the ship builder proper will open. It is a placeholder and
-           says so; what it shows is the settings it was handed, so the path
-           from the menu to a configured game is testable before the builder
-           exists. -->
+      <!-- The handover. Start navigates to ship.html, and this is what is on
+           screen while the browser does it — and all there is if it cannot,
+           which is the case under the node harness, where `location` is
+           deliberately absent. What it lists is the numbers that went into
+           the query string. -->
       <section id="build-screen" data-screen="build" hidden>
         <div class="screen-head">
           <button type="button" class="small" data-goto="menu">← Menu</button>
-          <h2>Builder</h2>
+          <h2>Starting</h2>
         </div>
         <div class="body">
           <div class="card">
-            <p><strong>The ship builder goes here.</strong></p>
+            <p><strong>Off to the ship designer.</strong></p>
             <p class="muted">
-              Nothing is drawn yet. These are the settings it will be handed.
+              These are the settings it is being handed. If the page does not
+              change by itself, the designer is at
+              <code>ship.html</code>.
             </p>
             <div class="chosen" id="chosen"></div>
           </div>

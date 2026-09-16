@@ -15,8 +15,15 @@
 
       eachSystem = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
 
-      # Build inputs only. `target/` and the checked-in `web/bims.wasm` are
-      # outputs, so leaving them out keeps the hash from churning on rebuilds.
+      # Build inputs only. `target/` and the built wasm in `web/` are outputs,
+      # so leaving them out keeps the hash from churning on rebuilds. One
+      # entry per cdylib: a new front end's wasm added here is a hash that
+      # changes every time anybody runs ./build.sh.
+      wasmOutputs = [
+        "bims.wasm"
+        "ship.wasm"
+      ];
+
       src = nixpkgs.lib.cleanSourceWith {
         src = ./.;
         name = "bims-source";
@@ -25,7 +32,7 @@
           let
             base = baseNameOf (toString path);
           in
-          !(type == "directory" && base == "target") && base != "bims.wasm";
+          !(type == "directory" && base == "target") && !(builtins.elem base wasmOutputs);
       };
 
       # Everything the flake exposes, built once per system.
@@ -48,10 +55,11 @@
             buildPhase = ''
               runHook preBuild
               export CARGO_HOME="$NIX_BUILD_TOP/cargo"
-              # --workspace, not just the root package: `time`, `physics` and
-              # `worldgen` are meant to compile for wasm32 as well as for the
-              # native server, and nothing else in the build would ever find
-              # out if one of them stopped.
+              # --workspace, not just one package: `time`, `physics`,
+              # `worldgen` and `shipdesign` are meant to compile for wasm32 as
+              # well as for the native server, and nothing else in the build
+              # would ever find out if one of them stopped. It is also what
+              # builds the second cdylib — `ship`, the design phase.
               cargo build --release --locked --offline --target wasm32-unknown-unknown --workspace
               runHook postBuild
             '';
@@ -59,12 +67,18 @@
             installPhase = ''
               runHook preInstall
               mkdir -p "$out/share/bims"
-              # Both front ends out of one directory: the room is index.html,
-              # the menus in front of it are builder.html. They share the wasm,
-              # and one day the builder will start the game with it.
+              # Every front end out of one directory: the room is index.html,
+              # the menus in front of it are builder.html, and the design
+              # phase they start is ship.html. They differ only in which page
+              # is opened — which is why each has its own default port below,
+              # and why the builder can navigate straight to ship.html.
               cp web/index.html web/bims.js "$out/share/bims/"
               cp web/builder.html web/builder.js "$out/share/bims/"
+              cp web/ship.html web/ship.js "$out/share/bims/"
+              # One wasm per cdylib. A page whose wasm was not copied fetches
+              # a 404 and shows nothing at all.
               cp target/wasm32-unknown-unknown/release/bims.wasm "$out/share/bims/"
+              cp target/wasm32-unknown-unknown/release/ship.wasm "$out/share/bims/"
               runHook postInstall
             '';
 
@@ -78,15 +92,21 @@
           # fetch bims.wasm, and fetch is blocked on file:// URLs, so they
           # need a server.
           #
-          # One per front end, differing only in which page is opened and
-          # which port it falls back to. Separate ports on purpose: the room
-          # and the builder come out of the same directory, so a shared
-          # default would have the second one find the first already there and
-          # hand you the wrong page.
+          # One per front end, differing in which page is opened, which module
+          # identifies its build, and which port it falls back to.
+          #
+          # Separate ports on purpose: every front end comes out of the same
+          # directory, so a shared default would have the second one find the
+          # first already there and hand you the wrong page. And separate
+          # `--wasm` for the same class of reason — the server tells builds
+          # apart by hashing that module, so a designer identified by the
+          # room's wasm would look unchanged after a rebuild that changed
+          # every line it serves.
           serveFor =
             {
               name,
               page,
+              wasm,
               port,
               about,
             }:
@@ -96,7 +116,8 @@
               text = ''
                 exec python3 ${./dev-server.py} \
                   --directory ${bims}/share/bims \
-                  --page ${page} --default-port ${toString port} "$@"
+                  --page ${page} --wasm ${wasm} \
+                  --default-port ${toString port} "$@"
               '';
               meta.description = about;
             };
@@ -104,6 +125,7 @@
           bims-serve = serveFor {
             name = "bims-serve";
             page = "index.html";
+            wasm = "bims.wasm";
             port = 8080;
             about = "Serve the Bims room on http://localhost:8080";
           };
@@ -111,12 +133,26 @@
           bims-builder = serveFor {
             name = "bims-builder";
             page = "builder.html";
+            wasm = "bims.wasm";
             port = 8081;
             about = "Serve the Bims builder on http://localhost:8081";
           };
+
+          bims-ship = serveFor {
+            name = "bims-ship";
+            page = "ship.html";
+            wasm = "ship.wasm";
+            port = 8082;
+            about = "Serve the Bims ship designer on http://localhost:8082";
+          };
         in
         {
-          inherit bims bims-serve bims-builder;
+          inherit
+            bims
+            bims-serve
+            bims-builder
+            bims-ship
+            ;
         };
     in
     {
@@ -126,13 +162,19 @@
           built = bimsFor pkgs;
         in
         {
-          inherit (built) bims bims-serve bims-builder;
+          inherit (built)
+            bims
+            bims-serve
+            bims-builder
+            bims-ship
+            ;
           default = built.bims;
         }
       );
 
       # One app per thing you can run. `nix run .#game` is the room and is the
-      # default; `nix run .#builder` is the menus in front of it. More will
+      # default; `nix run .#builder` is the menus in front of it, and
+      # `nix run .#ship` is the design phase those menus start. More will
       # follow, and each is a name here rather than a flag on one app.
       apps = eachSystem (
         pkgs:
@@ -150,9 +192,15 @@
             program = nixpkgs.lib.getExe built.bims-builder;
             meta.description = "The start menu, setup and lobby on http://localhost:8081";
           };
+
+          ship = {
+            type = "app";
+            program = nixpkgs.lib.getExe built.bims-ship;
+            meta.description = "Design a ship on http://localhost:8082";
+          };
         in
         {
-          inherit game builder;
+          inherit game builder ship;
           # The old name for the game, kept so `nix run .#serve` still works.
           serve = game;
           default = game;
@@ -174,10 +222,11 @@
           build = built.bims;
 
           # The parts that are pure arithmetic — travel times, ship mass, the
-          # world generator — carry their own unit tests, and those run
-          # natively because a wasm test harness would need a runtime to host
-          # it. The room itself is still checked by the probes and harnesses
-          # in scratchpad/, which want a real terminal.
+          # world generator, the rules for laying out a ship — carry their own
+          # unit tests, and those run natively because a wasm test harness
+          # would need a runtime to host it. The room and the designer are
+          # still checked by the probes and harnesses in scratchpad/, which
+          # want a real terminal.
           tests =
             pkgs.runCommand "bims-check-tests"
               {
@@ -192,11 +241,13 @@
                 chmod -R u+w source
                 cd source
                 export CARGO_HOME="$NIX_BUILD_TOP/cargo"
-                # Named packages rather than --workspace: the room is a
-                # cdylib meant for wasm and its tests are the probes in
-                # scratchpad/, which want a terminal. These three are plain
-                # libraries and their tests are plain `cargo test`.
-                cargo test --locked --offline -p time -p physics -p worldgen \
+                # Named packages rather than --workspace: `bims` and `ship`
+                # are cdylibs meant for wasm and their tests are the probes
+                # and harnesses in scratchpad/, which want a terminal. These
+                # four are plain libraries and their tests are plain
+                # `cargo test`.
+                cargo test --locked --offline \
+                  -p time -p physics -p worldgen -p shipdesign \
                   --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget}
                 touch "$out"
               '';

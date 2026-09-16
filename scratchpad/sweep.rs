@@ -102,23 +102,22 @@ fn main() {
         cleaned_by
     );
 
-    // --- and it is remembered -----------------------------------------------
+    // --- and it is *not* remembered ------------------------------------------
+    //
+    // Sweeping used to go in the diary, tile count and all. It does not any
+    // more: the diary keeps only what went wrong, and a deck that got swept is
+    // the opposite of that. Asserted rather than merely dropped, because
+    // "nothing was written down" is exactly the sort of thing that comes back
+    // by accident the next time somebody adds a `What`.
 
-    let mut swept_entries = 0;
-    let mut tiles_recorded = 0;
+    let mut entries = 0;
     for w in 0..CREW {
-        for i in 0..game.memory_len(w) {
-            if game.memory_what(w, i) == What::Swept.code() {
-                swept_entries += 1;
-                tiles_recorded += game.memory_detail(w, i);
-            }
-        }
+        entries += game.memory_len(w);
     }
-    check!("sweeping goes in the diary", swept_entries > 0, swept_entries);
     check!(
-        "and every line of it did some work",
-        tiles_recorded >= swept_entries,
-        format!("{tiles_recorded} tiles over {swept_entries} entries")
+        "a clean-up is not worth a diary entry",
+        entries == 0,
+        format!("{entries} entries")
     );
 
     // --- one broom ----------------------------------------------------------

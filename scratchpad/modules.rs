@@ -1,49 +1,49 @@
 // The crate's modules, declared once. Every probe `include!`s this rather than
-// carrying its own copy: when they each had one, adding a new src/*.rs meant
+// carrying its own copy: when they each had one, adding a new crates/game/src/*.rs meant
 // every probe but the newest failed to *compile*, and rustc failing leaves the
 // previous binary in place — so running one printed a confident pass from
 // stale code. Three separate rounds of that happened.
-#[path = "../src/bath.rs"]
+#[path = "../crates/game/src/bath.rs"]
 mod bath;
-#[path = "../src/bim.rs"]
+#[path = "../crates/game/src/bim.rs"]
 mod bim;
-#[path = "../src/character.rs"]
+#[path = "../crates/game/src/character.rs"]
 mod character;
-#[path = "../src/clock.rs"]
+#[path = "../crates/game/src/clock.rs"]
 mod clock;
-#[path = "../src/dish.rs"]
+#[path = "../crates/game/src/dish.rs"]
 mod dish;
-#[path = "../src/draw.rs"]
+#[path = "../crates/game/src/draw.rs"]
 mod draw;
-#[path = "../src/filth.rs"]
+#[path = "../crates/game/src/filth.rs"]
 mod filth;
-#[path = "../src/game.rs"]
+#[path = "../crates/game/src/game.rs"]
 mod game;
-#[path = "../src/health.rs"]
+#[path = "../crates/game/src/health.rs"]
 mod health;
-#[path = "../src/hydro.rs"]
+#[path = "../crates/game/src/hydro.rs"]
 mod hydro;
-#[path = "../src/manager.rs"]
+#[path = "../crates/game/src/manager.rs"]
 mod manager;
-#[path = "../src/memory.rs"]
+#[path = "../crates/game/src/memory.rs"]
 mod memory;
-#[path = "../src/math.rs"]
+#[path = "../crates/game/src/math.rs"]
 mod math;
-#[path = "../src/nav.rs"]
+#[path = "../crates/game/src/nav.rs"]
 mod nav;
-#[path = "../src/needs.rs"]
+#[path = "../crates/game/src/needs.rs"]
 mod needs;
-#[path = "../src/rng.rs"]
+#[path = "../crates/game/src/rng.rs"]
 mod rng;
-#[path = "../src/room.rs"]
+#[path = "../crates/game/src/room.rs"]
 mod room;
-#[path = "../src/schedule.rs"]
+#[path = "../crates/game/src/schedule.rs"]
 mod schedule;
-#[path = "../src/task.rs"]
+#[path = "../crates/game/src/task.rs"]
 mod task;
-#[path = "../src/work.rs"]
+#[path = "../crates/game/src/work.rs"]
 mod work;
-#[path = "../src/social.rs"]
+#[path = "../crates/game/src/social.rs"]
 mod social;
 // The shared `time` crate, stood over the same file as a plain module. The
 // game reaches it as `crate::time` for exactly this reason: a probe links

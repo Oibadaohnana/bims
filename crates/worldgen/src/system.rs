@@ -213,7 +213,9 @@ fn generate(galaxy: &Galaxy, star_id: u32, settings: WorldSettings) -> StarSyste
     }
 
     let bodies = place_bodies(seed, star_id, version, desolation, promised);
-    let stations = place_stations(seed, star_id, version, desolation, promised, &bodies, settings);
+    let stations = place_stations(
+        seed, star_id, version, desolation, promised, &bodies, settings,
+    );
 
     StarSystem {
         star_id,
@@ -241,8 +243,11 @@ fn place_bodies(
     // The first body: a seeded distance out from the star. The star is not a
     // node, so this distance is not a constraint — it is only what stops
     // every system starting at the same radius.
-    let first = data::reference_distance(rng.range(data::TRAVEL_BAND.min_days, target_days.max(data::TRAVEL_BAND.min_days)))
-        .unwrap_or(min_gap);
+    let first = data::reference_distance(rng.range(
+        data::TRAVEL_BAND.min_days,
+        target_days.max(data::TRAVEL_BAND.min_days),
+    ))
+    .unwrap_or(min_gap);
     placed.push((draw_kind(&mut rng), DVec2::polar(rng.angle(), first)));
 
     for _ in 1..wanted {
@@ -486,10 +491,7 @@ fn site(
         .filter(|b| b.id != parent_id)
         .map(|b| b.position)
         .min_by(|a, b| {
-            let (da, db) = (
-                a.distance(parent.position),
-                b.distance(parent.position),
-            );
+            let (da, db) = (a.distance(parent.position), b.distance(parent.position));
             da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
         })?;
     let away = parent.position.sub(nearest);
@@ -535,12 +537,7 @@ fn clear(at: DVec2, bodies: &[Body], built: &[StationBlueprint], min_gap: f64) -
         && clear_of_stations(at, bodies, built, min_gap)
 }
 
-fn clear_of_stations(
-    at: DVec2,
-    bodies: &[Body],
-    built: &[StationBlueprint],
-    min_gap: f64,
-) -> bool {
+fn clear_of_stations(at: DVec2, bodies: &[Body], built: &[StationBlueprint], min_gap: f64) -> bool {
     built.iter().all(|s| {
         let base = match s.parent_body {
             None => DVec2::ZERO,
@@ -658,7 +655,10 @@ mod tests {
         backwards.reverse();
         assert_eq!(forwards, backwards);
         // And asking for one in the middle on its own gives the same answer.
-        assert_eq!(g.system(21, WorldSettings::default()).unwrap(), forwards[21]);
+        assert_eq!(
+            g.system(21, WorldSettings::default()).unwrap(),
+            forwards[21]
+        );
     }
 
     /// The whole of the lobby's reach into the world: stores, and nothing
@@ -669,14 +669,20 @@ mod tests {
         let g = Galaxy::new(55, GalaxyType::SpiralTwoArm);
         for id in 0..120 {
             let lean = g
-                .system(id, WorldSettings {
-                    stockpile_factor: 0.5,
-                })
+                .system(
+                    id,
+                    WorldSettings {
+                        stockpile_factor: 0.5,
+                    },
+                )
                 .unwrap();
             let full = g
-                .system(id, WorldSettings {
-                    stockpile_factor: 2.0,
-                })
+                .system(
+                    id,
+                    WorldSettings {
+                        stockpile_factor: 2.0,
+                    },
+                )
                 .unwrap();
             assert_eq!(lean.bodies, full.bodies, "star {id}");
             assert_eq!(lean.desolation, full.desolation);

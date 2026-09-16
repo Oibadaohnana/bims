@@ -1,7 +1,7 @@
 //! World state: the room, the Bim in it, the job it is doing, and the
 //! per-frame draw list handed to the renderer.
 
-use crate::bim::{Bim, CREW, PLAYER, TRAIL_LIFE};
+use crate::bim::{Bim, CREW, PLAYER, TALKS_ABOUT, TRAIL_LIFE};
 use crate::character::{ACCENT, Action, BODY_MARGIN, Held};
 use crate::clock::MINUTES_PER_SECOND;
 use crate::clock::{self, Clock};
@@ -66,7 +66,8 @@ const TALKING_GAP: f32 = 76.0;
 
 /// How far back through a diary a Bim will reach for something to say. A few
 /// days of entries, so the conversation is about the week rather than about
-/// last month.
+/// last month. The errands it has finished are capped separately, by
+/// `bim::TALKS_ABOUT`.
 const RECENT_ENOUGH: usize = 40;
 
 /// What squeezing past costs, as a fraction of the usual pace.
@@ -543,6 +544,16 @@ impl Game {
             if let Some(task) = &mut bim.task {
                 task.update(dt, &mut bim.character, room, maps, rng, fumble, effort);
                 if task.is_done() {
+                    // Kept for the conversation and nothing else — the diary
+                    // does not hold the day's work any more. A chat is not an
+                    // errand worth telling anybody about.
+                    if task.kind() != Kind::Chat {
+                        let did = job_code(task.kind(), task.rest_minutes());
+                        bim.lately.push(did);
+                        if bim.lately.len() > TALKS_ABOUT {
+                            bim.lately.remove(0);
+                        }
+                    }
                     bim.task = None;
                 }
             }
@@ -1565,23 +1576,33 @@ impl Game {
         })
     }
 
-    /// Something for `who` to talk about: one of the things it has been doing,
-    /// picked at random out of its recent diary. 0 when it has nothing to
-    /// report, which the host renders as talking about nothing much.
+    /// Something for `who` to talk about, picked at random out of the last few
+    /// hours. 0 when it has nothing to report, which the host renders as
+    /// talking about nothing much.
+    ///
+    /// Two sources, and the codes do not collide: the errands it has finished
+    /// come back as `JOB_` codes, which run from 1, and the things that
+    /// actually happened to it come out of the diary as `memory::What` codes,
+    /// which start at 20. The host's `CHAT_TOPICS` is indexed by both.
+    ///
+    /// The diary alone is not enough any more. It keeps only what went wrong,
+    /// so a crew that has had a good week would have stood there with nothing
+    /// to say to each other — which is why `Bim::lately` exists.
     fn something_to_say(&mut self, who: usize) -> u32 {
+        let mut going = self.bims[who].lately.clone();
+        // The last stretch of the diary, not the whole book: a bad night three
+        // weeks ago is not this afternoon's conversation.
         let held = self.bims[who].memory.len();
-        if held == 0 {
+        let recent = held.min(RECENT_ENOUGH);
+        for i in (held - recent)..held {
+            if let Some(moment) = self.bims[who].memory.at(i) {
+                going.push(moment.what.code());
+            }
+        }
+        if going.is_empty() {
             return 0;
         }
-        // Out of the last stretch of it rather than the whole book: what they
-        // talk about should be the day they have had, not something from the
-        // week before last.
-        let recent = held.min(RECENT_ENOUGH);
-        let pick = held - recent + self.rng.below(recent as u32) as usize;
-        self.bims[who]
-            .memory
-            .at(pick)
-            .map_or(0, |moment| moment.what.code())
+        going[self.rng.below(going.len() as u32) as usize]
     }
 
     /// Start on whichever tray of the bay wants a hand, if any.

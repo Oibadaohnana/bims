@@ -759,10 +759,6 @@ pub struct Task {
     /// dirt is somewhere a body cannot quite stand.
     target: Option<Vec2>,
     swept: u32,
-    /// What it lifted out of a tray and actually banked in the store. Unlike
-    /// `lifted`, which is taken the moment the hands are empty, this is kept
-    /// for the rest of the chain so the diary can say what the errand was.
-    stowed: Option<Crop>,
     /// What the Bim lifted out of a tray and has not put away yet.
     ///
     /// The hands carry it and this remembers what it is, because `Held` knows
@@ -834,7 +830,6 @@ impl Task {
             target,
             swept: 0,
             lifted: None,
-            stowed: None,
             started_inside: false,
             blocked: false,
             stall: 0.0,
@@ -1053,18 +1048,6 @@ impl Task {
         self.step == Step::Done
     }
 
-    /// What it lifted out of a tray and put in the store, for the diary. Set
-    /// when the crop is banked and kept afterwards, unlike `lifted`, which is
-    /// taken at that moment because the hands are empty again.
-    /// How many tiles it got through this time out, for the diary.
-    pub fn swept(&self) -> u32 {
-        self.swept
-    }
-
-    pub fn stowed(&self) -> Option<Crop> {
-        self.stowed
-    }
-
     pub fn kind(&self) -> Kind {
         self.kind
     }
@@ -1211,7 +1194,6 @@ impl Task {
             target: saved.target,
             swept: saved.swept,
             lifted: saved.lifted,
-            stowed: None,
             started_inside: saved.started_inside,
             blocked: false,
             stall: 0.0,
@@ -1500,7 +1482,6 @@ impl Task {
                 ch.hold_main(Held::Nothing);
                 if let Some(crop) = self.lifted.take() {
                     room.store(crop);
-                    self.stowed = Some(crop);
                 }
             }
             TakePlateAndSpoon => {

@@ -363,7 +363,10 @@ mod tests {
         // And never out of it, whatever it is handed.
         for &d in &[-1.0, 0.0, 0.3, 1.0, 2.0] {
             let t = target_hop_days(d);
-            assert!(t >= TRAVEL_BAND.min_days && t <= TRAVEL_BAND.max_days, "{t}");
+            assert!(
+                t >= TRAVEL_BAND.min_days && t <= TRAVEL_BAND.max_days,
+                "{t}"
+            );
         }
     }
 

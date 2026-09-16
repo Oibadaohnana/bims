@@ -351,22 +351,20 @@
         margin-top: 0;
       }
 
+      /* Everything the diary keeps is something that went wrong — the day's
+         work is not written down at all any more — so every line gets the warm
+         colour the interface keeps for things worth noticing, rather than one
+         tier of them standing out from a page of chores. */
       .diary .line {
         display: flex;
         gap: 8px;
-        color: var(--muted);
+        color: #ffb4a6;
       }
 
       .diary .when {
         flex: none;
         color: #5f7469;
         font-variant-numeric: tabular-nums;
-      }
-
-      /* The ones that stand out: the same warm colour everything worth
-         noticing is drawn in. */
-      .diary .line.notable {
-        color: #ffb4a6;
       }
 
       .diary .nothing {

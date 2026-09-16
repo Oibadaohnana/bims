@@ -162,8 +162,9 @@ mod tests {
     #[test]
     fn a_name_is_the_same_whatever_else_is_asked_for() {
         let before = star_name(3, 11, crate::GENERATOR_VERSION);
-        let _ = crate::rng::Rng::stream(3, 11, crate::GENERATOR_VERSION, crate::rng::Purpose::Bodies)
-            .next_u64();
+        let _ =
+            crate::rng::Rng::stream(3, 11, crate::GENERATOR_VERSION, crate::rng::Purpose::Bodies)
+                .next_u64();
         assert_eq!(before, star_name(3, 11, crate::GENERATOR_VERSION));
     }
 }

@@ -99,7 +99,13 @@ fn main() {
     }
     check!("they are not born on the same day every game", same < 5, same);
 
-    // --- the diary fills ---------------------------------------------------
+    // --- a good week writes nothing down -------------------------------------
+    //
+    // The diary keeps only what actually went wrong. A crew that eats, sleeps,
+    // sweeps and gets on with it for four days should leave a blank page — and
+    // that, rather than a count of entries, is the thing worth asserting: the
+    // old version of this probe checked the diary *filled up*, and it filled up
+    // with "Went to the heads." three times a day.
 
     let mut game = Game::new(5, 960.0, 640.0);
     for _ in 0..(4 * FRAMES_PER_DAY) {
@@ -107,49 +113,14 @@ fn main() {
     }
     for w in 0..CREW {
         let n = game.memory_len(w);
-        println!("       crew {w} remembers {n} things");
-        check!(format!("crew {w} remembers its days"), n > 10, n);
-        // Chronological, so the host can group by day without sorting.
-        let mut last = (0, 0.0f32);
-        let mut ordered = true;
-        for i in 0..n {
-            let here = (game.memory_day(w, i), game.memory_at(w, i));
-            if here.0 < last.0 || (here.0 == last.0 && here.1 < last.1 - 0.001) {
-                ordered = false;
-            }
-            last = here;
-        }
-        check!(format!("crew {w}'s diary is in order"), ordered);
-        // Every entry has to be a code in one of the two blocks `What` uses:
-        // the day's work, and the things that stand out. This only checks the
-        // shape — that the host has *words* for each is asserted over in
-        // `scratchpad/smoke.mjs`, which can see the table they live in.
-        let mut unknown = 0;
-        for i in 0..n {
-            let what = game.memory_what(w, i);
-            if !(1..=10).contains(&what) && !(20..=29).contains(&what) {
-                unknown += 1;
-            }
-        }
-        check!(format!("crew {w}'s entries are all nameable"), unknown == 0, unknown);
+        let kinds: Vec<u32> = (0..n).map(|i| game.memory_what(w, i)).collect();
+        println!("       crew {w} remembers {n} things: {kinds:?}");
+        check!(
+            format!("crew {w} has nothing to report after a quiet four days"),
+            n == 0,
+            format!("{kinds:?}")
+        );
     }
-
-    // The ordinary run of a day has to be in there.
-    let mut game = Game::new(5, 960.0, 640.0);
-    let mut kinds = std::collections::BTreeSet::new();
-    for _ in 0..(6 * FRAMES_PER_DAY) {
-        game.update(STEP);
-    }
-    for w in 0..CREW {
-        for i in 0..game.memory_len(w) {
-            kinds.insert(game.memory_what(w, i));
-        }
-    }
-    println!("       kinds of thing remembered over six days: {kinds:?}");
-    check!("they remember waking", kinds.contains(&What::Woke.code()));
-    check!("they remember eating", kinds.contains(&What::Ate.code()) || kinds.contains(&What::AteLeftovers.code()));
-    check!("they remember the heads", kinds.contains(&What::UsedHeads.code()));
-    check!("they remember tending the bay", kinds.contains(&What::Tended.code()));
 
     // --- and the bad days --------------------------------------------------
     //
@@ -163,19 +134,36 @@ fn main() {
         game.set_schedule_slot(hour, 0);
     }
     let mut kinds = std::collections::BTreeSet::new();
-    let mut notable = 0;
     for _ in 0..(3 * FRAMES_PER_DAY) {
         game.update(STEP);
     }
     for w in 0..CREW {
-        for i in 0..game.memory_len(w) {
-            kinds.insert(game.memory_what(w, i));
-            if game.memory_notable(w, i) {
-                notable += 1;
+        let n = game.memory_len(w);
+        check!(format!("crew {w} has something to report now"), n > 0, n);
+        // Chronological, so the host can group by day without sorting.
+        let mut last = (0, 0.0f32);
+        let mut ordered = true;
+        for i in 0..n {
+            let here = (game.memory_day(w, i), game.memory_at(w, i));
+            if here.0 < last.0 || (here.0 == last.0 && here.1 < last.1 - 0.001) {
+                ordered = false;
             }
+            last = here;
         }
+        check!(format!("crew {w}'s diary is in order"), ordered);
+        // Every entry has to be a code `What` actually uses. This checks the
+        // shape only — that the host has *words* for each is asserted over in
+        // `scratchpad/smoke.mjs`, which can see the table they live in.
+        let mut unknown = 0;
+        for i in 0..n {
+            if !(20..=30).contains(&game.memory_what(w, i)) {
+                unknown += 1;
+            }
+            kinds.insert(game.memory_what(w, i));
+        }
+        check!(format!("crew {w}'s entries are all nameable"), unknown == 0, unknown);
     }
-    println!("       kinds after three bad days: {kinds:?}  notable entries: {notable}");
+    println!("       kinds after three bad days: {kinds:?}");
     check!("an accident is remembered", kinds.contains(&What::Accident.code()));
     check!("being sick is remembered", kinds.contains(&What::WasSick.code()));
     check!("going hungry is remembered", kinds.contains(&What::Hungrier.code()));
@@ -184,7 +172,38 @@ fn main() {
         "and one of them remembers seeing the other's",
         kinds.contains(&What::SawAccident.code()) || kinds.contains(&What::SawSickness.code())
     );
-    check!("the bad ones are marked as standing out", notable > 0, notable);
+    // --- and a death is the one nobody misses --------------------------------
+    //
+    // Everything else in here is written down only by whoever it happened to,
+    // or by whoever was near enough to see it. This one goes in every
+    // surviving diary wherever they were standing, which is the whole of what
+    // "significant" was meant to mean.
+
+    let mut game = Game::new(4, 960.0, 640.0);
+    // Ten days alone is past the point where a Bim gives up. Re-pinned every
+    // frame, because the other one coming over for a word resets the clock.
+    let mut gone = false;
+    for _ in 0..(3 * FRAMES_PER_DAY) {
+        game.leave_alone_for_probe(PLAYER, 11.0);
+        game.update(STEP);
+        if !game.is_alive(PLAYER) {
+            gone = true;
+            break;
+        }
+    }
+    check!("a Bim left long enough alone dies", gone);
+    let saw_it = (0..game.memory_len(1)).any(|i| {
+        game.memory_what(1, i) == What::CrewDied.code()
+            && game.memory_detail(1, i) == PLAYER as u32
+    });
+    check!("and the other one writes it down", saw_it);
+    check!(
+        "naming which of the crew it was",
+        (0..game.memory_len(1))
+            .filter(|&i| game.memory_what(1, i) == What::CrewDied.code())
+            .count()
+            == 1
+    );
 
     // The book is bounded: a Bim left running does not grow for ever.
     let mut game = Game::new(6, 960.0, 640.0);

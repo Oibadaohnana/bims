@@ -34,20 +34,13 @@ pub fn max_hop() -> f64 {
 #[derive(Clone, PartialEq, Debug)]
 pub enum Fault {
     /// Two nodes a player could not tell apart from a day's flying.
-    TooClose {
-        a: Node,
-        b: Node,
-        days: f64,
-    },
+    TooClose { a: Node, b: Node, days: f64 },
     /// A node with no chain of short-enough hops to the rest of the system.
     /// Carries the whole stranded group, because one node cut off and nine
     /// cut off together are different bugs.
     Stranded(Vec<Node>),
     /// A station sharing a parent body with another.
-    ParentTaken {
-        station: u32,
-        parent_body: u32,
-    },
+    ParentTaken { station: u32, parent_body: u32 },
     /// A station attached to something it does not belong on.
     WrongParent(u32),
     /// A station with nowhere in its own system to fly to.
@@ -176,7 +169,9 @@ mod tests {
 
     #[test]
     fn the_two_distances_are_the_band_in_units() {
-        assert!((data::reference_days(min_separation()).unwrap() - TRAVEL_BAND.min_days).abs() < 1e-9);
+        assert!(
+            (data::reference_days(min_separation()).unwrap() - TRAVEL_BAND.min_days).abs() < 1e-9
+        );
         assert!((data::reference_days(max_hop()).unwrap() - TRAVEL_BAND.max_days).abs() < 1e-9);
         assert!(max_hop() > min_separation());
     }

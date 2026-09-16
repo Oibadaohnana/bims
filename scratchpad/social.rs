@@ -2,8 +2,8 @@
 //
 // Two halves, and they want testing very differently.
 //
-// The **ordinary** half is two Bims who talk to each other twice a day and are
-// never lonely. That runs itself: start a game, leave it a week, and check
+// The **ordinary** half is two Bims who talk to each other several times a day
+// and are never lonely. That runs itself: start a game, leave it a week, and check
 // nobody ever reaches the first stage.
 //
 // The **other** half takes ten game days to reach and is the part nobody will
@@ -153,6 +153,7 @@ fn main() {
         let mut worst = [0.0f32; CREW];
         let mut lowest_bar = [1.0f32; CREW];
         let mut bubbles = 0;
+        let mut topics = std::collections::BTreeSet::new();
         for _ in 0..(7 * FRAMES_PER_DAY) {
             game.update(STEP);
             for w in 0..CREW {
@@ -165,13 +166,18 @@ fn main() {
                 lowest_bar[w] = lowest_bar[w].min(game.need_level(w, COMPANY));
                 if game.chat_topic(w) != 0 {
                     bubbles += 1;
+                    topics.insert(game.chat_topic(w));
                 }
             }
         }
         for w in 0..CREW {
+            // Four times a waking day, so somewhere near thirty over a week.
+            // Wide, because the count moves with how often they are both free
+            // at the same moment, but tight enough to catch the rate being
+            // halved or doubled.
             check!(
-                format!("seed {seed}, crew {w}: gets talked to, about twice a day"),
-                (10..=20).contains(&chats[w]),
+                format!("seed {seed}, crew {w}: gets talked to, about four times a day"),
+                (22..=40).contains(&chats[w]),
                 chats[w]
             );
             check!(
@@ -179,23 +185,33 @@ fn main() {
                 worst[w] < 3.0 && game.loneliness(w) == 0,
                 format!("{:.2} days at worst", worst[w])
             );
+            // The bar sits around its trigger rather than swinging the whole
+            // way: they set off at half a bar, and a conversation is worth
+            // only three tenths of one. It should dip under the trigger and
+            // never come anywhere near empty.
             check!(
-                format!("seed {seed}, crew {w}: the bar goes down and comes back"),
-                lowest_bar[w] < 0.5 && game.need_level(w, COMPANY) > 0.0,
+                format!("seed {seed}, crew {w}: the bar hovers about its trigger"),
+                lowest_bar[w] < needs::COMPANY_TRIGGER && lowest_bar[w] > 0.20,
                 format!("{:.2} at worst", lowest_bar[w])
             );
         }
         // Exactly one of them holds the floor at a time: two bubbles over two
         // Bims a body's width apart would sit on top of each other.
         check!(format!("seed {seed}: somebody is visibly saying something"), bubbles > 0);
-        // And both remember it.
-        for w in 0..CREW {
-            check!(
-                format!("seed {seed}, crew {w}: writes the conversations down"),
-                (0..game.memory_len(w)).any(|i| game.memory_what(w, i) == What::Talked.code())
-            );
-        }
-        println!("       seed {seed}: {chats:?} conversations in a week");
+        // And they have something to say. A conversation is not written in the
+        // diary — the diary keeps only what went wrong — so what is checked
+        // here is that the *topics* were real: a Bim that talked about nothing
+        // all week means `Bim::lately` is not being filled and every bubble
+        // aboard reads "nothing much".
+        check!(
+            format!("seed {seed}: and more than one thing gets talked about"),
+            topics.len() > 1,
+            format!("{topics:?}")
+        );
+        println!(
+            "       seed {seed}: {chats:?} conversations in a week, about {:?}",
+            topics
+        );
     }
 
     // --- one of them left out of it ------------------------------------------

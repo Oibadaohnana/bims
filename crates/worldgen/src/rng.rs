@@ -80,12 +80,7 @@ impl Rng {
 
     /// The stream for one purpose within one system. Every draw in this crate
     /// starts here or from [`Rng::branch`].
-    pub fn stream(
-        galaxy_seed: u64,
-        star_id: u32,
-        generator_version: u32,
-        purpose: Purpose,
-    ) -> Rng {
+    pub fn stream(galaxy_seed: u64, star_id: u32, generator_version: u32, purpose: Purpose) -> Rng {
         Rng::new(seed_for(galaxy_seed, star_id, generator_version, purpose))
     }
 

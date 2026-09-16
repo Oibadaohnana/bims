@@ -1,21 +1,22 @@
-# The workspace root. `bims` — the room, and the only cdylib — is still the
-# package here; everything a future native server will also need lives in
-# `crates/` beside it, so those parts compile for x86 as readily as for wasm.
-[package]
-name = "bims"
-version = "0.1.0"
-edition = "2024"
-description = "Bims - a 2D top-down game that runs in the browser"
-
-[lib]
-crate-type = ["cdylib"]
-
-[dependencies]
-time = { path = "crates/time" }
-
+# The workspace. Nothing is built from here directly — every crate is in
+# `crates/`:
+#
+#   game      the room: the simulation and its wasm exports. The cdylib.
+#   worldgen  the galaxy, systems and station blueprints. Client and server.
+#   physics   ship mass, engine thrust and travel time. Pure arithmetic.
+#   time      how long a minute, an hour and a day are. Defined once.
+#
+# The split is not tidiness. `worldgen` has to produce the same world on the
+# wasm client and on the native server that will one day be authoritative, and
+# `physics` has to give the same answers to the world generator now that it
+# gives the builder and the flight step later. Two implementations of either
+# would be two different games.
 [workspace]
 members = ["crates/*"]
+resolver = "3"
 
+# Profiles live here rather than in a member: cargo reads them from the
+# workspace root only, and a `[profile]` in a member is silently ignored.
 [profile.release]
 opt-level = "z"
 lto = true

@@ -34,6 +34,11 @@ pub const PLAYER: usize = 0;
 pub const TRAIL_LIFE: f32 = 2.2;
 pub const TRAIL_INTERVAL: f32 = 0.08;
 
+/// How many finished errands a Bim keeps to make conversation out of. A few
+/// hours' worth: what they talk about should be the afternoon they have just
+/// had, not something from the week before last.
+pub const TALKS_ABOUT: usize = 8;
+
 pub struct Footprint {
     pub pos: Vec2,
     pub age: f32,
@@ -58,10 +63,19 @@ pub struct Bim {
     /// Works exactly like `nap_left`: the frame stops for this Bim while it
     /// runs, and whatever it was in the middle of is still there afterwards.
     pub sad_left: f32,
-    /// What it is talking about this instant, as a `memory::What` code, or 0.
-    /// Set when a chat is arranged and cleared when it ends; the host turns it
-    /// into a sentence in a bubble, because no strings cross the boundary.
+    /// What it is talking about this instant, as a topic code, or 0. Set when
+    /// a chat is arranged and cleared when it ends; the host turns it into a
+    /// sentence in a bubble, because no strings cross the boundary.
     pub chat_topic: u32,
+    /// The last few errands it finished, as `job_code`s, newest last.
+    ///
+    /// Small talk and nothing else. A Bim used to have something to say by
+    /// reading its own diary back — but the diary now keeps only the things
+    /// that went wrong, and a crew whose week has gone well would have had
+    /// nothing to say to each other at all. So what it has been *doing* is
+    /// kept here instead, where nothing but the conversation reads it, and
+    /// forgotten again as fast as it arrives.
+    pub lately: Vec<u32>,
     /// Seconds until it next looks for somewhere cleaner to stand.
     pub flee_wait: f32,
     /// Where the player sent it, held back until a door has been opened. Only
@@ -101,6 +115,7 @@ impl Bim {
             nap_left: 0.0,
             sad_left: 0.0,
             chat_topic: 0,
+            lately: Vec::new(),
             flee_wait: 0.0,
             pending_move: None,
             trail: Vec::new(),

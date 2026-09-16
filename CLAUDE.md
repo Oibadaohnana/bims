@@ -53,6 +53,36 @@ The page loads `bims.js` and `bims.wasm` under a per-load query string and the
 server sends `no-store`, so a stale *browser* cache is not usually the culprit —
 a stale *server* is.
 
+## It is a workspace now, and the room is one crate of four
+
+Everything is under `crates/`. `game` is the room — the simulation and the wasm
+exports, the only cdylib, and what used to be `src/`. Beside it are three
+libraries that have to give the same answer in more than one place: `worldgen`
+(the galaxy, systems and station blueprints, which a native server will one day
+generate identically), `physics` (ship mass, thrust and travel time, wanted by
+`worldgen` now and by the builder and flight steps later) and `time` (how long
+a day is).
+
+Four things about that are easy to get wrong:
+
+- **Profiles only work at the workspace root.** A `[profile.release]` in
+  `crates/game/Cargo.toml` is *silently ignored* — the `opt-level = "z"`,
+  `lto` and `panic = "abort"` that keep the wasm small have to stay in the root
+  `Cargo.toml`, which is otherwise a bare `[workspace]`.
+- **`cargo build` at the root builds every member.** `nix flake check` passes
+  `--workspace` on purpose: without it only `bims` is built and `worldgen`
+  breaking for wasm would go unnoticed until something imported it.
+- **The libraries' tests are `cargo test`, the room's are the probes.** Running
+  them wants a target: `.cargo/config.toml` pins `wasm32-unknown-unknown`, so
+  it is
+  `cargo test --target x86_64-unknown-linux-gnu -p physics -p worldgen`.
+  `nix flake check` runs exactly that as `checks.tests`.
+- **`crate::time`, never `time::`.** `clock.rs` reaches the `time` crate
+  through the crate root, because the probes link nothing and stand a plain
+  `mod time;` over the same file — see `scratchpad/modules.rs`. Spelled
+  `time::` it would only resolve through the extern prelude and every probe
+  would need a `--extern` and a build step behind it.
+
 ## Verifying a change
 
 `cargo build` succeeding proves nothing about the browser. The host is plain
@@ -88,18 +118,18 @@ buffer as SVG to look at the room without a browser.
   something unique, and re-read the result.
 - `f32::clamp` panics when its bounds cross, and that panic path drags Rust's
   formatting machinery into the wasm — 19 KB of binary. Use the branchless
-  `clamp` in `src/math.rs`.
+  `clamp` in `crates/game/src/math.rs`.
 - The renderer reads the stride at runtime via `bims_stride()` but still assumes
-  the field *order* in `src/draw.rs`.
+  the field *order* in `crates/game/src/draw.rs`.
 - No strings cross the wasm boundary. The host asks for numbers and does its own
   formatting; that is deliberate, so keep it that way.
 
 ## New files need `git add`
 
-`nix run .` and `nix flake check` build from the **git tree**, so a new `src/*.rs`
+`nix run .` and `nix flake check` build from the **git tree**, so a new `crates/game/src/*.rs`
 that is only on disk is invisible to them — the build fails with
-`failed to resolve mod <name>: /build/source/src/<name>.rs does not exist` even
-though `cargo build` is perfectly happy. `git add -N src/<name>.rs` is enough;
+`failed to resolve mod <name>: /build/source/crates/game/src/<name>.rs does not exist` even
+though `cargo build` is perfectly happy. `git add -N crates/game/src/<name>.rs` is enough;
 it does not commit anything.
 
 ## The stub DOM has to keep up with the host
@@ -114,7 +144,7 @@ than the copies.
 ## Probes must share one module list
 
 The native probes in the scratchpad declare the crate's modules by `#[path]`.
-When they each carried their own copy of that list, adding a new `src/*.rs`
+When they each carried their own copy of that list, adding a new `crates/game/src/*.rs`
 meant every probe but the newest failed to *compile* — and `rustc` failing
 leaves the previous binary in place, so running it printed a confident pass
 from stale code. Three separate rounds of that happened. They now
@@ -427,7 +457,7 @@ it.
 
 `Game` holds `bims: Vec<Bim>` and almost every method that used to touch
 `self.character` / `self.task` / `self.needs` now takes a `who: usize` first.
-`src/bim.rs` owns the per-crew state; the room, the clock, the deck's filth,
+`crates/game/src/bim.rs` owns the per-crew state; the room, the clock, the deck's filth,
 the timetable and the manager stay on `Game` because they are the ship's.
 
 Three rules that keep it honest:
@@ -573,18 +603,35 @@ deliberately separate questions, and the split is what lets the right-hand side
 show whichever Bim you clicked while `order_move` still refuses anybody but
 James. Exactly one is selected at a time, because the panels show one at a time.
 
-## The diary keeps no words
+## The diary keeps no words, and almost no entries
 
 `memory.rs` stores `(day, minutes, code, one number)` and nothing else;
-`MEMORY_LINES` in `web/bims.js` is where every sentence lives. Adding a kind of
-thing to remember means adding a `What` *and* a line in that table — miss the
-second and it renders as "Something happened." The smoke harness fails on that
-string for exactly this reason.
+`MEMORY_LINES` in `web/bims.js` is where every sentence lives.
 
-Entries are written when an errand *ends*, which is why a night's sleep is filed
-under waking rather than going to bed. `Task::stowed` exists only so the diary
-can tell a harvest from a planting after the fact: `lifted` is taken the moment
-the hands are empty, so it is gone by the time the chain finishes.
+**It only records what went wrong.** The day's work is not written down at all
+— it used to be, and the page filled with "Went to the heads." three times a
+day. So a quiet week leaves the diary *empty*, and `scratchpad/diary.rs`
+asserts exactly that: a clean four days must produce nought entries. If you
+find yourself adding a `What` for something that goes right, that is the rule
+saying no.
+
+An entry with no line in `MEMORY_LINES` is **dropped from the page** rather
+than rendered as a placeholder. There used to be a "Something happened."
+fallback and a harness check for that string; both are gone. What catches a
+missing line now is `smoke.mjs`'s `lines.length === bims_memory_len(0)` — a
+code with no words is a row that never appears, so the count comes up short.
+
+Two knock-ons worth knowing, both of which bit when this changed:
+
+- **A Bim had nothing to say.** Conversation topics were drawn from the
+  speaker's own diary, so trimming the diary left both crew talking about
+  "nothing much" for ever. `Bim::lately` now holds the last few finished
+  errands as `job_code`s purely for small talk. `bims_chat_topic` therefore
+  returns **two code spaces** — `JOB_` codes from 1, `What` codes from 20 —
+  and `CHAT_TOPICS` is indexed by both. They do not overlap; keep it that way.
+- **`Task::stowed` and `Task::swept()` existed only for the diary** and were
+  dead the moment it stopped recording errands. Both are gone. If a diary
+  entry ever wants that detail back, it has to be carried again.
 
 ## The stub's attribute selector wanted quotes
 
@@ -659,12 +706,19 @@ for good — and since the locker door is drawn from whose hands it is in, the
 cupboard would stand empty and nobody could ever take a broom that was never
 returned. Add a held item and this is the second place to touch.
 
-## A new `What` needs three edits, not one
+## A new `What` needs four edits, not one
 
-`memory.rs` for the code, `MEMORY_LINES` in `web/bims.js` for the sentence, and
-the range in `scratchpad/diary.rs` that checks every entry is nameable. Miss
-the second and the diary renders "Something happened."; miss the third and the
-probe fails on a perfectly good entry, which is what `Swept = 9` did.
+`memory.rs` for the code, `MEMORY_LINES` in `web/bims.js` for the sentence,
+`CHAT_TOPICS` beside it for the short form a Bim says out loud, and the range
+in `scratchpad/diary.rs` that checks every entry is nameable.
+
+Miss the sentence and the entry is silently **dropped from the page** — no
+placeholder any more — which `smoke.mjs` catches only through its row count.
+Miss the range and the probe fails on a perfectly good entry, which is what
+`Swept = 9` did.
+
+And before adding one at all: the diary keeps only what went wrong. A `What`
+for something that went right does not belong in it.
 
 ## The builder is a second page, not a second mode
 

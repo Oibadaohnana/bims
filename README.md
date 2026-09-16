@@ -164,23 +164,36 @@ readout to be watched.
 
 ### What a Bim remembers
 
-One line per thing worth a line, newest day at the top and in the order it
-happened within a day. The ordinary entries are the errands it finished:
-*"04:38 Woke up after 6 hours"*, *"12:06 Made myself a bowl and ate it"*,
-*"13:33 Put something in to grow"*. They are written when the errand ends,
-which is why a night's sleep is filed under waking up rather than going to
-bed — that reads better and puts it on the day it mattered to.
+**Only what went wrong.** Newest day at the top, in the order it happened
+within a day, and a crew who spend the week eating, sleeping and getting on
+with their work leave the page **blank** — it says *"Nothing has gone wrong."*
+and that is the good outcome rather than a panel that failed to load.
 
-The ones that stand out are marked in the warm colour the rest of the game
-keeps for trouble, and they are the things that went wrong: an accident, being
-sick, dropping off standing up, and each stage further into hunger or
-sleeplessness as it arrives — once, as it happens, not once a frame for as long
-as it lasts. Coming back out of one is not an entry; the bars say so.
+It used to keep the day's work too — *"Woke up after 6 hours"*, *"Went to the
+heads"*, *"Swept 5 patches of the deck"* — three or four times a day each,
+which meant scrolling past a wall of chores to find the one line that mattered.
+Now the chores are not written down at all.
+
+What is left: an accident, being sick, dropping off standing up, each stage
+further into hunger or sleeplessness as it arrives — once, as it happens, not
+once a frame for as long as it lasts — the low moments of a Bim nobody has
+spoken to, sitting down on the deck, hurting itself. Coming back out of one is
+not an entry; the bars say so.
 
 And **what it saw**. When something happens to one of the crew, any of the
 others near enough to see it and awake to notice remembers that too: *"Saw Kate
 have an accident."* A Bim asleep in its bunk on the far side of the compartment
 witnessed nothing, and a diary that claims otherwise is one nobody can trust.
+
+**A death is the exception to that.** It goes into every surviving diary
+wherever they happened to be standing, because it is the one thing aboard
+nobody could fail to notice — and it is the thing the whole "only what matters"
+rule exists to make findable.
+
+An entry with no words for it is **dropped from the page** rather than padded
+with a placeholder. A line that says "Something happened." reads as the Bim
+having had a mysterious experience when in truth the table is simply short an
+entry; a missing row is at least honest, and it is what `smoke.mjs` counts.
 
 No strings cross the wasm boundary, here as everywhere. An entry is a day, a
 time, a code and one number; `MEMORY_LINES` in `web/bims.js` is where the
@@ -1296,7 +1309,7 @@ one that sticks out is solid too.
 
 ## Time
 
-`src/clock.rs` keeps one clock for the whole game: minutes since midnight, and
+`crates/game/src/clock.rs` keeps one clock for the whole game: minutes since midnight, and
 which day it is. One real second is one game minute at 1x, so a day takes
 twenty-four minutes of real time and a six-hour sleep takes six — and because
 the clock runs off the same `dt` as everything else, the speed slider carries it
@@ -1309,7 +1322,7 @@ rectangle — so nothing in `room.rs` has to know what time it is.
 
 ## The look of it
 
-Everything is drawn from the two primitives in `src/draw.rs`, so "futuristic"
+Everything is drawn from the two primitives in `crates/game/src/draw.rs`, so "futuristic"
 here is a matter of palette and of what gets a light on it rather than of any
 new drawing machinery. The deck is dark blue-grey, the fittings are composite
 panel in three shades, and one cyan running light is picked up by every powered
@@ -1348,30 +1361,51 @@ crossing the boundary are a handful of numbers and one pointer, which means no
 binding generator and no JavaScript in the build — `cargo build` is the whole
 pipeline, and the module has zero imports.
 
+### Four crates
+
+The repository is a cargo workspace and everything is under `crates/`. The
+split is not tidiness — each line of it is something that has to give the same
+answer in two places at once:
+
+| Crate | What it is | Who else needs it |
+| --- | --- | --- |
+| `game` | The room: the simulation, and the wasm exports. The only cdylib | — |
+| `worldgen` | The galaxy, what is in each system, and station blueprints | The native server that will one day be authoritative, which has to generate the identical world from the same seed |
+| `physics` | Ship mass, engine thrust, travel time. Pure arithmetic | `worldgen` now, to check its layouts; the builder and the flight step later |
+| `time` | How long a minute, an hour and a day are | All of them — a day that is two lengths is two games |
+
+`worldgen`, `physics` and `time` build for `wasm32` and for the host both, and
+`nix flake check` builds them both ways and runs their unit tests natively.
+`game` is wasm-shaped and is checked by the probes in `scratchpad/` instead.
+
+### Inside the room
+
+Relative to `crates/game/src/`:
+
 | File | What lives there |
 | --- | --- |
-| `src/lib.rs` | The wasm exports the host calls |
-| `src/game.rs` | Ties the room, the Bim and the running task together; input |
-| `src/room.rs` | The room: layout, fixture state, and how it is drawn |
-| `src/bath.rs` | The heads: its bulkheads, its door, and its fittings |
-| `src/dish.rs` | The dishwasher: what is in it, and the cycle it runs |
-| `src/needs.rs` | What the Bim wants, and the rates that shape its day |
-| `src/health.rs` | Going hungry, the three stages of it, and health |
-| `src/filth.rs` | The state of the deck, and what a mess does to the Bim |
-| `src/hydro.rs` | The hydroponic bay: five trays, and what goes in them |
-| `src/manager.rs` | What the place is told to keep in stock |
-| `src/schedule.rs` | The day's timetable, and when it is worth obeying |
-| `src/task.rs` | The scripted chains — a meal, a sleep, a trip to the heads |
-| `src/clock.rs` | The time of day, and how much light there is |
-| `src/character.rs` | The Bim — how it decides where to go, and how it is drawn |
-| `src/draw.rs` | The shape buffer and the local frame used for sprites |
-| `src/math.rs`, `src/rng.rs` | Vectors, rectangles, angles, and a PCG32 generator |
+| `lib.rs` | The wasm exports the host calls |
+| `game.rs` | Ties the room, the Bim and the running task together; input |
+| `room.rs` | The room: layout, fixture state, and how it is drawn |
+| `bath.rs` | The heads: its bulkheads, its door, and its fittings |
+| `dish.rs` | The dishwasher: what is in it, and the cycle it runs |
+| `needs.rs` | What the Bim wants, and the rates that shape its day |
+| `health.rs` | Going hungry, the three stages of it, and health |
+| `filth.rs` | The state of the deck, and what a mess does to the Bim |
+| `hydro.rs` | The hydroponic bay: five trays, and what goes in them |
+| `manager.rs` | What the place is told to keep in stock |
+| `schedule.rs` | The day's timetable, and when it is worth obeying |
+| `task.rs` | The scripted chains — a meal, a sleep, a trip to the heads |
+| `clock.rs` | The time of day, and how much light there is — restated from the `time` crate as `f32`, not defined again |
+| `character.rs` | The Bim — how it decides where to go, and how it is drawn |
+| `draw.rs` | The shape buffer and the local frame used for sprites |
+| `math.rs`, `rng.rs` | Vectors, rectangles, angles, and a PCG32 generator |
 | `web/bims.js` | Canvas renderer, input, and the fixture menus |
 
 ### Getting about
 
 Every walk — a right-click order, and every leg of a scripted job — is planned
-on a grid in `src/nav.rs`. Obstacles are inflated by the body radius before the
+on a grid in `crates/game/src/nav.rs`. Obstacles are inflated by the body radius before the
 search, so a route that exists on the grid is one the Bim can physically walk
 without clipping a corner. A* returns a staircase of cells, which is then pulled
 straight by dropping every waypoint that can be skipped with a clear line of
@@ -1513,8 +1547,8 @@ strokes the outline instead of filling it. `bims_stride()` reports the stride so
 the host never has to hardcode it.
 
 If you change the layout, note that the renderer reads the stride at runtime but
-still assumes the field *order* in `src/draw.rs`.
+still assumes the field *order* in `crates/game/src/draw.rs`.
 
 One trap worth knowing: `f32::clamp` panics when its bounds are crossed, and
 that panic path drags Rust's formatting machinery into the wasm — it cost 19 KB
-of the binary before being swapped for the branchless `clamp` in `src/math.rs`.
+of the binary before being swapped for the branchless `clamp` in `crates/game/src/math.rs`.

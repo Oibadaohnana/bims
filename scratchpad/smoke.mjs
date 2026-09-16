@@ -367,28 +367,42 @@ sheetTabs[1].dispatch("click", {});
 step(1);
 check("clicking Memory opens it", !memory.hidden && about.hidden);
 
-// Run until there is something to read. A day at a time so this stays quick.
+// The diary keeps only what went wrong, so a crew getting on with their day
+// leaves it blank — and that is the reading, not a failure. Run a while to
+// prove the page copes with having nothing on it.
+step(4000);
+const blank = wasm.bims_memory_len(0);
+check("an uneventful start leaves the diary empty", blank === 0, String(blank));
+check(
+  "and the page says so rather than showing an empty box",
+  memory.querySelectorAll(".nothing").length > 0 ||
+    memory.textContent.trim().length > 0,
+  JSON.stringify(memory.textContent),
+);
+
+// Now give it something to write down. Emptying the food need and taking the
+// timetable away is the quickest route to a Bim that goes hungry, which is
+// one of the things the diary does keep.
+wasm.bims_set_autonomous(0);
+for (let hour = 0; hour < 24; hour++) wasm.bims_set_schedule_slot(hour, 0);
 let filled = false;
-for (let i = 0; i < 200 && !filled; i++) {
+for (let i = 0; i < 400 && !filled; i++) {
   step(200);
   filled = wasm.bims_memory_len(0) > 0;
 }
 step(2);
-check("the diary fills as the day goes on", filled, String(wasm.bims_memory_len(0)));
+check("but a bad day does get written down", filled, String(wasm.bims_memory_len(0)));
 const dayHeads = memory.querySelectorAll(".day");
 const lines = memory.querySelectorAll(".line");
 check("it is grouped by day", dayHeads.length > 0, String(dayHeads.length));
+// This count is what catches a `What` with no entry in `MEMORY_LINES`: an
+// entry with no words is dropped from the page rather than padded out with a
+// placeholder, so it shows up here as a missing row.
 check("with a line per thing", lines.length === wasm.bims_memory_len(0), String(lines.length));
 check(
   "each line has a time and a sentence",
   lines.every((l) => /^\d\d:\d\d/.test(l.textContent) && l.textContent.length > 8),
   lines[0]?.textContent,
-);
-// No entry may come out as the fallback: every code wasm can emit needs words.
-check(
-  "every entry has words for it",
-  !lines.some((l) => l.textContent.includes("Something happened.")),
-  lines.find((l) => l.textContent.includes("Something happened."))?.textContent,
 );
 console.log(`       first diary line: ${lines[0]?.textContent}`);
 

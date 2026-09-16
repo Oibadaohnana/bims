@@ -1,0 +1,15 @@
+# The room: the simulation, and the wasm exports the browser drives it
+# through. The only cdylib in the workspace — everything a future native
+# server also needs lives in a sibling crate instead, which is what keeps this
+# one free to be wasm-shaped.
+[package]
+name = "bims"
+version = "0.1.0"
+edition = "2024"
+description = "Bims - a 2D top-down game that runs in the browser"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+time = { path = "../time" }

@@ -414,7 +414,10 @@ mod tests {
             // Placement gives up after sixteen tries rather than looping, so
             // a crowded core can leave a handful. A handful is the point; a
             // hundred would mean the separation is not being tried for.
-            assert!(too_close < 10, "{t:?}: {too_close} pairs of stars too close");
+            assert!(
+                too_close < 10,
+                "{t:?}: {too_close} pairs of stars too close"
+            );
         }
     }
 
@@ -457,8 +460,14 @@ mod tests {
         let two = lumpiness(GalaxyType::SpiralTwoArm);
         let four = lumpiness(GalaxyType::Spiral);
         assert!(round < 0.25, "a round galaxy should be even: {round}");
-        assert!(two > round * 2.0, "two arms should be lumpy: {two} vs {round}");
-        assert!(four > round * 2.0, "four arms should be lumpy: {four} vs {round}");
+        assert!(
+            two > round * 2.0,
+            "two arms should be lumpy: {two} vs {round}"
+        );
+        assert!(
+            four > round * 2.0,
+            "four arms should be lumpy: {four} vs {round}"
+        );
         // An elliptical is even in angle like a round one, so lumpiness will
         // not separate them: it is told apart by being squashed. Measured
         // along its own axes rather than along x and y, because the squash is

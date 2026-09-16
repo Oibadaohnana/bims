@@ -88,22 +88,14 @@ const MONTH_NAMES = [
 /** How a Bim says each thing it remembers, by the code from `src/memory.rs`.
  *
  * First person, because it is its diary. `d` is the one detail that came with
- * the entry — a dish, a crop, a stage, which of the crew — and each of these
- * is free to ignore it. */
+ * the entry — a stage, which of the crew — and each of these is free to
+ * ignore it.
+ *
+ * Only things that actually went wrong are in here, because only those are
+ * written down any more: the ordinary run of a day left a wall of "Went to the
+ * heads." to scroll past. An entry with no line here is dropped from the page
+ * rather than padded out — see `paintDiary`. */
 const MEMORY_LINES = {
-  1: (d) => `Woke up after ${d} hours.`,
-  2: () => "Had a lie-down.",
-  3: (d) => (d === 1 ? "Made myself a bowl and ate it." : "Made a stew and ate it."),
-  4: () => "Helped myself to what was left in the pot.",
-  5: () => "Went to the heads.",
-  6: (d) =>
-    d === 0
-      ? "Put something in to grow."
-      : `Lifted ${d === 1 ? "the greens" : "the soy"} and stowed them.`,
-  7: () => "Set the dishwasher going.",
-  8: () => "Went and worked a switch.",
-  9: (d) =>
-    d === 1 ? "Swept a patch of the deck." : `Swept ${d} patches of the deck.`,
   20: (d) =>
     d === 1
       ? "Could not hold it. I would rather not talk about it."
@@ -134,27 +126,36 @@ const MEMORY_LINES = {
         : "Feeling low. It has been a few days since anyone said anything.",
   28: () => "Sat down on the deck and could not get up for a while.",
   29: (d) => `Hurt myself. ${d} points of it.`,
+  30: (d) => `${CREW_NAMES[d] ?? "One of the crew"} died today.`,
 };
 
-/** What a Bim says it is talking about, by the `memory::What` code that came
- * back from `bims_chat_topic`. Third person and short: this goes in a bubble
- * over its head, not in its diary, so it has to fit.
+/** What a Bim says it is talking about, by the code that came back from
+ * `bims_chat_topic`. Third person and short: this goes in a bubble over its
+ * head, not in its diary, so it has to fit.
  *
- * Every code `MEMORY_LINES` has can turn up here — a Bim talks about whatever
- * it has been doing — but the list is deliberately its own rather than derived
- * from that one. "Woke up after 6 hours." is a diary entry; "the night" is
- * what you say about it. */
+ * **Two code spaces, and they do not overlap.** Small talk — what the Bim has
+ * actually been doing — comes back as a `JOB_` code, which runs from 1. The
+ * things that happened *to* it come out of its diary as a `memory::What` code,
+ * which starts at 20. Keeping the table flat over both is what lets a
+ * conversation move between "the sweeping" and "an accident" without the
+ * simulation having to say which sort of thing it is handing over.
+ *
+ * The wording is deliberately not derived from `MEMORY_LINES`: "Was sick on
+ * the deck." is a diary entry, and "being sick" is what you say about it. */
 const CHAT_TOPICS = {
-  1: "the night",
-  2: "that nap",
-  3: "cooking",
-  4: "leftovers",
-  5: "nothing much",
-  6: "the bay",
-  7: "the dishwasher",
-  8: "the doors",
-  9: "the sweeping",
-  10: "old times",
+  1: "cooking",
+  2: "the cooker",
+  3: "that nap",
+  4: "the night",
+  5: "the heads",
+  6: "the fridge",
+  7: "that door",
+  8: "the lock",
+  9: "the dishwasher",
+  10: "cooking",
+  11: "the bay",
+  12: "leftovers",
+  13: "the sweeping",
   20: "an accident",
   21: "being sick",
   22: "dropping off",
@@ -165,6 +166,7 @@ const CHAT_TOPICS = {
   27: "how it has been",
   28: "a bad day",
   29: "a bad day",
+  30: "the one who died",
 };
 
 /** What a Bim with nobody to talk to has in the bubble. Nothing to report is
@@ -1024,10 +1026,14 @@ async function boot() {
   /** The Bim's own account of its days: newest day first, and within a day in
    * the order it happened. */
   function paintDiary(page, who, count) {
+    // An empty page is the *good* outcome now, not an early-game one: the
+    // diary keeps only what went wrong, so a crew getting on with their work
+    // writes nothing at all. Worded so that reads as reassurance rather than
+    // as the panel not having loaded.
     if (count === 0) {
       const p = document.createElement("p");
       p.className = "nothing";
-      p.textContent = "Nothing worth writing down yet.";
+      p.textContent = "Nothing has gone wrong.";
       page.replaceChildren(p);
       return;
     }
@@ -1042,7 +1048,6 @@ async function boot() {
         at: wasm.bims_memory_at(who, i),
         what: wasm.bims_memory_what(who, i),
         detail: wasm.bims_memory_detail(who, i),
-        notable: wasm.bims_memory_notable(who, i) !== 0,
       });
     }
 
@@ -1062,7 +1067,7 @@ async function boot() {
         const words = MEMORY_LINES[moment.what]?.(moment.detail);
         if (!words) continue;
         const line = document.createElement("p");
-        line.className = moment.notable ? "line notable" : "line";
+        line.className = "line";
         const when = document.createElement("span");
         when.className = "when";
         when.textContent = clockText(moment.at);

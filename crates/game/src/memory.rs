@@ -118,4 +118,3 @@ impl Memory {
         self.kept.iter().any(|m| m.what == what)
     }
 }
-

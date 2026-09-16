@@ -82,14 +82,29 @@ const SOLO_POOL = 120000;
  * too: a `_hi` wired to a `_lo` is invisible until the numbers are large. */
 const amount = (hi, lo) => hi * 2 ** 32 + lo;
 
+/** The spawn every design session below opens with. A design page refuses
+ * to open without one — a star and a station, which the lobby writes — and
+ * never falls back to one of its own, so the harness has to bring one. It is
+ * read off the first, spawnless boot, which is also the error-screen check. */
+let SPAWN = null;
+
 /** Open a designer with a given query string, and hand back the page plus
- * the few helpers that turn tiles into pointer events. */
-async function session(search) {
+ * the few helpers that turn tiles into pointer events. The spawn is added
+ * unless the query names its own, or `spawn: false` asks for the page a
+ * lobby-less link would get. */
+async function session(search, { spawn = true } = {}) {
+  let query =
+    spawn && !/[?&]star=/.test(search)
+      ? `${search || "?"}${search ? "&" : ""}star=${SPAWN.star}&station=${SPAWN.station}`
+      : search;
+  // An empty grid unless the query says otherwise: the page opens on the
+  // playtest ship by default, and everything below builds its own.
+  if (!/[?&]preset=/.test(query)) query = `${query || "?"}${query ? "&" : ""}preset=0`;
   const page = await bootWasmPage({
     html: "web/ship.html",
     host: "web/ship.js",
     wasm: "web/ship.wasm",
-    search,
+    search: query,
   });
   const { byId, root, wasm } = page;
   const canvas = byId.get("stage");
@@ -136,13 +151,16 @@ async function session(search) {
   const price = (kind) =>
     amount(wasm.ship_part_price_hi(kind), wasm.ship_part_price_lo(kind));
 
-  /** Frame and deck over a rectangle, which everything else needs under it.
-   * Two drags, because that is what a player does. */
+  /** Deck over a rectangle, which everything else needs under it. One drag:
+   * plating lays its own frame. */
   function found(x0, y0, x1, y1) {
-    pick(STRUCTURE);
-    drag(x0, y0, x1, y1);
     pick(FLOOR);
     drag(x0, y0, x1, y1);
+  }
+
+  /** The top part on a tile, peeled off: a right-click. */
+  function peel(tx, ty) {
+    drag(tx, ty, tx, ty, 2);
   }
 
   /** Press a buy or sell button on a resource's row. */
@@ -208,6 +226,7 @@ async function session(search) {
     pick,
     drag,
     put,
+    peel,
     hover,
     pool,
     left,
@@ -237,14 +256,10 @@ async function session(search) {
 function buildShip(page, crew) {
   const { pick, drag, put, found } = page;
 
-  // The frame first, and it has to reach one tile further out than the deck:
-  // the hull ring stands straight on it.
-  pick(STRUCTURE);
-  drag(1, 1, 18, 18);
-
-  // Then the deck inside the ring.
+  // Deck over the lot, one tile further out than the room: the hull ring
+  // stands on it. Plating lays the frame as it goes.
   pick(FLOOR);
-  drag(2, 2, 17, 17);
+  drag(1, 1, 18, 18);
 
   // Hull round the outside. Four straight runs; the corners overlap and are
   // skipped, which is the drag rule doing what it should. Outside wall
@@ -288,8 +303,9 @@ function buildShip(page, crew) {
     [18, 9, THRUSTER],
     [5, 1, SENSOR_ARRAY],
   ]) {
+    // Peel the wall; the deck and the frame under it stay, and the part
+    // stands on the frame.
     drag(x, y, x, y, 2);
-    put(STRUCTURE, x, y);
     put(kind, x, y);
   }
   put(AIRLOCK, 16, 8);
@@ -302,6 +318,50 @@ function buildShip(page, crew) {
   page.deal(FUEL, 100, true);
   page.deal(FUEL, 100, true);
 }
+
+// --- a page with nowhere to start ------------------------------------------
+//
+// Opened with no query at all — the link a designer would get with no lobby
+// in front of it. It gets the error screen and a way back, and **not** a
+// design phase over a spawn of the page's own choosing. It is also where
+// every other session's spawn comes from: the simulation's dock, which the
+// wasm exports for exactly this.
+
+const bare = await session("", { spawn: false });
+console.log("a designer opened with no query at all");
+const showingOn = (page) =>
+  page.root
+    .querySelectorAll("[data-screen]")
+    .filter((s) => !s.hidden)
+    .map((s) => s.dataset.screen)
+    .join();
+check("no error box", !bare.byId.get("error").textContent, bare.byId.get("error").textContent);
+check("it shows the error screen, not a design phase", showingOn(bare) === "lost", showingOn(bare));
+check(
+  "and says the lobby named no station",
+  bare.byId.get("lost-said").textContent.includes("did not say"),
+  bare.byId.get("lost-said").textContent,
+);
+check(
+  "with a link back to the lobby",
+  bare.byId.get("lost-back").getAttribute("href") === "builder.html",
+  String(bare.byId.get("lost-back").getAttribute("href")),
+);
+check("one player, because nobody said otherwise", bare.wasm.ship_players() === 1);
+check("and the standard pool with the bonus on it", bare.pool() === SOLO_POOL, String(bare.pool()));
+SPAWN = { star: bare.wasm.ship_simulation_star(), station: bare.wasm.ship_simulation_station() };
+check("the wasm knows the simulation's dock", SPAWN.star >= 0 && SPAWN.station >= 0, JSON.stringify(SPAWN));
+
+// A spawn the galaxy has not got is the same screen with a different line —
+// and never a different dock.
+const wrong = await session("?money=100000&area=20&players=1&slot=0&star=3&station=9", { spawn: false });
+check("a station that does not exist is the error screen too", showingOn(wrong) === "lost", showingOn(wrong));
+check(
+  "naming what was asked for",
+  wrong.byId.get("lost-said").textContent.includes("station 9") && wrong.byId.get("lost-said").textContent.includes("star 3"),
+  wrong.byId.get("lost-said").textContent,
+);
+check("and no world opened behind it", wrong.wasm.ship_world_ready() === 0);
 
 // --- a solo designer, on a small ship -------------------------------------
 
@@ -351,14 +411,22 @@ const FOR_THE_HARNESS = new Set([
   "ship_reference_hash_lo",
   "ship_reference_checksum_hi",
   "ship_reference_checksum_lo",
+  "ship_playtest_hash_hi",
+  "ship_playtest_hash_lo",
   "ship_tile",
+  // The simulation's dock, which is the only spawn a harness can get without
+  // a lobby, and the star the world opened in, which is how the harness
+  // checks it opened where it was told.
+  "ship_simulation_star",
+  "ship_simulation_station",
+  "ship_world_star",
 ]);
 const orphans = [...exported].filter((name) => !called.has(name) && !FOR_THE_HARNESS.has(name));
 check("no export has quietly stopped being called", orphans.length === 0, orphans.join(", "));
 
 // --- the wasm agrees with the native build --------------------------------
 
-const ALL_CHECKS = 0b1111111;
+const ALL_CHECKS = 0b11111111;
 const selfCheck = wasm.ship_self_check();
 check(
   "wasm hashes the reference design the same as native does",
@@ -373,11 +441,15 @@ check(
 // --- the palette ----------------------------------------------------------
 
 const partButtons = root.querySelectorAll("[data-part]");
+// Every part but one: the frame is laid by the plating tool and has no
+// button of its own — NOT_A_TOOL in web/ship.js — so one fewer is the
+// number, and any other difference is a part that lost its button.
 check(
-  "there is a button for every part the wasm knows about",
-  partButtons.length === wasm.ship_part_count(),
+  "there is a button for every part the wasm knows about, bar the frame",
+  partButtons.length === wasm.ship_part_count() - 1,
   `${partButtons.length} buttons, ${wasm.ship_part_count()} parts`,
 );
+check("and none of them is the frame", !root.querySelector(`[data-part="${STRUCTURE}"]`));
 check(
   "none of them fell into 'Anything else'",
   !root.querySelectorAll("h2").some((h) => h.textContent === "Anything else"),
@@ -417,28 +489,25 @@ const deckPrice = solo.price(FLOOR);
 const framePrice = solo.price(STRUCTURE);
 check("a tile of deck has a price", deckPrice > 0, String(deckPrice));
 
-// --- the frame, and what stands on it -------------------------------------
+// --- the deck, and the frame under it ---------------------------------------
 //
-// Nothing goes down on nothing any more: the frame is the first thing built
-// and everything else is over it. That is the rule a player meets first, so
-// it is the first thing checked.
+// The frame is the first thing built and everything else is over it — but
+// the player never lays it: deck plating brings its own, in one click. That
+// is the rule a player meets first, so it is the first thing checked.
 
 solo.put(FLOOR, 5, 5);
-check("deck will not go down on nothing", wasm.ship_part_total() === 0);
-check(
-  "and the page says the frame comes first",
-  byId.get("said").textContent.toLowerCase().includes("structure"),
-  byId.get("said").textContent,
-);
-
-solo.put(STRUCTURE, 5, 5);
-check("the frame goes down on nothing", wasm.ship_part_total() === 1, String(wasm.ship_part_total()));
-solo.put(FLOOR, 5, 5);
-check("and then the deck goes down on it", wasm.ship_part_total() === 2, String(wasm.ship_part_total()));
+check("deck goes down on nothing, and brings its frame", wasm.ship_part_total() === 2, String(wasm.ship_part_total()));
 check(
   "both came out of the pool",
   solo.left() === SOLO_POOL - deckPrice - framePrice,
   `${solo.left()} left of ${SOLO_POOL}`,
+);
+solo.put(FLOOR, 5, 5);
+check("deck will not go down twice", wasm.ship_part_total() === 2);
+check(
+  "and the page says so",
+  byId.get("said").textContent.toLowerCase().includes("deck"),
+  byId.get("said").textContent,
 );
 check(
   "which the readout picks up",
@@ -447,30 +516,43 @@ check(
   moneyRow.querySelector(".left").textContent,
 );
 
-// A right-drag clears both, top of the stack down, and refunds the lot.
-solo.drag(5, 5, 5, 5, 2);
-check("a right-drag takes the whole stack off", wasm.ship_part_total() === 0);
-check("and hands the money back", solo.left() === SOLO_POOL, String(solo.left()));
+// A right-click peels one layer: the deck first, and the frame is still
+// there; a second one takes the frame. Each refunds its own price.
+solo.peel(5, 5);
+check("a right-click takes the deck and leaves the frame", wasm.ship_part_total() === 1, String(wasm.ship_part_total()));
+check("and hands the deck's price back", solo.left() === SOLO_POOL - framePrice, String(solo.left()));
+solo.peel(5, 5);
+check("a second one takes the frame", wasm.ship_part_total() === 0);
+check("and hands the rest back", solo.left() === SOLO_POOL, String(solo.left()));
 
 // --- the ghost ------------------------------------------------------------
 
 solo.pick(HOB);
 solo.hover(5, 5);
 check("a hob will not stand on nothing", wasm.ship_ghost_ok() === 0);
-solo.put(STRUCTURE, 5, 5);
+// Bare frame: plate, then peel the deck off it.
+solo.put(FLOOR, 5, 5);
+solo.peel(5, 5);
+check("peeling the deck leaves bare frame", wasm.ship_part_total() === 1);
 solo.pick(HOB);
 solo.hover(5, 5);
 check("nor on bare frame", wasm.ship_ghost_ok() === 0);
 solo.put(FLOOR, 5, 5);
+check("plating a framed tile lays only the deck", wasm.ship_part_total() === 2);
 solo.pick(HOB);
 solo.hover(5, 5);
 check("but it will stand on deck", wasm.ship_ghost_ok() === 1);
 
-// Hull stands straight on the frame, with no deck under it. That is what
-// lets a ship be skinned before it is floored.
+// Hull stands on the frame, deck or no deck: it is the frame that holds it
+// up, and a plated tile has one.
 solo.pick(OUTSIDE_WALL);
 solo.hover(5, 5);
-check("hull needs no deck", wasm.ship_ghost_ok() === 1);
+check("hull stands on a plated tile", wasm.ship_ghost_ok() === 1);
+solo.peel(5, 5);
+solo.pick(OUTSIDE_WALL);
+solo.hover(5, 5);
+check("and on bare frame", wasm.ship_ghost_ok() === 1);
+solo.put(FLOOR, 5, 5);
 
 solo.pick(ENGINE);
 check("the engine starts upright, two by three", wasm.ship_part_w(ENGINE) === 2 && wasm.ship_part_h(ENGINE) === 3);
@@ -490,8 +572,10 @@ solo.hover(-3, -3);
 check("a pointer outside the build area is outside it", wasm.ship_hover_inside() === 0);
 check("so nothing would be placed there", wasm.ship_ghost_ok() === 0);
 
-// Clear the tile again so the ship below is built on a bare grid.
-solo.drag(5, 5, 5, 5, 2);
+// Clear the tile again so the ship below is built on a bare grid: deck,
+// then frame, one peel each.
+solo.peel(5, 5);
+solo.peel(5, 5);
 check("the grid is bare again", wasm.ship_part_total() === 0, String(wasm.ship_part_total()));
 
 // --- what is wrong with it ------------------------------------------------
@@ -523,8 +607,8 @@ check(
 // Two tiles of frame at opposite corners is a ship in two pieces, which is
 // the simplest fault that has tiles to point at. The frame is what the check
 // walks — a ship is its structure.
-solo.put(STRUCTURE, 2, 2);
-solo.put(STRUCTURE, 17, 17);
+solo.put(FLOOR, 2, 2);
+solo.put(FLOOR, 17, 17);
 const split = issueRows().find((row) => row.dataset.issue === "1");
 check("two loose tiles are a ship in two pieces", !!split, issueRows().map((r) => r.dataset.issue).join(" "));
 if (split) {
@@ -539,8 +623,10 @@ if (split) {
   check("resting on a fault rings it on the deck", lit > plain, `${plain} then ${lit}`);
   check("and the ring goes when the pointer does", after === plain, `${after} against ${plain}`);
 }
-solo.drag(2, 2, 2, 2, 2);
-solo.drag(17, 17, 17, 17, 2);
+for (const [x, y] of [[2, 2], [17, 17]]) {
+  solo.peel(x, y);
+  solo.peel(x, y);
+}
 check("and the grid is bare again", wasm.ship_part_total() === 0, String(wasm.ship_part_total()));
 
 // --- build the whole thing ------------------------------------------------
@@ -598,9 +684,11 @@ check("and nothing can be moved any more", wasm.ship_phase() !== 0);
 console.log("\nthe game the Accept started");
 check("the world is open", wasm.ship_world_ready() === 1);
 check(
-  "docked at the spawn station",
-  wasm.ship_world_state() === 0 && wasm.ship_docked_at() !== 0,
-  `state ${wasm.ship_world_state()}, dock ${wasm.ship_docked_at()}`,
+  "docked at the station the query named",
+  wasm.ship_world_state() === 0 &&
+    wasm.ship_docked_at() === SPAWN.station + 1 &&
+    wasm.ship_world_star() === SPAWN.star,
+  `state ${wasm.ship_world_state()}, dock ${wasm.ship_docked_at()}, star ${wasm.ship_world_star()}`,
 );
 check(
   "with the money the design phase left over",
@@ -658,6 +746,25 @@ check(
 solo.fire("keydown", { key: "m" });
 check("M opens the map", wasm.ship_view_mode() === 1, String(wasm.ship_view_mode()));
 check("and the readout says which view it is", byId.get("view-name").textContent.length > 0);
+
+// Which way up. The pair of buttons and the N key both go to the same place
+// in wasm, and the buttons are marked off what wasm says rather than off
+// their own clicks — so a press of N has to move the mark as well.
+const orient = (on) => byId.get("view-buttons").querySelector(`[data-head-up=${on}]`);
+check("the view starts north up", wasm.ship_head_up() === 0 && orient(0).className === "on");
+orient(1).dispatch("click");
+step(1);
+check("Head up turns the view head up", wasm.ship_head_up() === 1, String(wasm.ship_head_up()));
+check("and the button says so", orient(1).className === "on" && orient(0).className === "");
+solo.fire("keydown", { key: "n" });
+step(1);
+check("N turns it back", wasm.ship_head_up() === 0 && orient(0).className === "on");
+solo.fire("keydown", { key: "n" });
+step(1);
+check("and on again", wasm.ship_head_up() === 1 && orient(1).className === "on");
+orient(0).dispatch("click");
+step(1);
+check("North up puts it back", wasm.ship_head_up() === 0);
 
 // Everything on the map is something the crew have found. There is no way to
 // plot a trip to anything else, because there is no way to point at it.
@@ -754,6 +861,45 @@ solo.until(() => wasm.ship_world_state() !== 2, "stopped");
 check("and it comes to rest", wasm.ship_world_speed() === 0, String(wasm.ship_world_speed()));
 check("holding, with nobody's route on the map", wasm.ship_destination_by() === 0);
 
+// --- a designer opened on the playtest ship ----------------------------------
+//
+// What a player gets: the page opens on a ship already laid out, whole and
+// flyable, as a gift — the pool is what the crew brought and all of it is
+// still there — and everything on it can be changed or taken off like
+// anything they placed themselves.
+
+const given = await session("?money=100000&area=40&players=1&slot=0&preset=1");
+console.log("\na designer opened on the playtest ship");
+const PLAYTEST_PARTS = Number(
+  /PLAYTEST_PARTS: u32 = (\d+);/.exec(readFileSync("crates/shipdesign/src/fixture.rs", "utf8"))[1],
+);
+check("the whole playtest ship is on the grid", given.wasm.ship_part_total() === PLAYTEST_PARTS, String(given.wasm.ship_part_total()));
+check("with nothing wrong with it", given.wasm.ship_issue_count() === 0, String(given.wasm.ship_issue_count()));
+check("the pool is what the crew brought", given.pool() === SOLO_POOL, String(given.pool()));
+check("and none of it has been spent", given.left() === SOLO_POOL, String(given.left()));
+check("Accept is on offer at once", given.byId.get("accept").disabled === false);
+// In the middle of the forty-tile grid: the twenty-tile ship shifted by ten.
+given.pick(HOB);
+given.hover(18, 13);
+check("the ship is in the middle of the grid", given.wasm.ship_hovered_part() !== 0 && given.wasm.ship_ghost_ok() === 0);
+// A right-click on the given hob takes the hob and only the hob, and its
+// price is the crew's — a gift is a gift.
+const partsBefore = given.wasm.ship_part_total();
+given.peel(18, 13);
+check("a given part peels off like any other", given.wasm.ship_part_total() === partsBefore - 1, String(given.wasm.ship_part_total()));
+check("and its price is money in hand", given.left() === SOLO_POOL + given.price(HOB), String(given.left()));
+check("but the deck under it stays", given.wasm.ship_issue_count() > 0);
+given.put(HOB, 18, 13);
+check("and it goes back", given.wasm.ship_issue_count() === 0 && given.left() === SOLO_POOL);
+given.byId.get("accept").dispatch("click");
+given.step(1);
+check("accepting it opens the world, docked", given.wasm.ship_world_ready() === 1 && given.wasm.ship_docked_at() !== 0);
+check("still no error box", !given.byId.get("error").textContent, given.byId.get("error").textContent);
+
+// A grid the ship does not fit stays empty rather than getting half of it.
+const small = await session("?money=100000&area=12&players=1&slot=0&preset=1");
+check("on a grid too small for it, the page opens empty", small.wasm.ship_part_total() === 0, String(small.wasm.ship_part_total()));
+
 // --- every code has words ----------------------------------------------------
 
 check(
@@ -820,7 +966,7 @@ check(
 );
 
 const wasHash = [pair.wasm.ship_hash_hi(), pair.wasm.ship_hash_lo()].join(":");
-pair.put(FLOOR, 18, 18);
+pair.put(FLOOR, 19, 19);
 check("an edit after an Accept lands", pair.wasm.ship_part_total() > 0);
 check(
   "and changes the ship's identity",
@@ -829,19 +975,6 @@ check(
 check("which takes the Accept back", pair.wasm.ship_accepted(0) === 0);
 check("the button knows it too", pairAccept.textContent === "Accept", pairAccept.textContent);
 check("still no error box", !pair.byId.get("error").textContent, pair.byId.get("error").textContent);
-
-// --- a designer nobody told anything --------------------------------------
-//
-// Opening ship.html with no query at all is a solo game on the standard
-// purse, and the pool has to be that purse plus the solo bonus. Nothing but
-// this says so: the defaults are in the host, the bonus is in `economy`, and
-// only a page actually booted with neither a lobby nor a query puts the two
-// together.
-
-const bare = await session("");
-console.log("\na designer opened with no query at all");
-check("one player, because nobody said otherwise", bare.wasm.ship_players() === 1);
-check("and the standard pool with the bonus on it", bare.pool() === SOLO_POOL, String(bare.pool()));
 
 // --- a pool that runs out -------------------------------------------------
 //
@@ -1013,12 +1146,10 @@ const issueCodes = (page) =>
     .children.map((row) => row.dataset.issue)
     .filter(Boolean);
 
-// A room with hull all the way round. The frame has to reach a tile
-// further out than the deck, because the hull stands straight on it.
-open.pick(STRUCTURE);
-open.drag(3, 3, 10, 10);
+// A room with hull all the way round, on a plated square one tile bigger
+// than the room: the hull stands on the frame the plating laid.
 open.pick(FLOOR);
-open.drag(4, 4, 9, 9);
+open.drag(3, 3, 10, 10);
 open.pick(OUTSIDE_WALL);
 open.drag(3, 3, 10, 3);
 open.drag(3, 10, 10, 10);
@@ -1032,8 +1163,8 @@ check(
 );
 
 // Take one tile of hull out and the room behind it is in the open. The
-// right-drag takes the frame under it as well — nothing is standing on it
-// once the wall is gone — which is the stack coming apart top down.
+// right-click peels the wall and nothing else: the deck and the frame under
+// it stay, which is why the wall can go straight back on.
 open.drag(6, 3, 6, 3, 2);
 check("a hole exposes the ship", open.wasm.ship_exposed_count() > 0, String(open.wasm.ship_exposed_count()));
 check(
@@ -1050,7 +1181,6 @@ check("and it has words", graveRow.textContent.length > 10, graveRow.textContent
 // here is that the frame draws more shapes than it did.
 open.wasm.ship_render();
 const litLength = open.wasm.ship_draw_len();
-open.put(STRUCTURE, 6, 3);
 open.put(OUTSIDE_WALL, 6, 3);
 check("closing the hull again clears it", open.wasm.ship_exposed_count() === 0);
 check(
@@ -1067,11 +1197,9 @@ check(
 
 // A plain wall is not hull. Same hole, filled with the wrong thing.
 open.drag(6, 3, 6, 3, 2);
-open.put(STRUCTURE, 6, 3);
 open.put(WALL, 6, 3);
 check("a plain wall does not keep it out", open.wasm.ship_exposed_count() > 0);
 open.drag(6, 3, 6, 3, 2);
-open.put(STRUCTURE, 6, 3);
 open.put(OUTSIDE_WALL, 6, 3);
 check("and hull does", open.wasm.ship_exposed_count() === 0);
 check("still no error box", !open.byId.get("error").textContent, open.byId.get("error").textContent);
@@ -1116,6 +1244,20 @@ check("and the world opens", crew.wasm.ship_world_ready() === 1);
 // next frame rather than in the click handler. That is the seam doing its job
 // and it is worth one step to say so.
 crew.step(1);
+
+// And both of them are aboard, at once: one Bim per player, each at their
+// own bunk, each with their name over their head.
+check("the whole crew are aboard from the first step", crew.wasm.ship_crew_count() === 2, String(crew.wasm.ship_crew_count()));
+check(
+  "standing in two different places",
+  crew.wasm.ship_crew_x(0) !== crew.wasm.ship_crew_x(1) || crew.wasm.ship_crew_y(0) !== crew.wasm.ship_crew_y(1),
+);
+const crewNames = crew.drawn.map((d) => d.text);
+check("and named, both of them", crewNames.includes("James") && crewNames.includes("Kate"), crewNames.join(","));
+check(
+  "in your colour and theirs",
+  crew.drawn.find((d) => d.text === "James")?.fill !== crew.drawn.find((d) => d.text === "Kate")?.fill,
+);
 check(
   "and the page moves over on its own",
   crew.root

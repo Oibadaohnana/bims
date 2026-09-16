@@ -119,6 +119,18 @@ pub fn world_checksum(world: &World) -> u64 {
         }
     }
 
+    // The crew: where each of them is, and the room's clock. Not the whole
+    // of the room's state — that is a great deal of `f32` arithmetic that
+    // two targets will disagree on in the last bit — but a Bim that went
+    // somewhere different is a different world, and this is what says so.
+    hash.eat(world.aboard.count() as u64);
+    for who in 0..world.aboard.count() {
+        let at = world.aboard.position(who);
+        hash.eat_rounded(at.x, POSITION_GRID);
+        hash.eat_rounded(at.y, POSITION_GRID);
+    }
+    hash.eat_rounded(world.aboard.minutes(), FINE_GRID);
+
     for node in &world.discovered {
         let (kind, id) = node_key(node);
         hash.eat(kind as u64);

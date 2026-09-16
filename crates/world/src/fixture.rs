@@ -32,16 +32,34 @@ pub const REFERENCE_STEPS: u32 = 600;
 /// Pinned rather than computed, for the same reason `REFERENCE_HASH` is: a
 /// test comparing two computed values would pass happily while both were
 /// wrong. Update it only when the scenario below is meant to change.
-pub const REFERENCE_CHECKSUM: u64 = 0x_34bc_d68c_bb1d_86d3;
+pub const REFERENCE_CHECKSUM: u64 = 0x_d89f_cc53_8f02_cde4;
 
-/// A world with the flyable fixture docked at the spawn station.
+/// A world with the flyable fixture docked at the simulation's spawn: the
+/// default seed's first dock, which is where every fixture world starts.
 pub fn reference_world() -> World {
+    simulation_world(flyer(2), REFERENCE_MONEY, 2)
+}
+
+/// A world opened the way the simulation opens one: the default seed, a
+/// two-arm spiral, and [`crate::spawn`]'s dock. What `nix run .#simulation`
+/// does with [`shipdesign::fixture::playtest_ship`] and
+/// [`data::SIMULATION_MONEY`], and what every fixture here does with its own
+/// ship and purse.
+pub fn simulation_world(
+    design: shipdesign::ShipDesign,
+    money: economy::Money,
+    players: u32,
+) -> World {
+    let galaxy = worldgen::Galaxy::new(data::DEFAULT_SEED, GalaxyType::SpiralTwoArm);
+    let (star, station) = crate::spawn(&galaxy).expect("the default seed has a dock somewhere");
     World::start(
-        flyer(2),
-        REFERENCE_MONEY,
-        2,
+        design,
+        money,
+        players,
         data::DEFAULT_SEED,
         GalaxyType::SpiralTwoArm,
+        star,
+        station,
     )
     .expect("the default seed should have somewhere to spawn")
 }

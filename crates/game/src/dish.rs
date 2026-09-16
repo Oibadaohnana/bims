@@ -47,11 +47,16 @@ pub struct Dishwasher {
 impl Dishwasher {
     /// Set into the counter front, in the run between the drawer and the hob.
     pub fn new(counter: Rect) -> Dishwasher {
+        Dishwasher::at(Rect::from_min_size(
+            vec2(counter.min.x + 292.0, counter.max.y - 22.0),
+            vec2(70.0, 20.0),
+        ))
+    }
+
+    /// A dishwasher with its door face wherever a layout puts it.
+    pub fn at(face: Rect) -> Dishwasher {
         Dishwasher {
-            face: Rect::from_min_size(
-                vec2(counter.min.x + 292.0, counter.max.y - 22.0),
-                vec2(70.0, 20.0),
-            ),
+            face,
             loaded: 0,
             washing: 0,
             cycle_left: 0.0,

@@ -12,13 +12,19 @@ all three, without being asked — and **Ctrl+C in that terminal stops the
 server**. Neither half is optional: do not add a step that makes someone open a
 tab themselves, and do not leave the server running after Ctrl+C.
 
-There is now more than one thing to run, and each is a name rather than a flag:
+There are three things to run, and each is a name rather than a flag:
 
-| | | |
-| --- | --- | --- |
-| `nix run .` / `nix run .#game` | the room — the simulation on a canvas | `:8080/index.html` |
-| `nix run .#builder` | the start menu, the setup screen and the lobby | `:8081/builder.html` |
-| `nix run .#ship` | the design phase the lobby starts — a ship on a tile grid | `:8082/ship.html` |
+| command | `./run` | opens | port |
+| --- | --- | --- | --- |
+| `nix run .` / `nix run .#game` | `./run game` | the whole game in order — menu, setup or lobby, world and station, ship design, then the world docked where you said | `:8080/builder.html` |
+| `nix run .#simulation` | `./run simulation` | straight into the world on the playtest ship | `:8083/ship.html?mode=1` |
+| `nix run .#room` | `./run room` | the behaviour test room — Bims on a deck | `:8084/index.html` |
+
+**8080 used to serve the room**, and `builder`, `ship` and `serve` used to be
+names; all four are gone rather than aliased. A server from an older build
+still sitting on a port is refused, not reused — `nix run .` on a machine
+where the old room server is still up says "a different build is on 8080",
+and the answer is Ctrl+C in that terminal.
 
 All three come out of **one served directory** and differ only in which page is
 opened, so they must not share a default port: the second one started would
@@ -26,25 +32,27 @@ find the first already there, decide Bims was running, and hand you the wrong
 page. `--default-port` in `dev-server.py` is what keeps them apart, and a new
 front end needs its own.
 
-`--wasm` is the other half of that, and it is newer. The server tells one
-build from another by **hashing the module it serves**, and there is more than
-one module now. A front end pointed at somebody else's wasm looks unchanged
-after a rebuild that changed every line it serves — which is exactly the stale
-server this check exists to catch. Each front end passes its own; the builder
-has none of its own yet and rides along with the room's.
+`--wasm` is the other half of that. The server tells one build from another
+by **hashing the modules it serves, together** — `--wasm` repeats, and a
+front end passes *every* module its pages load: the game is two pages and so
+two modules, `lobby.wasm` and `ship.wasm`; the simulation `ship.wasm`; the
+room `bims.wasm`. A front end identified by only some of what it serves looks
+unchanged after a rebuild that changed the rest — which is exactly the stale
+server this check exists to catch, and the game with only `lobby.wasm` named
+would have been exactly that after every change to the designer.
 
-`./run game`, `./run builder` and `./run ship` are the same three against the
-**live** `web/` rather than the store copy — that is the one to use while
-editing. Anything after the name (`--no-open`, a port) goes to the server.
+The `./run` forms are the same three against the **live** `web/` rather than
+the store copy — that is the one to use while editing. Anything after the
+name (`--no-open`, a port) goes to the server; an old name prints the usage.
 
 Run it in the foreground, in a real terminal. A server launched as a background
 job from a non-interactive shell inherits `SIGINT` set to `SIG_IGN`, so Python
 never sees the interrupt and Ctrl+C (or `kill -INT`) will not stop it — check
 `SigIgn` in `/proc/<pid>/status` if one will not die, and use `kill -TERM`.
 
-`./serve.sh` is `./run game` without the dispatcher, kept because it is in
-muscle memory; it takes the same arguments. `./build.sh` alone just compiles
-the wasm into `web/` — **both modules**. `cargo build` at the root builds every
+`./serve.sh` is `./run game`, kept because it is in muscle memory; it takes
+the same arguments, and it no longer serves the room. `./build.sh` alone just
+compiles the wasm into `web/` — **all three modules**. `cargo build` at the root builds every
 member, so one command does it, but each cdylib has to be *copied*, and a front
 end whose wasm was never copied is a page that fetches a 404 and shows nothing.
 `flake.nix` copies them one by one for the same reason.
@@ -57,19 +65,23 @@ or rebuilding the wasm changes nothing in the browser until it is restarted. If
 a fix appears not to have worked, check this first:
 
 ```sh
-curl -s http://localhost:8080/bims.js | cmp - web/bims.js
+curl -s http://localhost:8080/ship.js | cmp - web/ship.js
 ```
 
 The page loads `bims.js` and `bims.wasm` under a per-load query string and the
 server sends `no-store`, so a stale *browser* cache is not usually the culprit —
 a stale *server* is.
 
-## It is a workspace now, and the room is one crate of ten
+## It is a workspace now, and the room is one crate of eleven
 
-Everything is under `crates/`. There are **two cdylibs**: `game` is the room —
-the simulation and its wasm exports, what used to be `src/` — and `ship` is
+Everything is under `crates/`. There are **three cdylibs**: `game` is the room
+— the Bims' simulation and its wasm exports, what used to be `src/`, and
+since the room came aboard also a library that `world` and `ship` import —
+`ship` is
 `web/ship.html`, which is now **two things**: the design phase, and the game
-the last Accept starts. Beside them are eight libraries that have to give the
+the last Accept starts — and `lobby` is the World tab of `web/builder.html`:
+a galaxy, every system in it, a camera and a pick, and nothing that decides
+anything. Beside them are eight libraries that have to give the
 same answer in more than one place: `worldgen` (the galaxy, systems and station
 blueprints, which a native server will one day generate identically), `physics`
 (ship mass, thrust and travel time), `shipdesign` (what a ship is made of and
@@ -93,15 +105,18 @@ Five things about that are easy to get wrong:
   harnesses.** Running them wants a target: `.cargo/config.toml` pins
   `wasm32-unknown-unknown`, so it is `cargo test --target
   x86_64-unknown-linux-gnu -p physics -p worldgen -p shipdesign -p economy
-  -p health -p flight -p world -p ship`. `nix flake check` runs exactly that
-  as `checks.tests`.
+  -p health -p flight -p world -p ship -p lobby`. `nix flake check` runs
+  exactly that as `checks.tests`.
 
-  **`ship` is on that list and is a cdylib**, which is the one exception. It
-  is also an `rlib`, and what its `tests.rs` covers is the arithmetic that
-  turns a design tile into a place on screen and back — pure, and wrong in a
-  way no harness can see. Everything else in that crate is still
-  `scratchpad/ship-check.mjs` against the real page. `game` is not on the list
-  and should not be.
+  **`ship` and `lobby` are on that list and are cdylibs**, which is the one
+  exception, made twice. Each is also an `rlib`, and what its `tests.rs`
+  covers is arithmetic — a design tile to a place on screen and back, a star
+  to a pixel and the pixel to the nearest star — pure, and wrong in a way no
+  harness can see. `lobby`'s also pins the one promise its cache makes: that
+  "has a station" is what generating the system says. Everything else in
+  those crates is still `scratchpad/ship-check.mjs` and
+  `scratchpad/builder-check.mjs` against the real pages. `game` is not on
+  the list and should not be.
 - **The rules go in `shipdesign` and `world`, never in `ship`.** `ship` may ask
   whether a part can be placed or a trip can be flown; it may not decide. A
   native server has to give the same answer, and two numbers — `design_hash`,
@@ -201,6 +216,13 @@ leaves the previous binary in place, so running it printed a confident pass
 from stale code. Three separate rounds of that happened. They now
 `include!("modules.rs")` from one shared file; keep it that way, and if you
 ever see a probe pass that you expected to fail, check it actually rebuilt.
+
+`crates/game/src/aboard.rs` is deliberately **not** on that list. It is the
+one module of the room that names a `ShipDesign`, and the probes link no
+other crate — which is why the rest of the room takes a `room::Layout` of
+plain rects and `aboard.rs` is the only place that builds one from a
+design. A second use of `shipdesign` anywhere else in `crates/game` breaks
+every probe at once.
 
 ## `boot()` in web/bims.js is one big scope
 
@@ -782,9 +804,10 @@ for something that went right does not belong in it.
 
 `web/builder.html` + `web/builder.js` are the menus in front of the room;
 `web/index.html` + `web/bims.js` are the room. They share a served directory
-and, one day, the wasm — nothing else. Do not reach from one into the other:
-the builder deals in settings and has no `Game`, and the room deals in a
-`Game` and has no menus.
+and nothing else — the builder's wasm is `lobby.wasm`, not the room's, and
+only its World tab loads it. Do not reach from one into the other: the
+builder deals in settings and has no `Game`, and the room deals in a `Game`
+and has no menus.
 
 Three rules the page already follows and that are cheap to break:
 
@@ -809,11 +832,14 @@ thing that executes that file at all, so run it after touching it.
 
 ## The stub has three ways in now, and one of everything behind them
 
-`boot()` is the room. `bootPage()` is a page that is only a page — markup and
-one script, no wasm to instantiate and no frame to step, with `advance(ms)` to
-let timers fire; it is synchronous, and the builder harness depends on that.
-`bootWasmPage()` is a page with a wasm of its own, which is the ship designer,
-and `boot()` is now that called with the room's three files.
+`boot()` is the room. `bootPage()` is a page booted as if it were only a page
+— markup and one script, no wasm to instantiate and no frame to step, with
+`advance(ms)` to let timers fire; it is synchronous. The builder used to be
+exactly that, and `builder-check.mjs` still boots it that way once at the
+end, to see the World tab say the module is missing rather than sit there
+loading. `bootWasmPage()` is a page with a wasm of its own — the designer
+with `ship.wasm`, and now the builder with `lobby.wasm` — and `boot()` is
+that called with the room's three files.
 
 Behind all three there is **one** `makeDom`, **one** `makeClock` and **one**
 `recordingWasm`. That is the whole point of the file: a second copy of any of
@@ -1050,9 +1076,21 @@ Three consequences that are not obvious:
   every tile whether the part there `requires` this one's layer. That is why
   there is no list of "what holds up what" anywhere: there is one column of
   the table and both directions read it.
-- **A right-drag has to come off top-down** — utility and object, then floor,
-  then structure. `Editor::drag_parts` does that ordering, not the host. Any
-  other order refuses everything under the first thing it meets.
+- **A removing drag peels one layer.** `Editor::drag_parts` hands back the
+  top part of each tile in the drag and nothing under it — object, then
+  utility, then floor, then structure — so a right-click on a hob takes the
+  hob and leaves the deck, and the next click takes the deck. Across the
+  tiles of one drag the parts are ordered top down, or a deck would be
+  refused because the neighbouring tile's object was still standing on it.
+  Clearing a plated tile to nothing is therefore two clicks, and a harness
+  that expects one to do it is wrong.
+- **Deck plating lays its own frame.** `Edit::Plate` is structure-if-missing
+  then floor, one edit, both prices; the plating tool sends it (`placing`
+  in `crates/ship/src/editor.rs`), and the ghost asks the same edit. There
+  is no frame button in the palette — `NOT_A_TOOL` in `web/ship.js`, and
+  `ship-check.mjs` counts one fewer button than parts. Bare frame is still
+  a part: plate and peel the deck, which is how the fixtures and the ghost
+  view get it.
 - **Connectivity is asked of the structure layer alone.** A ship is its
   frame; everything else stands on it. Walking every occupied tile instead
   would let a wall touching nothing but another wall count as holding the
@@ -1313,6 +1351,23 @@ After anything in `world_paint.rs` they are worth thirty seconds: a hull drawn
 mirrored, or a starfield turning with the ship, is obvious there and invisible
 in every assertion.
 
+**Head up is the player's exception, and it is one number.** `Game::head_up`
+(the View buttons and `N` in `web/ship.js`, `ship_set_head_up` at the
+boundary) holds the ship square to the window in both views and turns the sky,
+the station alongside and the map round it instead. It is done without a
+second camera: `Game::camera_turn()` is `-heading` when it is on and nothing
+otherwise, `Game::ship_turn()` is `heading + camera_turn()`, and the rule is
+that **everything drawing or reading back the ship goes through `ship_turn`
+and everything drawing or reading back the world goes through `camera_turn`**
+— the tiles, the room aboard, the hover ring and `crew_on_screen` on one side;
+the starfield, `local_node`, the map and `DrawList::turn_from` on the other;
+`tile_at`, `point_at` and `pick` each on the side of what they read. A new
+thing drawn in the game view has to pick a side, or it sits still while
+everything round it turns. Two knock-ons: the starfield tiles a square round
+the ship rather than the window when head up, or the corners go bare after
+the turn; and a view setting is not a `Command` — it is this browser's own
+and crosses no seam. `ship-layout.mjs headup` and `... mapup` are the pictures.
+
 ## "Is it finished" is one export, not three
 
 `ship_phase()` and nothing else. "Is it finished", "may I still edit" and
@@ -1341,10 +1396,11 @@ Two things in that order matter:
 - **Read the whole list before applying any of it.** The parts a clearing drag
   names are looked up in the design it was drawn over; applying as you go has
   the list shifting under itself.
-- **Objects come off before deck.** The other way round, every floor tile with
-  something standing on it is refused as `FloorUnderObject` and a right-drag
-  over the galley leaves the deck behind and looks half broken. That ordering
-  is in `Editor::drag_parts`, not in the host.
+- **Objects come off before deck, and only the top of each tile comes off
+  at all.** The other way round, every floor tile with something standing
+  on it is refused as `FloorUnderObject` and a right-drag over the galley
+  leaves the deck behind and looks half broken. That ordering — and the
+  one-layer peel — is in `Editor::drag_parts`, not in the host.
 
 A failing Edit inside a drag is **skipped and counted, never fatal**: a
 rectangle of deck over a half-floored room is meant to fill the gaps.
@@ -1365,21 +1421,22 @@ are easy to lose:
   in, and about engines and thrusters while a trip is in the air: those three
   would change a trip that has already been quoted.
 
-## The play phase cannot assume the room's navigation
+## The room's navigation is aboard, and it cannot walk everything the designer admits
 
 `validate` passes a design whose use spots are all reachable over floor tiles
 whose object layer is empty or non-blocking — one-tile corridors and doorways
-included. The room's `nav.rs` **cannot be assumed to walk that**: it is a
-10-unit cell grid inflating every obstacle by a `BODY_MARGIN` of 23, over a
-tile that is 52 units. A one-tile gap between two walls leaves 6 units of
-clearance, and the centre-sampled line test already has a known failure mode at
-about that width — see "A route the body cannot hold to" above.
+included. The room's `nav.rs` is what walks the ship now, and it **does not
+walk that**: it is a 10-unit cell grid inflating every obstacle by a
+`BODY_MARGIN` of 23, over a tile that is 52 units. A one-tile gap between
+two walls leaves 6 units of clearance, and the centre-sampled line test has a
+known failure mode at about that width — see "A route the body cannot hold
+to" above. The playtest ship is open-plan, which is why it works.
 
-So stage 5 needs tile-based navigation, or has to prove the existing one walks
-every design this crate accepts. Accepting a ship the crew cannot cross reads
-as a Bim frozen mid-errand, which is the hardest failure aboard to diagnose.
-The contract is written out at the top of `crates/shipdesign/src/lib.rs`; keep
-the two in step.
+So a designed ship with one-tile corridors is a ship whose crew freeze
+mid-errand — the hardest failure aboard to diagnose — and the fix is either
+tile-based navigation or a designer that refuses what the crew cannot walk.
+Neither is done. The contract is written out at the top of
+`crates/shipdesign/src/lib.rs`; keep the two in step.
 
 ## A drag reports its *first* refusal, not its last
 
@@ -1394,12 +1451,16 @@ ore in it.
 
 `REQUIRED` in `crates/shipdesign/src/validate.rs` is table, cold store,
 worktop, hob, dishwasher, toilet, basin, with bunks and chairs counted against
-the crew. That is **exactly what the room's chains walk to today** and nothing
-else. It is not a design decision about what a ship should have.
+the crew. That is **exactly what the room's chains walk to** and nothing else
+— and it is now also exactly what `crates/game/src/aboard.rs` maps onto the
+room's fixtures, plus the locker and the bay. It is not a design decision
+about what a ship should have.
 
-If stage 5 changes what a chain walks to, this list changes with it. A ship
-validated against a stale list is a ship whose crew starve standing in front of
-the fixture nobody required.
+If a chain changes what it walks to, this list and `aboard.rs` change with
+it. A ship validated against a stale list is a ship whose crew starve standing
+in front of the fixture nobody required; `aboard.rs` puts a fixture that is
+missing on the worktop rather than panicking, which is a room that stands up
+and a crew that cannot use it.
 
 ## `crates/health` is not `crates/game/src/health.rs`
 
@@ -1458,3 +1519,209 @@ where it ended up.
 `ISSUE_LINES` and `MEMORY_LINES` are the shape the host's half of this will
 take: a code with no sentence is a row that never appears, so whatever draws
 these will need a count check the way `smoke.mjs` has one.
+
+## "Has a station" is answered by generating the system, never by the designations
+
+`Galaxy::designation_for` knows about the five stars *promised* a station of
+each kind and nothing else. A quarter of the rest roll one on their own, and
+a promised one can still lose it — a station with nowhere in its own system
+to fly to is pruned. So `crates/lobby` builds **every** system once per
+galaxy (`Galaxy::every_system`) and keeps a `has_station` bit per star; the
+inspected system is then generated *afresh* from `Galaxy::system`, so the
+harness's comparison of "reported with a station" against "what inspecting
+it lists" is two paths and not one path against itself.
+
+`galaxy_checksum` covers the systems as well as the stars for the same
+reason: two players whose stars all matched and whose stations did not
+would have spawn pickers on different stations. `worldgen::fixture` pins it
+per galaxy type; `crates/worldgen/src/tests.rs` is the native end,
+`lobby_galaxy_checksum_hi`/`_lo` the wasm end, and `builder-check.mjs`
+parses the constants **out of `fixture.rs`** rather than carrying a copy.
+
+## A `u32` with its top bit set comes back from wasm negative
+
+Every wasm `u32` arrives in JavaScript as an `i32`. `lobby_none()` is
+`u32::MAX` and reads as `-1`; the checksum's high half is negative half the
+time. The host copes by never writing the number down — everything is
+compared against `wasm.lobby_none()`, whatever it reads as — and the
+harness's `whole(hi, lo)` puts `>>> 0` on both halves before `BigInt`. A
+check comparing against `4294967295` would never match.
+
+## The World panel is one element, moved between the two tools
+
+`makeWorld()` builds the World tab **once** and `makeTool`'s `sync()` moves
+it into whichever tool is on screen (`hiddenAbove` decides, and it stops at
+`document.body` — `document.hidden` is whether the *tab* is in the
+background). There is one galaxy in wasm, one camera over it and one canvas;
+two copies of the panel would be two views of one camera that could not both
+be right. Knock-on: `scratchpad/stub.mjs`'s `appendChild` now detaches a
+child from its old parent, as the real DOM does — before it did not, and a
+moved panel would have answered a `querySelector` off whichever copy came
+first.
+
+The two canvases share **one** draw buffer: `lobby_render` fills it with the
+galaxy and `lobby_render_system` with the diagram, and the host replays each
+straight after the call. After a frame the buffer holds the diagram, so a
+harness that wants the galaxy's shapes calls `lobby_render()` itself.
+
+## `window.bimsDeliver` is the transport's inbound door
+
+`net.deliver(event, payload)` is what a socket will call when a message
+arrives, and it is the one thing the page puts on `window` — for a transport
+script, and for `builder-check.mjs`, which delivers a `room` with
+`host: false` to become a guest. That is the only way to be one: `join`
+still refuses out loud. A delivered room opens the lobby screen; delivered
+`settings` are applied without being pushed back; a `spawnStar: null`
+means "cleared".
+
+Anything new the World tab lets a host do needs its guest half: the control
+disabled *and* the handler refusing when it is, the same rule as the option
+buttons — and a read-only seed field puts back whatever got typed into it,
+because a harness types straight into the value.
+
+## Looking at the World tab without a browser
+
+`node scratchpad/lobby-layout.mjs galaxy | zoomed | system > /tmp/lobby.svg`
+is `ship-layout.mjs` for the builder. The diagram's labels are the host's
+`fillText`, recorded by the stub, and they are only drawn on a frame that
+repaints the panel — so the script clicks the star again before stepping.
+It is how a relay was checked to be sitting in deep space rather than
+mis-drawn beside its planet.
+
+## `ship.html` has three ways in, and no spawn of its own
+
+`web/ship.html` reads `mode`, `star` and `station` off its query with
+everything else. `mode=1` is the simulation: `ship_simulate` settles
+`shipdesign::playtest_ship()` and opens the world at once — the default seed,
+a two-arm spiral, `world::spawn`'s dock and `SIMULATION_MONEY`, each
+overridden by the query when it says. Anything else is the game, and the
+game **must be told where to start**: `ship_init` takes the star and the
+station, `ship_spawn_ok` is asked once at boot, and a page with no spawn or
+a wrong one shows the `lost` screen with the link back to `builder.html` —
+before a design phase, never after an hour of laying one out, and never a
+different dock. `World::start` takes the pair for the same reason and
+returns `StartError::NoSuchStation` rather than choosing.
+
+Three things that follow, and bit on the way:
+
+- **Every harness that wants a design phase has to bring a spawn.** There is
+  no lobby in front of it, so `scratchpad/spawn.mjs` boots a bare page once
+  and reads `ship_simulation_star`/`_station` — the simulation's dock,
+  exported for exactly this — and `ship-check.mjs`'s `session()` appends it
+  unless the query names its own. A session opened with `spawn: false` gets
+  the error screen, and is the check that it exists.
+- **`world::spawn` is the simulation's and the fixtures', and nothing
+  else's.** `world::fixture::simulation_world` is how every fixture world
+  starts, so the reference checksum did not move when `World::start` stopped
+  choosing.
+- **"Nearest discovered node" at the spawn is the dock's own parent body**,
+  which the planner rightly calls `AlreadyThere`; nothing else is in sight.
+  `the_playtest_ship_can_fly_somewhere_from_the_simulation_spawn` therefore
+  reveals the next node out through `discover_for_probe` and plans to that.
+
+`scratchpad/flow-check.mjs` walks the seam the two page harnesses cannot:
+lobby → station → Start → the designer opened with that query → build →
+Accept → docked at the chosen star and station. `simulation-check.mjs` is the
+other command. `flyer.mjs` is the flyable build both it and `ship-layout.mjs`
+use; `ship-check.mjs` keeps its own because the checks between the parts are
+the point there.
+
+## The room is aboard the ship, and it is the same room
+
+`crates/game` is a library as well as the room's cdylib, and `world` runs
+it: `crates/world/src/crew.rs` holds a `bims::game::Game` laid out from the
+accepted design by `bims::aboard` and steps it in stage 5 of `World::step`
+— `Game::simulate` once per world step, at one sixtieth of a real second,
+which is the room's own frame at 1x. The Bims aboard are the room's Bims:
+needs, errands, the galley, the heads, the bay, the diary, all of it, with
+the cold store stocked from the cargo when the world opens. Nothing was
+copied; `world` imports `bims`, and `ship` imports it too, for the
+painter.
+
+Five things that hang off that and will bite:
+
+- **`Game::render` is split from `Game::simulate`.** The room's own page
+  calls `update`, which is both; the world calls `simulate` per step and
+  the ship painter calls `aboard.render()` once per frame. At 24x that is
+  one picture a frame rather than twenty-four.
+- **The room draws its fixtures and the ship painter draws the rest.**
+  `bims::aboard::drawn_by_room` names the parts the room has pictures for —
+  the galley, the heads, the table and seats, the bunks, the bay, the locker
+  — and `world_paint` skips those tiles and re-emits the room's whole draw
+  buffer turned with the ship (`room_aboard`). The room's night wash and
+  its deck plate are off aboard (`Room::shell`); the ship owns the sky.
+- **Every fixture is used from the south.** The room's stations stand the
+  Bim *below* the counter, the pan and the basin, and above the bay, as the
+  classic layout had them; a part turned to face another way is used from
+  the wrong side. `aboard.rs` says so at the top. Fixing it is the room's
+  stations learning a direction each.
+- **At most two of a crew are simulated.** A Bim's index is its berth and
+  its seat, and the room has `BERTHS` and `SEATS` of two. A layout with
+  fewer bunks or chairs than that repeats the last one to fill the slots.
+- **The RNG order in `Game::new` is pinned by every probe.** The classic
+  room draws each Bim's start position *between* the Bims, from the one
+  stream; `with_room` takes a closure for exactly that reason. Drawing them
+  all first reshuffled every seed and failed `probe.rs` on
+  "somewhere that counts as deck" — an hour's diagnosis for a two-line
+  reorder. Any change to `Game::new` wants `probe`, `diary`, `sweep`,
+  `crew` and `neglect` run against it.
+
+The heads aboard have no compartment — `Bath::aboard` is a pan and a basin
+with the walls and the door zero-sized off the map, `closed_door` never
+anything, and both used from the deck side. The room's nav grid takes every
+other blocking part as a solid (`Layout::others`), and every tile inside
+the deck's bounding box that is not deck, so an L-shaped ship does not get
+a room that thinks the missing corner is floor. `the_crew_live_aboard` in
+`crates/world/src/tests.rs` runs the playtest ship six game hours and
+asserts the Bim went somewhere and never left the deck.
+
+The names are still the host's: `CREW_NAMES` in `web/ship.js`, painted by
+`paintCrewNames` off `ship_crew_x`/`_y`, which are camera units about the
+ship. The crew's positions and the room's clock are in `world_checksum`, so
+the room coming aboard moved `REFERENCE_CHECKSUM`; anything that moves a
+Bim moves it again, and that is the checksum working.
+
+## The starting system is charted, and the pictures are one drawing at two scales
+
+`World::start` puts **every** node of the spawn system in `discovered`: the
+crew picked the dock off the lobby's chart of that very system, and a map
+that then hid what they had just looked at had nothing on it to fly to —
+which read as "I cannot click on stations". Discovery (`discover_along`)
+is untouched and is for what the chart does not show; a probe of it has to
+`uncharted_for_probe()` first or there is nothing left to find. Two tests
+already do.
+
+`paint_body` and `paint_station` in `crates/ship/src/world_paint.rs` are
+the pictures, by `BodyKind` and `StationKind`, drawn from ellipses and
+rectangles about a centre and a diameter, and used twice: at icon size on
+the map (pixels over the map scale) and hull-sized alongside, drawn **under**
+the hull so a docked ship sits inside its station's ring. Nothing in them
+may paint `VOID` to cut a shape — the derelict's broken ring is short
+straight pieces, because a void bite painted over the deck was the first
+thing that went wrong. The map also rings whatever the helm is aimed at,
+off `Game::aimed`, which is set with the preview and read by nothing else.
+
+`STATION_SHARE` went from a quarter to three fifths and a system rolls for
+a second and a third station (`MORE_STATIONS`); the rolls are drawn whether
+or not they take so the stream stays in step. That is a re-pin of the four
+`worldgen::fixture` checksums and of `world::fixture::REFERENCE_CHECKSUM`
+and not a `GENERATOR_VERSION` bump — the shares are deliberately off the
+bump list, since no layout changes shape.
+
+## The designer opens on the playtest ship, as a gift
+
+`ship_init` takes a `preset`: `PRESET_PLAYTEST` (the default, and what a
+page with no `preset=` on its query gets) lays `playtest_ship_on(area)` in
+the middle of the build area; `PRESET_EMPTY` is a bare grid. The ship is
+**given**: `Budget::with_gift` records its price as `given`, so `remaining`
+starts at the whole pool and the readout says the crew have spent nothing.
+Taking a given part off refunds its price like any removal — a gift is a
+gift, and "for now" it is fine that a player can sell the ship they were
+handed. A build area under twenty tiles gets an empty grid rather than half
+a ship.
+
+Two knock-ons for harnesses: `ship-check.mjs`'s `session()` appends
+`preset=0` unless the query names one, because everything in it builds its
+own; and `flow-check.mjs` accepts the preset as it stands, because that is
+now the shortest path a player has to the world. `ship-layout.mjs given` is
+the picture.

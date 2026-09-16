@@ -7,6 +7,7 @@
 //! for the reference ship is 518 400 units — so that eyesight reaches nowhere
 //! at all and one sensor array reaches about three days out.
 
+use economy::Money;
 use worldgen::Node;
 
 /// How long one step of the world is, in game minutes.
@@ -57,10 +58,17 @@ pub const LOCAL_RADIUS_BODY: f64 = 60_000.0;
 /// How much further out than the entry radius the exit is. A quarter again.
 pub const LOCAL_HYSTERESIS: f64 = 1.25;
 
-/// The galaxy a designer with no lobby behind it lands in.
+/// The galaxy the **simulation** opens in, and the one a page with no lobby
+/// behind it falls back to.
 ///
-/// Temporary, and the whole of what is temporary about it: when the lobby's
-/// World tab exists it picks a seed and a galaxy type, and this constant and
-/// the query string that carries it both go. Nothing else in `world` knows
-/// where the seed came from.
+/// The game proper never uses it: the lobby's World tab picks a seed and a
+/// galaxy type and hands both over. `nix run .#simulation` has no lobby and
+/// wants the same world every time, so it starts here — with
+/// [`crate::spawn`] picking the dock — unless the query says otherwise.
 pub const DEFAULT_SEED: u64 = 0x_5749_4e44_4f57_0001;
+
+/// What the simulation's crew have in hand when it opens. A placeholder, in
+/// whole euros: enough to buy a hold of something at the first station and
+/// not so much that money stops mattering. The game proper gets what the
+/// design phase left of the pool instead.
+pub const SIMULATION_MONEY: Money = 50_000;

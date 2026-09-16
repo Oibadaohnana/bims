@@ -22,6 +22,7 @@
       wasmOutputs = [
         "bims.wasm"
         "ship.wasm"
+        "lobby.wasm"
       ];
 
       src = nixpkgs.lib.cleanSourceWith {
@@ -59,7 +60,8 @@
               # `worldgen` and `shipdesign` are meant to compile for wasm32 as
               # well as for the native server, and nothing else in the build
               # would ever find out if one of them stopped. It is also what
-              # builds the second cdylib — `ship`, the design phase.
+              # builds the other two cdylibs — `ship`, the design phase, and
+              # `lobby`, the World tab in front of it.
               cargo build --release --locked --offline --target wasm32-unknown-unknown --workspace
               runHook postBuild
             '';
@@ -79,6 +81,7 @@
               # a 404 and shows nothing at all.
               cp target/wasm32-unknown-unknown/release/bims.wasm "$out/share/bims/"
               cp target/wasm32-unknown-unknown/release/ship.wasm "$out/share/bims/"
+              cp target/wasm32-unknown-unknown/release/lobby.wasm "$out/share/bims/"
               runHook postInstall
             '';
 
@@ -92,16 +95,16 @@
           # fetch bims.wasm, and fetch is blocked on file:// URLs, so they
           # need a server.
           #
-          # One per front end, differing in which page is opened, which module
-          # identifies its build, and which port it falls back to.
+          # One per thing to run, differing in which page is opened, which
+          # modules identify its build, and which port it falls back to.
           #
           # Separate ports on purpose: every front end comes out of the same
           # directory, so a shared default would have the second one find the
-          # first already there and hand you the wrong page. And separate
-          # `--wasm` for the same class of reason — the server tells builds
-          # apart by hashing that module, so a designer identified by the
-          # room's wasm would look unchanged after a rebuild that changed
-          # every line it serves.
+          # first already there and hand you the wrong page. And every module
+          # a front end loads goes into `--wasm`, for the same class of reason
+          # — the server tells builds apart by hashing them together, so the
+          # game, which is two pages and two modules, would otherwise look
+          # unchanged after a rebuild that changed only the designer's.
           serveFor =
             {
               name,
@@ -116,42 +119,45 @@
               text = ''
                 exec python3 ${./dev-server.py} \
                   --directory ${bims}/share/bims \
-                  --page ${page} --wasm ${wasm} \
+                  --page '${page}' ${nixpkgs.lib.concatMapStringsSep " " (w: "--wasm ${w}") wasm} \
                   --default-port ${toString port} "$@"
               '';
               meta.description = about;
             };
 
-          bims-serve = serveFor {
-            name = "bims-serve";
-            page = "index.html";
-            wasm = "bims.wasm";
-            port = 8080;
-            about = "Serve the Bims room on http://localhost:8080";
-          };
-
-          bims-builder = serveFor {
-            name = "bims-builder";
+          bims-game = serveFor {
+            name = "bims-game";
             page = "builder.html";
-            wasm = "bims.wasm";
-            port = 8081;
-            about = "Serve the Bims builder on http://localhost:8081";
+            wasm = [
+              "lobby.wasm"
+              "ship.wasm"
+            ];
+            port = 8080;
+            about = "Serve the whole of Bims on http://localhost:8080";
           };
 
-          bims-ship = serveFor {
-            name = "bims-ship";
-            page = "ship.html";
-            wasm = "ship.wasm";
-            port = 8082;
-            about = "Serve the Bims ship designer on http://localhost:8082";
+          bims-simulation = serveFor {
+            name = "bims-simulation";
+            page = "ship.html?mode=1";
+            wasm = [ "ship.wasm" ];
+            port = 8083;
+            about = "Serve the Bims simulation on http://localhost:8083";
+          };
+
+          bims-room = serveFor {
+            name = "bims-room";
+            page = "index.html";
+            wasm = [ "bims.wasm" ];
+            port = 8084;
+            about = "Serve the Bims behaviour test room on http://localhost:8084";
           };
         in
         {
           inherit
             bims
-            bims-serve
-            bims-builder
-            bims-ship
+            bims-game
+            bims-simulation
+            bims-room
             ;
         };
     in
@@ -164,18 +170,20 @@
         {
           inherit (built)
             bims
-            bims-serve
-            bims-builder
-            bims-ship
+            bims-game
+            bims-simulation
+            bims-room
             ;
           default = built.bims;
         }
       );
 
-      # One app per thing you can run. `nix run .#game` is the room and is the
-      # default; `nix run .#builder` is the menus in front of it, and
-      # `nix run .#ship` is the design phase those menus start. More will
-      # follow, and each is a name here rather than a flag on one app.
+      # One app per thing you can run, and each is a name here rather than a
+      # flag on one app. `nix run .#game` is the whole game in the order a
+      # player meets it and is the default; `.#simulation` skips to the world
+      # on a prebuilt ship; `.#room` is the behaviour test room. The old
+      # `builder`, `ship` and `serve` names are gone rather than aliased: two
+      # names for one port is how the wrong page gets opened.
       apps = eachSystem (
         pkgs:
         let
@@ -183,26 +191,24 @@
 
           game = {
             type = "app";
-            program = nixpkgs.lib.getExe built.bims-serve;
-            meta.description = "Play Bims on http://localhost:8080 (pass a port to change it)";
+            program = nixpkgs.lib.getExe built.bims-game;
+            meta.description = "Play Bims — menu, lobby, world, ship, then the game — on http://localhost:8080";
           };
 
-          builder = {
+          simulation = {
             type = "app";
-            program = nixpkgs.lib.getExe built.bims-builder;
-            meta.description = "The start menu, setup and lobby on http://localhost:8081";
+            program = nixpkgs.lib.getExe built.bims-simulation;
+            meta.description = "Straight into the game world on the playtest ship, on http://localhost:8083";
           };
 
-          ship = {
+          room = {
             type = "app";
-            program = nixpkgs.lib.getExe built.bims-ship;
-            meta.description = "Design a ship on http://localhost:8082";
+            program = nixpkgs.lib.getExe built.bims-room;
+            meta.description = "The behaviour test room — Bims on a deck — on http://localhost:8084";
           };
         in
         {
-          inherit game builder ship;
-          # The old name for the game, kept so `nix run .#serve` still works.
-          serve = game;
+          inherit game simulation room;
           default = game;
         }
       );
@@ -246,15 +252,16 @@
                 # scratchpad/, which want a terminal. The eight libraries have
                 # plain `cargo test` tests.
                 #
-                # `ship` is on the list and is a cdylib, which is the one
-                # exception and a narrow one: it is also an rlib, and the
-                # geometry that turns a design tile into a place on screen and
-                # back is pure arithmetic that gets silently wrong in a way no
-                # harness can see. Everything else in it is still checked by
-                # scratchpad/ship-check.mjs against the real page.
+                # `ship` and `lobby` are on the list and are cdylibs, which is
+                # the one exception and a narrow one: each is also an rlib, and
+                # the geometry that turns a design tile — or a star — into a
+                # place on screen and back is pure arithmetic that gets
+                # silently wrong in a way no harness can see. Everything else
+                # in them is still checked by scratchpad/ship-check.mjs and
+                # scratchpad/builder-check.mjs against the real pages.
                 cargo test --locked --offline \
                   -p time -p physics -p worldgen -p shipdesign -p economy \
-                  -p health -p flight -p world -p ship \
+                  -p health -p flight -p world -p ship -p lobby \
                   --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget}
                 touch "$out"
               '';

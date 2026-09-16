@@ -288,7 +288,56 @@ const HOB_TIMEOUT: f32 = 15.0;
 /// How fast doors and drawers travel, in fractions of open per second.
 const SWING_RATE: f32 = 3.0;
 
+/// Where everything in a room is, for a room that is laid out from somewhere
+/// else — a ship design, through `crate::aboard` — rather than by hand in
+/// [`Room::new`]. Plain rects and points in room units, and nothing that
+/// knows what a ship is: the probes stand this file up with no other crate
+/// behind it, and a layout type that named one would take that away.
+///
+/// The fixtures are what the room's errands walk to, so every one of them
+/// has to be somewhere. A design the designer accepted has all of them —
+/// `REQUIRED` in `shipdesign::validate` is this list — so a missing one is a
+/// caller's mistake, and the room puts the fixture on the worktop rather
+/// than panicking about it.
+pub struct Layout {
+    /// The whole build area.
+    pub bounds: Rect,
+    /// The deck: the bounding box of every floor tile.
+    pub interior: Rect,
+    pub counter: Rect,
+    pub fridge: Rect,
+    pub stove: Rect,
+    pub dishwasher: Rect,
+    pub table: Rect,
+    /// Seat centres, in the order the crew take them.
+    pub chairs: Vec<Vec2>,
+    /// Bunk footprints, in the order the crew take them.
+    pub beds: Vec<Rect>,
+    pub locker: Rect,
+    pub bay: Rect,
+    pub toilet: Rect,
+    pub sink: Rect,
+    /// Everything else a body cannot walk through.
+    pub others: Vec<Rect>,
+    /// What is in the cold store to begin with.
+    pub veg: u32,
+    pub tofu: u32,
+}
+
 pub struct Room {
+    /// The whole of the room, bulkheads included: what the view fits and
+    /// what `spot` calls bulkhead rather than nothing. The classic room's
+    /// is `ROOM_W` by `ROOM_H`; a ship's is its build area.
+    pub bounds: Rect,
+    /// Whether the room draws its own deck plate and walls. The classic room
+    /// does; a room laid out from a ship design does not — the ship painter
+    /// draws every tile of the hull itself, so this one draws only what
+    /// stands on it.
+    pub shell: bool,
+    /// Blocking parts the room has no opinion about — an engine, a helm, a
+    /// tank, an internal wall — which a body still has to walk round. Empty
+    /// in the classic room, where everything solid is one of the fixtures.
+    pub others: Vec<Rect>,
     pub interior: Rect,
     pub counter: Rect,
     pub fridge: Rect,
@@ -425,6 +474,9 @@ impl Room {
         ];
 
         Room {
+            bounds: Rect::from_min_size(Vec2::ZERO, vec2(ROOM_W, ROOM_H)),
+            shell: true,
+            others: Vec::new(),
             interior,
             counter,
             fridge,
@@ -457,6 +509,109 @@ impl Room {
             dish: Dish::Stew,
             veg: START_VEG,
             tofu: START_TOFU,
+            plate_on_counter: None,
+            plate_on_table: [None; SEATS],
+            time: 0.0,
+        }
+    }
+
+    /// A room laid out from somewhere else — a ship design, through
+    /// `crate::aboard` — rather than by hand. Every fixture is where the
+    /// layout says; the room draws none of its own shell.
+    ///
+    /// The room has exactly [`BERTHS`] beds and [`SEATS`] chairs, and a
+    /// layout may bring fewer: the last one is repeated to fill the slots,
+    /// which is a duplicate rect nobody sits in rather than an index out of
+    /// range for a crew that is smaller than the room.
+    pub fn from_layout(layout: Layout) -> Room {
+        let interior = layout.interior;
+        let counter = layout.counter;
+        let fill = |v: &[Rect]| -> [Rect; 2] {
+            let last = v.last().copied().unwrap_or(counter);
+            [
+                v.first().copied().unwrap_or(last),
+                v.get(1).copied().unwrap_or(last),
+            ]
+        };
+        let bunks = fill(&layout.beds);
+        let side = |frame: Rect| {
+            // The ladder hangs on whichever rail faces the middle of the room.
+            if frame.center().x < interior.center().x {
+                1.0
+            } else {
+                -1.0
+            }
+        };
+        let beds = [
+            Berth::new(bunks[0], side(bunks[0])),
+            Berth::new(bunks[1], side(bunks[1])),
+        ];
+        let fallback_seat = vec2(layout.table.center().x, layout.table.max.y + 30.0);
+        let chairs = [
+            layout.chairs.first().copied().unwrap_or(fallback_seat),
+            layout
+                .chairs
+                .get(1)
+                .copied()
+                .unwrap_or_else(|| layout.chairs.first().copied().unwrap_or(fallback_seat)),
+        ];
+        // The board sits on the worktop and the drawer is a face on its front,
+        // as in the classic room, cut down to what the worktop has room for.
+        let board = Rect::from_min_size(
+            vec2(counter.min.x + 8.0, counter.min.y + 12.0),
+            vec2(
+                (counter.width() - 16.0).min(96.0).max(20.0),
+                30.0f32.min(counter.height() - 20.0).max(10.0),
+            ),
+        );
+        let drawer = Rect::from_min_size(
+            vec2(counter.min.x + 8.0, counter.max.y - 18.0),
+            vec2((counter.width() - 16.0).min(112.0).max(20.0), 16.0),
+        );
+        let dish_face = Rect::from_min_size(
+            vec2(
+                layout.dishwasher.min.x + 4.0,
+                layout.dishwasher.max.y - 20.0,
+            ),
+            vec2((layout.dishwasher.width() - 8.0).max(20.0), 18.0),
+        );
+
+        Room {
+            bounds: layout.bounds,
+            shell: false,
+            others: layout.others,
+            interior,
+            counter,
+            fridge: layout.fridge,
+            stove: layout.stove,
+            board,
+            drawer,
+            table: layout.table,
+            chairs,
+            beds,
+            locker: layout.locker,
+            broom_out: false,
+            filth: Filth::new(interior),
+            bath: Bath::aboard(layout.toilet, layout.sink),
+            dishwasher: Dishwasher::at(dish_face),
+            bay: Bay::at(layout.bay),
+            fridge_door: 0.0,
+            fridge_target: 0.0,
+            drawer_open: 0.0,
+            drawer_target: 0.0,
+            stove_on: false,
+            stove_heat: 0.0,
+            stove_idle: 0.0,
+            pot_contents: 0.0,
+            pot_servings: 0,
+            pot_cooked: 0.0,
+            board_veg: 0.0,
+            board_slices: 0,
+            knife_on_board: false,
+            board_tofu: false,
+            dish: Dish::Stew,
+            veg: layout.veg,
+            tofu: layout.tofu,
             plate_on_counter: None,
             plate_on_table: [None; SEATS],
             time: 0.0,
@@ -630,10 +785,11 @@ impl Room {
     /// Everything fixed that the Bim has to walk around. The bathroom door is
     /// not in here: it comes and goes, and the pathfinder handles it
     /// separately through [`Room::closed_door`].
-    pub fn solids(&self) -> [Rect; 9] {
+    pub fn solids(&self) -> Vec<Rect> {
         let [north_left, north_right, west] = self.bath.solids();
-        [
+        let mut all = vec![
             self.counter,
+            self.stove,
             self.fridge,
             self.table,
             self.beds[0].frame,
@@ -642,7 +798,9 @@ impl Room {
             north_left,
             north_right,
             west,
-        ]
+        ];
+        all.extend(self.others.iter().copied());
+        all
     }
 
     /// The bathroom door, when it is shut and therefore in the way.
@@ -707,7 +865,7 @@ impl Room {
             SPOT_TABLE
         } else if self.interior.contains(p) {
             SPOT_DECK
-        } else if Rect::from_min_size(Vec2::ZERO, vec2(ROOM_W, ROOM_H)).contains(p) {
+        } else if self.bounds.contains(p) {
             SPOT_BULKHEAD
         } else {
             SPOT_NOTHING
@@ -875,7 +1033,9 @@ impl Room {
     // --- drawing ---------------------------------------------------------
 
     pub fn draw(&self, list: &mut DrawList) {
-        self.draw_floor(list);
+        if self.shell {
+            self.draw_floor(list);
+        }
         self.draw_counter(list);
         self.draw_stove(list);
         self.draw_fridge(list);

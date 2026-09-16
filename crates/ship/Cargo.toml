@@ -20,6 +20,7 @@ description = "The ship design phase — wasm exports, input and the draw buffer
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+bims = { path = "../game" }
 economy = { path = "../economy" }
 flight = { path = "../flight" }
 physics = { path = "../physics" }

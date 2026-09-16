@@ -10,10 +10,11 @@
 //! simulations that will disagree, and the failure reads as a ship that is in
 //! two places.
 //!
-//! The order inside a step is written out in [`World::step`] and the last
-//! three stages are **empty on purpose**. They are where the crew, the
-//! construction step and health go, and they are there now so that the shape
-//! of the loop is decided while it is still small.
+//! The order inside a step is written out in [`World::step`]. The crew are
+//! in it now — spawned at their bunks when the world opens, stepped in the
+//! fifth stage — and the last two stages are **empty on purpose**: they are
+//! where construction and health go, and they are there so that the shape of
+//! the loop is decided while it is still small.
 //!
 //! # Where the ship is
 //!
@@ -45,6 +46,7 @@ use shipdesign::{ShipDesign, design_hash};
 use worldgen::math::DVec2;
 use worldgen::{Galaxy, GalaxyType, Node, StarSystem};
 
+use crate::crew::Aboard;
 use crate::data;
 use crate::event::{Refusal, WorldEvent};
 use crate::frame::{self, Frame};
@@ -175,16 +177,22 @@ impl Ship {
 /// Why a world could not be started.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum StartError {
-    /// No system in the galaxy has a station in it. Every galaxy the
-    /// generator makes has one of every kind somewhere, so this is only
-    /// reachable if that promise is broken.
-    NowhereToSpawn,
+    /// The star or the station the game was told to start at is not in this
+    /// galaxy. The lobby names both, and a world does **not** fall back to
+    /// some other dock when they are wrong: two players handed different
+    /// spawns would be two players in two places, and a wrong one is a bug
+    /// to show rather than to paper over.
+    NoSuchStation,
     /// The accepted design does not describe a ship that can exist.
     NotAShip(flight::DynamicsError),
 }
 
 /// One star system, the ship in it, and the clock they both run on.
-#[derive(Clone, PartialEq, Debug)]
+///
+/// Not `Clone` and not `PartialEq`: the room aboard is neither, and a
+/// world is compared by its [`World::checksum`] — which is the comparison
+/// two machines will make, and the one a test should make too.
+#[derive(Debug)]
 pub struct World {
     pub clock_minutes: f64,
     /// How many steps have been taken. The stamp a command carries, and the
@@ -199,6 +207,10 @@ pub struct World {
     /// nothing away from a station.
     pub money: Money,
     pub ship: Ship,
+    /// The people aboard, and the room they live in: the room's whole
+    /// simulation, laid out on this ship, one Bim per player at their own
+    /// bunk from the moment the world opened. See [`crate::crew`].
+    pub aboard: Aboard,
     /// What the crew have seen, shared between all of them and never
     /// forgotten. Sorted, so a checksum over it means something.
     pub discovered: Vec<Node>,
@@ -207,7 +219,11 @@ pub struct World {
 }
 
 impl World {
-    /// Open a world with the accepted ship docked at the spawn station.
+    /// Open a world with the accepted ship docked at a station.
+    ///
+    /// `star_id` and `station_id` are the spawn the lobby chose — see
+    /// [`StartError::NoSuchStation`] for why a wrong one is an error and not
+    /// a fallback. [`spawn`] picks one for the simulation, which has no lobby.
     ///
     /// `money` is what was left of the design phase's pool. It is not
     /// converted into anything and it is not spent at Accept: it is what the
@@ -218,16 +234,18 @@ impl World {
         players: u32,
         seed: u64,
         galaxy_type: GalaxyType,
+        star_id: u32,
+        station_id: u32,
     ) -> Result<World, StartError> {
         let players = players.max(1);
         let galaxy = Galaxy::new(seed, galaxy_type);
-        let (star_id, station_id) = spawn(&galaxy).ok_or(StartError::NowhereToSpawn)?;
-        let system = galaxy.system(star_id).ok_or(StartError::NowhereToSpawn)?;
+        let system = galaxy.system(star_id).ok_or(StartError::NoSuchStation)?;
         let at = system
             .absolute_position(Node::Station(station_id))
-            .ok_or(StartError::NowhereToSpawn)?;
+            .ok_or(StartError::NoSuchStation)?;
 
         let dynamics = flight::dynamics(&design, players).map_err(StartError::NotAShip)?;
+        let aboard = Aboard::new(&design, players, seed);
         let mut ship = Ship {
             design,
             crew_count: players,
@@ -253,19 +271,34 @@ impl World {
             system,
             money,
             ship,
+            aboard,
             discovered: Vec::new(),
             // Everybody starts at real time. Anything else would have the
             // world already moving before the first player had looked at it.
             speed_requests: vec![Speed::Real; players as usize],
         };
 
-        // The station the ship is standing on, and whatever else is close
-        // enough to see from it. A crew that could not see the dock they were
-        // tied to would have nowhere to fly to at all.
-        world.discovered.push(Node::Station(station_id));
-        let here = world.ship.position();
-        world.discover_along(here, here, &mut Vec::new());
+        // The whole system, charted. The crew picked this dock off the
+        // lobby's chart of this very system — every planet and every station
+        // on it — and a map that then hid what they had just been looking at
+        // would be a map with nothing on it to fly to. Discovery is for what
+        // the chart does not show: the systems beyond this one, when there
+        // is a way there, and anything a sweep turns up on the way.
+        world.discovered = world.system.nodes();
+        world.discovered.sort_by_key(node_key);
         Ok(world)
+    }
+
+    /// Forget the chart: only the dock is known, plus whatever the sensors
+    /// reach from it. For probes of discovery, which otherwise have nothing
+    /// left to discover in a system that opens charted.
+    pub fn uncharted_for_probe(&mut self) {
+        self.discovered.clear();
+        if let ShipState::Docked { station } = self.ship.state {
+            self.discovered.push(Node::Station(station));
+        }
+        let here = self.ship.position();
+        self.discover_along(here, here, &mut Vec::new());
     }
 
     // --- the step ---------------------------------------------------------
@@ -301,10 +334,10 @@ impl World {
         self.discover_along(was, now, &mut events);
         self.settle_frame(&mut events);
 
-        // 5. Crew. **Empty, and an extension point rather than an oversight.**
-        //    Bims live in ship-design tile coordinates and the ship's
-        //    position, rotation and acceleration do not reach them; what goes
-        //    here is the room's own update, once per Bim, on this clock.
+        // 5. Crew: the room's own update, aboard, on this clock. Bims live
+        //    in ship-design coordinates and the ship's position, rotation and
+        //    acceleration do not reach them. See `crates/world/src/crew.rs`.
+        self.aboard.step();
 
         // 6. Construction. Also empty. What goes here builds and pulls apart
         //    through `shipdesign::materials`, out of what is aboard, and asks
@@ -943,12 +976,13 @@ fn segment_distance(from: DVec2, to: DVec2, point: DVec2) -> f64 {
     from.add(along.scale(t)).distance(point)
 }
 
-/// Where a game starts: the lowest star id with a station in its system, and
-/// the lowest station id in that system.
+/// Where the **simulation** starts: the lowest star id with a station in its
+/// system, and the lowest station id in that system.
 ///
-/// **One function on purpose.** When the lobby's World tab exists it will pick
-/// the system and the dock, and this is the only thing that has to be replaced
-/// — nothing else in the crate knows how a spawn was chosen.
+/// The game proper starts where the lobby's World tab said, and that pair
+/// comes into [`World::start`] from outside. This is for `nix run
+/// .#simulation`, which has no lobby in front of it and wants the same dock
+/// every time — and for the fixtures, for the same reason.
 pub fn spawn(galaxy: &Galaxy) -> Option<(u32, u32)> {
     for star in &galaxy.stars {
         let Some(system) = galaxy.system(star.id) else {

@@ -1,7 +1,12 @@
-# The room: the simulation, and the wasm exports the browser drives it
-# through. The only cdylib in the workspace — everything a future native
-# server also needs lives in a sibling crate instead, which is what keeps this
-# one free to be wasm-shaped.
+# The room: the Bims, their needs and errands, the galley, the heads and the
+# bay, and the drawing of all of it — plus the wasm exports `web/bims.js`
+# drives it through as the behaviour test room.
+#
+# It is a library as well as a cdylib, because the ship game runs this very
+# simulation **aboard the designed ship**: `world` builds a room from a
+# `ShipDesign` through `aboard.rs` and steps it inside `World::step`. That
+# is the one dependency this crate has on the rest of the workspace, and it
+# is confined to that one module.
 [package]
 name = "bims"
 version = "0.1.0"
@@ -9,7 +14,9 @@ edition = "2024"
 description = "Bims - a 2D top-down game that runs in the browser"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+physics = { path = "../physics" }
+shipdesign = { path = "../shipdesign" }
 time = { path = "../time" }

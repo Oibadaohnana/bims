@@ -44,6 +44,7 @@
 //! flight, and any speed above [`data::TOP_SPEED`].
 
 pub mod checksum;
+pub mod crew;
 pub mod data;
 pub mod event;
 pub mod fixture;

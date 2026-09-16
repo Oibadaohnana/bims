@@ -44,6 +44,12 @@ pub struct Bath {
     pub door: Rect,
     pub toilet: Rect,
     pub sink: Rect,
+    /// A heads with no compartment of its own: the pan and the basin stand
+    /// on the deck where a ship design put them, and whatever walls there
+    /// are round them are the design's, not these. No bulkheads, no door —
+    /// `closed_door` is never anything — and the Bim uses both from the
+    /// deck side, as it uses the galley.
+    pub bare: bool,
 
     /// 0 shut, 1 fully retracted into the bulkhead. Animated towards `target`.
     pub open: f32,
@@ -99,8 +105,36 @@ impl Bath {
             door,
             toilet,
             sink,
+            bare: false,
             open: 0.0,
             target: 0.0,
+            locked: false,
+            flush: 0.0,
+            tap: 0.0,
+            time: 0.0,
+        }
+    }
+
+    /// The heads as a ship design places them: a pan and a basin, and no
+    /// compartment. The shell is the two fixtures' bounding box, so `spot`
+    /// still answers for them; the walls and the door are nowhere at all —
+    /// zero-sized rects off the map, which block no cell and draw nothing.
+    pub fn aboard(toilet: Rect, sink: Rect) -> Bath {
+        let shell = Rect::from_corners(
+            vec2(toilet.min.x.min(sink.min.x), toilet.min.y.min(sink.min.y)),
+            vec2(toilet.max.x.max(sink.max.x), toilet.max.y.max(sink.max.y)),
+        );
+        let nowhere = Rect::from_min_size(vec2(-1.0e6, -1.0e6), Vec2::ZERO);
+        Bath {
+            shell,
+            inner: shell,
+            walls: [nowhere; 3],
+            door: nowhere,
+            toilet,
+            sink,
+            bare: true,
+            open: 1.0,
+            target: 1.0,
             locked: false,
             flush: 0.0,
             tap: 0.0,
@@ -117,7 +151,7 @@ impl Bath {
 
     /// The doorway, when there is a door across it to walk around.
     pub fn closed_door(&self) -> Option<Rect> {
-        if self.is_open() {
+        if self.bare || self.is_open() {
             None
         } else {
             Some(self.door)
@@ -132,8 +166,9 @@ impl Bath {
     }
 
     pub fn set_open(&mut self, open: bool) {
-        // A locked door stays shut; unlock it first.
-        if open && self.locked {
+        // No door to open or shut aboard; a locked door stays shut, so
+        // unlock it first.
+        if self.bare || (open && self.locked) {
             return;
         }
         self.target = if open { 1.0 } else { 0.0 };
@@ -141,6 +176,9 @@ impl Bath {
 
     /// Locking also shuts it — a locked door standing open is not locked.
     pub fn set_locked(&mut self, locked: bool) {
+        if self.bare {
+            return;
+        }
         self.locked = locked;
         if locked {
             self.target = 0.0;
@@ -155,21 +193,36 @@ impl Bath {
         self.tap = seconds;
     }
 
-    /// Outside the door, on the deck, and just inside it.
+    /// Outside the door, on the deck, and just inside it. With no door,
+    /// both are where the Bim stands to use the pan: the chain walks to the
+    /// "door" and finds itself already there.
     pub fn outside_station(&self) -> Vec2 {
+        if self.bare {
+            return self.toilet_station();
+        }
         vec2(self.door.center().x, self.shell.min.y - STAND_OFF)
     }
 
     pub fn inside_station(&self) -> Vec2 {
+        if self.bare {
+            return self.toilet_station();
+        }
         vec2(self.door.center().x, self.door.max.y + STAND_OFF)
     }
 
-    /// Where the Bim sits, and where it stands to turn round first.
+    /// Where the Bim sits, and where it stands to turn round first. Aboard,
+    /// the pan is used from the deck side below it, as the galley is.
     pub fn toilet_seat(&self) -> Vec2 {
+        if self.bare {
+            return self.toilet.center();
+        }
         vec2(self.toilet.min.x + 18.0, self.toilet.center().y)
     }
 
     pub fn toilet_station(&self) -> Vec2 {
+        if self.bare {
+            return vec2(self.toilet.center().x, self.toilet.max.y + STAND_OFF);
+        }
         self.toilet_seat() - vec2(48.0, 0.0)
     }
 
@@ -221,10 +274,14 @@ impl Bath {
     // --- drawing ---------------------------------------------------------
 
     pub fn draw(&self, list: &mut DrawList) {
-        self.draw_shell(list);
+        if !self.bare {
+            self.draw_shell(list);
+        }
         self.draw_toilet(list);
         self.draw_sink(list);
-        self.draw_door(list);
+        if !self.bare {
+            self.draw_door(list);
+        }
     }
 
     fn draw_shell(&self, list: &mut DrawList) {

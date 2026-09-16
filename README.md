@@ -13,7 +13,9 @@ and the deck goes dark at night.
 Beside it there is a ship to design and a system to fly it round. The lobby
 starts a [design phase](#the-ship-designer); accepting the design starts
 [the game](#the-game) — one star system, the ship docked at a station in it,
-and one clock everything runs on. The crew are not aboard that one yet.
+and one clock everything runs on. The crew are aboard it from the first
+step — one per player, each at their own bunk — and they are the same Bims
+as in the room, living the same life on the ship you designed.
 
 ## Running it
 
@@ -25,22 +27,26 @@ That builds the game, serves it, and opens it in a browser tab. `Ctrl+C` stops
 the server. Pass a port to pin one (`nix run . -- 3000`), or `--no-open` to keep
 it out of your browser.
 
-There are three things to run, and more will follow:
+There are three things to run:
 
-```sh
-nix run .#game        # the room: the simulation, on a canvas — port 8080
-nix run .#builder     # the start menu, game setup and the lobby — port 8081
-nix run .#ship        # the ship design phase, and the game it starts — port 8082
-```
+| command | `./run` | opens | port |
+| --- | --- | --- | --- |
+| `nix run .` or `nix run .#game` | `./run game` | the whole game, in order: the start menu, setup or a lobby, the world and a station to start at, the ship design, then the world docked where you said | 8080 |
+| `nix run .#simulation` | `./run simulation` | straight into the world on a prebuilt playtest ship, docked at a station | 8083 |
+| `nix run .#room` | `./run room` | the behaviour test room — the Bims on a deck | 8084 |
 
-`nix run .` is `nix run .#game`. All three serve the same directory and differ
-only in which page they open, so they have separate default ports and can be up
-at the same time.
+All three serve the same directory and differ only in which page they open,
+so they have separate default ports and can be up at the same time. The
+`./run` forms serve the live `web/` directory rather than the frozen copy in
+the Nix store, which is what you want while editing — see
+[The builder](#the-builder), [The ship designer](#the-ship-designer),
+[The game](#the-game) and [The simulation](#the-simulation).
 
-While editing, `./run game`, `./run builder` and `./run ship` do the same
-against the live `web/` directory rather than the frozen copy in the Nix store
-— see [The builder](#the-builder), [The ship designer](#the-ship-designer) and
-[The game](#the-game).
+**Port 8080 used to serve the room.** It is the whole game now, and the room
+has moved to 8084; `builder`, `ship` and `serve` are gone as names. A server
+from an older build still sitting on a port is refused rather than reused —
+see below — so if `nix run .` says a different build is on 8080, that is the
+old room server: stop it with `Ctrl+C` in its terminal.
 
 Running it again while it is already up starts neither a second server nor a
 second tab. It recognises its own build by the wasm being served and just tells
@@ -49,10 +55,12 @@ running for as long as it stays open, so stacking them leaves you staring at two
 Bims wondering which is real — pass `--open` if you want another tab anyway.
 
 If the port has an *older* build on it, it says so and stops rather than quietly
-showing you stale content. If the port is taken by something unrelated, it moves
-to the next free one.
+showing you stale content. A build is every module its page loads, hashed
+together — the game is the lobby's `lobby.wasm` and the designer's `ship.wasm`
+— so a rebuild of either reads as a different build. If the port is taken by
+something unrelated, it moves to the next free one.
 
-Without flakes, `./serve.sh` does the same thing and takes the same arguments.
+Without flakes, `./serve.sh` is `./run game` and takes the same arguments.
 
 The rest:
 
@@ -83,10 +91,12 @@ poisoned before any of that was in place cannot outlive it either.
 
 ## The builder
 
-`nix run .#builder` opens what comes *before* the room: a start menu, a game
-setup screen, and a lobby. It is `web/builder.html` and `web/builder.js`, a
-page of its own — `web/bims.js` is the room and knows nothing about menus, and
-the builder touches no wasm at all yet.
+`nix run .` opens here: what comes *before* the ship and the world — a start
+menu, a game setup screen, and a lobby. It is `web/builder.html` and `web/builder.js`, a
+page of its own — `web/bims.js` is the room and knows nothing about menus.
+It has a wasm of its own, `lobby.wasm` out of `crates/lobby`, and only the
+World tab touches it: the galaxy is generated and drawn there, and the rest of
+the page runs without it.
 
 **Play** goes straight to game setup. **Create lobby** opens a room other
 people will one day be able to walk into, and a code field beside the two of
@@ -102,16 +112,31 @@ tabbed tool the setup screen uses:
   €200 000, and the ship you start with at 30 × 30, 40 × 40 or 60 × 60 tiles.
   €100 000 and 40 × 40 unless you say otherwise. Nobody starts with stores:
   everybody's money goes into **one pool** and the designer spends that.
-- **World** — where the ship is and what it can reach. Nothing behind it yet;
-  the tab says so rather than showing an empty box.
+- **World** — which galaxy, and where in it the game starts. A **seed** —
+  any whole number up to a `u64`, typed in decimal, with **New seed** to
+  draw one — and a **galaxy type**: two-arm spiral, spiral, elliptical or
+  round. Under them the galaxy itself, a thousand stars on a canvas: drag to
+  pan, scroll to zoom, hover to read a star's name and class, click one to
+  open its system on the right — the star at the middle, its planets and
+  belts on their orbits, its stations as squares, each named with its kind
+  and the body it hangs off. Stars with no station are dimmed, since the game
+  cannot start there; they can still be looked at. **Start here** on a
+  station makes it the pending start, marked on the map and named in the
+  tab's header; **Random start** picks one anywhere. A new seed or a new
+  type is a new galaxy and forgets the start.
+
+  No distances, no travel times, nothing about what a station is like: the
+  lobby is where a start is chosen, not where a system is explored.
 
 One settings object sits behind both copies of the tool, so what you pick on
 the setup screen is what the lobby shows and the other way about.
 
-**Start** hands the game to the ship designer, which is a page of its own —
-see below. What crosses is four numbers in a query string and nothing else:
-the money each Bim brings, the build area in tiles, how many players there
-are, and which slot you are. `"large"` and `"full"` exist for the buttons;
+**Start** needs a station picked — until there is one the button is disabled
+and says so — and then hands the game to the ship designer, which is a page
+of its own; see below. What crosses is numbers in a query string and nothing
+else: the money each Bim brings, the build area in tiles, how many players
+there are, which slot you are, the seed in its two halves, the galaxy type,
+and the star and the station the game starts at. `"large"` and `"full"` exist for the buttons;
 what a game is *started with* is what will cross into wasm, and no strings do
 — which goes for the euro sign as well, so what is written down is a bare
 count of euros.
@@ -121,7 +146,8 @@ parameter.
 ### The multiplayer seam
 
 `net` in `web/builder.js` is the whole of it: `create`, `join`, `push`,
-`leave`, and events the screens listen to. It is a local stand-in with the
+`suggest`, `leave`, `deliver` for what comes in, and events the screens
+listen to. It is a local stand-in with the
 shape a transport will have, and **nothing in the screens reaches past it** —
 the slot list is drawn from what `net` says the players are, not from what the
 lobby knows about itself. Giving it a socket is meant to be a change to that
@@ -129,13 +155,21 @@ object and to nothing else.
 
 Two things it already does properly, because they are easy to get wrong later:
 the settings tool knows how to be read-only, for a guest in somebody else's
-lobby, and the settings themselves are plain numbers — a sum of money and a
-tile count. Nothing but numbers can cross into the simulation anyway.
+lobby — a guest sees the host's world, can pan, zoom and inspect it, and can
+**Suggest** a station, which rings that star on everybody's map, but cannot
+change a thing — and the settings themselves are plain numbers: a sum of
+money, a tile count, a seed, a type and two ids. Nothing but numbers can
+cross into the simulation anyway.
 
 ## The ship designer
 
-`nix run .#ship` opens what the lobby's **Start** goes to: the whole crew
-laying out **one ship** together, on a tile grid, before anybody is aboard.
+The lobby's **Start** goes here: the whole crew laying out **one ship**
+together, on a tile grid, before anybody is aboard. It is not a command of its
+own any more — a design phase with no lobby in front of it has no station to
+start at, and the page says so rather than picking one: opened without a star
+and a station in its query, or with ones the galaxy has not got, it shows
+**Nowhere to start** and a link back to the lobby. It never falls back to
+another spawn.
 It is `web/ship.html` and `web/ship.js` with a wasm of its own, `ship.wasm`,
 out of `crates/ship`.
 
@@ -163,6 +197,14 @@ out from under something that is standing on it.
 
 ### Laying one out
 
+The designer **opens on a ship**: the playtest ship, laid out in the middle
+of whatever build area the lobby chose, whole and flyable, as a gift — the
+pool is what the crew brought and none of it has been spent. Everything on
+it can be moved, taken off or added to like anything you placed yourself,
+and taking a given part off puts its price in hand as any removal does.
+`?preset=0` opens an empty grid instead, which is what the harnesses use;
+a grid too small for the ship (under twenty tiles) opens empty too.
+
 The palette down the left is grouped the way a ship is thought about — hull,
 systems, crew, galley, heads, storage, bay — rather than the way the enum is
 numbered. The rows are built from what the wasm says exists, so a part added
@@ -170,11 +212,16 @@ and forgotten in the grouping turns up under **Anything else** instead of
 quietly not existing.
 
 - **Click** to place. **Drag a rectangle** for the things you fill an area
-  with — structure, deck plating, conduit — **drag a line** for both kinds of
-  wall, **right-drag a rectangle** to clear. A clearing drag comes off top
-  down: what is standing in the tile and what runs through it, then the deck,
-  then the frame. Any other order and every tile with something on it would be
-  refused and the drag would look half broken.
+  with — deck plating, conduit — **drag a line** for both kinds of wall.
+  **Deck plating lays its own frame**: there is no separate structure tool,
+  because to anybody but the connectivity check the frame and the deck are
+  one thing. A plated tile has both; the hull stands on the frame, deck or
+  no deck.
+- **Right-click peels the top part off a tile** and only that — a hob comes
+  off and the deck stays, a second click takes the deck, a third the frame.
+  A right-dragged rectangle peels every tile in it by one. Across the tiles
+  the parts come off top down, or a tile's deck would be refused because the
+  next tile's hob, in the same drag, was still standing on it.
 - **R** turns the ghost a quarter clockwise. The footprint and the use spots
   turn with it, and the palette shows the turned size.
 - **Middle-drag** or **WASD** pans; the **wheel** zooms. The view is clamped
@@ -343,17 +390,36 @@ it. No click handler touches the wasm's editing exports directly.
 ## The game
 
 The design phase is the only phase before it. The moment the last Accept lands,
-the ship is real: it is **docked at the spawn station** with whatever was left
-of the pool in the crew's hands, and from then on there is one world, one clock
-and one loop.
+the ship is real: it is **docked at the station the lobby picked** with
+whatever was left of the pool in the crew's hands, and from then on there is
+one world, one clock and one loop.
 
 That is worth saying plainly because it is the decision everything else hangs
 off. The star system, the ship in it, and everything aboard it all advance
 together in `World::step`, which moves the world by a sixtieth of a game minute
-and nothing else. Crew, construction and health are not written yet; when they
-are, they go **inside that step**, at the places already marked for them. A
-second clock would be two simulations that disagree, and the failure would read
-as a ship in two places.
+and nothing else. The crew are in it, and they are **the room** — the same
+simulation as [the behaviour test room](#the-crew), laid out on your ship:
+one Bim per player, spawned at their own bunk the moment the world opens —
+Bim *i* at bunk *i*, in id order — and from then on hungry, tired, in need
+of the heads, cooking at the hob you placed, eating at your table, sleeping
+in your bunk, sweeping your deck and tending your bay, on the world's clock,
+inside that step. The cold store opens holding what you bought. Construction
+and health are still to come and go in the same step; a second clock would
+be two simulations that disagree, and the failure would read as a ship in
+two places.
+
+The room's fixtures are drawn with the room's own pictures — the fridge, the
+hob and its pot, the pan, the bunk with its rails — turned with the ship, and
+the Bims are named over their heads by the page (`CREW_NAMES` in
+`web/ship.js`, the room's two names first, so the pair you met on the deck
+are the pair aboard).
+
+Three limits, honestly stated: the room has two bunks' and two seats' worth
+of identity, so at most two of a crew are simulated; every fixture is used
+from the south — a hob with a wall below it is a hob nobody can reach; and
+the room's navigation cannot walk a one-tile corridor, so a ship built with
+them is a ship whose crew freeze in them. The playtest ship has none of
+those problems, which is not an accident.
 
 ### Flying it
 
@@ -396,12 +462,25 @@ reservation is handed back.
 
 ### Seeing where you are
 
-The ship can see `VISION_RANGE` with the crew's own eyes, which out here is
-almost nothing, and a great deal further with a **sensor array**. Anything that
-comes within range of the stretch the ship travelled — the stretch, not the
-endpoints, because at 24x a step is a long way — is discovered, shared by the
-whole crew and never forgotten. Undiscovered things are not drawn on the map at
-all, and there is no way to plot a trip to one.
+The system you start in is **charted**: every planet, belt and station the
+lobby's chart showed is on the map from the first step, drawn as what it is —
+a rocky world with its continents, a gas giant with its bands and ring, an
+ice world under glare, a belt of rocks; an orbital wheel, a refinery's tanks
+and stack, a mining rig in its rubble, a broken derelict, a relay's dish — on
+faint rings that show their orbits. Click one and the helm quotes the trip;
+Confirm sends the ship. The thing you are alongside is drawn under the hull
+in the ship view, so a docked ship sits inside its station's ring.
+
+Beyond the chart, the ship sees `VISION_RANGE` with the crew's own eyes,
+which out here is almost nothing, and a great deal further with a **sensor
+array**. Anything that comes within range of the stretch the ship travelled
+— the stretch, not the endpoints, because at 24x a step is a long way — is
+discovered, shared by the whole crew and never forgotten. Undiscovered things
+are not drawn on the map at all, and there is no way to plot a trip to one.
+That is what will find the next system, when there is a way there.
+
+Most systems have a station now — about three in five, and often more than
+one — so a start is rarely far from somewhere to go.
 
 ### Speed, and who decides
 
@@ -451,6 +530,25 @@ is the radiation input.
 Which world you land in is a seed and a galaxy shape, and for now they come off
 `ship.html`'s query string with a fixed default behind them. The lobby's World
 tab will pick them instead; nothing else about them changes.
+
+## The simulation
+
+`nix run .#simulation` is the game without the front of it: `ship.html?mode=1`
+opens the world at once, for one player, on the **playtest ship** —
+`shipdesign::playtest_ship()`, a twenty-tile hull with one of everything a
+crew of one needs to live and to fly, a full tank, metal and components on
+the shelf and a few days' food in the cold store — with `SIMULATION_MONEY`
+(a placeholder €50 000) in hand. It is for playtesting the world quickly, and
+it is the one place the old "lowest star with a station" spawn survives:
+the world is the fixed default seed's, a two-arm spiral, docked at that
+system's first station. `seedHi`, `seedLo`, `galaxy`, `star` and `station`
+in the query override those when a particular world is wanted.
+
+The ship's part count and `design_hash` are pinned — `PLAYTEST_PARTS` and
+`PLAYTEST_HASH` — and checked natively and in `ship.wasm` like the reference
+design's, so the simulation opens on the same ship on every target.
+`scratchpad/simulation-check.mjs` boots the page, checks all of that, and
+flies a trip to the end at 24x.
 
 ## The crew
 

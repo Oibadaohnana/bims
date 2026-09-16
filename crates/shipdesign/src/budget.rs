@@ -35,18 +35,37 @@ use crate::design::ShipDesign;
 
 /// What there is to spend, and what a design has spent of it.
 ///
-/// The budget holds only the pool. "Remaining" is always **derived** from a
-/// design rather than kept alongside it and decremented, so a rejected edit,
-/// a removal and a replayed edit stream cannot drift apart from what is
-/// actually on the ship.
+/// The budget holds the pool and nothing that moves. "Remaining" is always
+/// **derived** from a design rather than kept alongside it and decremented,
+/// so a rejected edit, a removal and a replayed edit stream cannot drift
+/// apart from what is actually on the ship.
+///
+/// `given` is the one other figure, and it is fixed too: the price of
+/// whatever the design phase *opened* with. A design phase that starts on a
+/// ship already laid out — see [`Budget::with_gift`] — did not buy that ship
+/// out of the crew's pool, so its price is added to what there is to spend
+/// and what is left starts at exactly what the crew brought. Taking a given
+/// part off puts its price in hand like any removal does; a gift is a gift.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Budget {
     pub pool: Money,
+    /// The price of what was there before anybody spent anything. Zero for
+    /// a design phase that opened on an empty grid.
+    pub given: Money,
 }
 
 impl Budget {
     pub fn new(pool: Money) -> Budget {
-        Budget { pool }
+        Budget { pool, given: 0 }
+    }
+
+    /// A pool with a ship already on the grid: what `preset` costs is given,
+    /// so [`Budget::remaining`] of `preset` is the whole pool.
+    pub fn with_gift(pool: Money, preset: &ShipDesign) -> Budget {
+        Budget {
+            pool,
+            given: Budget::spent(preset),
+        }
     }
 
     /// What the design has cost: every part's price, plus what every unit of
@@ -71,7 +90,9 @@ impl Budget {
     /// anything that would take it there, and the saturation here is the
     /// backstop for a design that arrived from somewhere that did not.
     pub fn remaining(&self, design: &ShipDesign) -> Money {
-        self.pool.saturating_sub(Budget::spent(design))
+        self.pool
+            .saturating_add(self.given)
+            .saturating_sub(Budget::spent(design))
     }
 
     /// Whether one more thing at `price` fits in what is left.

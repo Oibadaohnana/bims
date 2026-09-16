@@ -257,18 +257,62 @@ pub struct Game {
 impl Game {
     pub fn new(seed: u64, width: f32, height: f32) -> Game {
         let room = Room::new();
-        let maps = Maps::new(room.interior, &room.solids(), room.bath.door, BODY_MARGIN);
-        let mut rng = Rng::new(seed);
+        let rng = Rng::new(seed);
         // Each starts somewhere in the open floor, clear of the kitchen units
         // and a body's width apart, so the first frame does not begin with the
         // two of them shoving each other out of one spot.
-        let bims = (0..CREW)
-            .map(|who| {
-                let start = vec2(
+        //
+        // Drawn *between* the Bims rather than all up front: every roll in
+        // the room is drawn from one stream, and the order the first few are
+        // drawn in is what every seed-pinned probe was pinned against.
+        Game::with_room(
+            room,
+            rng,
+            CREW,
+            |who, rng| {
+                vec2(
                     rng.range(ROOM_W * 0.30, ROOM_W * 0.70),
                     rng.range(ROOM_H * 0.42 + who as f32 * 0.12, ROOM_H * 0.52),
-                );
-                Bim::new(who, start, &mut rng)
+                )
+            },
+            width,
+            height,
+        )
+    }
+
+    /// A game in a room laid out from elsewhere — a ship design, through
+    /// `crate::aboard` — with one Bim per `start`, standing there.
+    ///
+    /// **At most [`room::BERTHS`] of them.** A Bim's index is its whole
+    /// identity — its berth, its seat, its coverall — and the room has two
+    /// of each, so a bigger crew is cut to two rather than handed a bed that
+    /// does not exist. Lifting that is a change to the room, not to here.
+    pub fn with_layout(
+        layout: room::Layout,
+        seed: u64,
+        starts: &[Vec2],
+        width: f32,
+        height: f32,
+    ) -> Game {
+        let room = Room::from_layout(layout);
+        let rng = Rng::new(seed);
+        let crew = starts.len().min(room::BERTHS).max(1);
+        Game::with_room(room, rng, crew, |who, _| starts[who], width, height)
+    }
+
+    fn with_room(
+        room: Room,
+        mut rng: Rng,
+        crew: usize,
+        mut start: impl FnMut(usize, &mut Rng) -> Vec2,
+        width: f32,
+        height: f32,
+    ) -> Game {
+        let maps = Maps::new(room.interior, &room.solids(), room.bath.door, BODY_MARGIN);
+        let bims = (0..crew)
+            .map(|who| {
+                let at = start(who, &mut rng);
+                Bim::new(who, at, &mut rng)
             })
             .collect();
         let mut game = Game {
@@ -312,10 +356,11 @@ impl Game {
     pub fn resize(&mut self, width: f32, height: f32) {
         let w = width.max(1.0);
         let h = height.max(1.0);
-        self.view_scale = (w / ROOM_W).min(h / ROOM_H);
+        let (room_w, room_h) = (self.room.bounds.width(), self.room.bounds.height());
+        self.view_scale = (w / room_w).min(h / room_h);
         self.view_offset = vec2(
-            (w - ROOM_W * self.view_scale) * 0.5,
-            (h - ROOM_H * self.view_scale) * 0.5,
+            (w - room_w * self.view_scale) * 0.5,
+            (h - room_h * self.view_scale) * 0.5,
         );
     }
 
@@ -327,7 +372,17 @@ impl Game {
         self.view_offset
     }
 
+    /// One frame of the room: the simulation, then its picture. What the
+    /// room's own page calls, once a frame.
     pub fn update(&mut self, dt: f32) {
+        self.simulate(dt);
+        self.render();
+    }
+
+    /// The simulation alone, without drawing it. What the ship game calls
+    /// aboard — up to twenty-four times a frame at its top speed, where a
+    /// picture of every step but the last would be a picture nobody sees.
+    pub fn simulate(&mut self, dt: f32) {
         self.clock.advance(dt);
         self.room.update(dt);
 
@@ -382,8 +437,6 @@ impl Game {
             m.age += dt;
         }
         self.markers.retain(|m| m.age < MARKER_LIFE);
-
-        self.render();
     }
 
     /// One crew member's half of the frame.
@@ -1559,7 +1612,7 @@ impl Game {
     /// moment and therefore never speak — and with the deck always finding
     /// something to be swept, that is not a hypothetical.
     fn free_to_talk(&self, who: usize) -> Option<usize> {
-        (0..CREW).find(|&other| {
+        (0..self.bims.len()).find(|&other| {
             other != who
                 && self.bims[other].is_alive()
                 && self.bims[other].sad_left <= 0.0
@@ -1796,7 +1849,7 @@ impl Game {
             return 0;
         }
         let turn = (self.clock.minutes() / TAKES_A_TURN) as u32 as usize;
-        if turn % CREW == who {
+        if turn % self.bims.len().max(1) == who {
             self.bims[who].chat_topic
         } else {
             0
@@ -2060,6 +2113,12 @@ impl Game {
 
     pub fn bim_pos(&self, who: usize) -> Vec2 {
         self.bims[who].character.pos
+    }
+
+    /// How many are aboard. Two in the classic room; a ship's crew, up to
+    /// [`room::BERTHS`], aboard one.
+    pub fn crew_count(&self) -> u32 {
+        self.bims.len() as u32
     }
 
     pub fn selected_count(&self) -> u32 {
@@ -2577,7 +2636,7 @@ impl Game {
 
     // --- rendering --------------------------------------------------------
 
-    fn render(&mut self) {
+    pub fn render(&mut self) {
         self.list.clear();
         self.room.draw(&mut self.list);
         // On the deck, under everything: the Bim walks over its own mess.
@@ -2623,9 +2682,13 @@ impl Game {
         self.room.draw_over(&mut self.list);
 
         // Night falls over the whole room at once.
+        // Aboard a ship the room has no shell, and a night wash the size of
+        // the build area would be a dark square hanging in space round the
+        // hull: the ship painter owns the sky, so the wash stays the classic
+        // room's.
         let dark = (1.0 - self.clock.daylight()) * NIGHT_DEPTH;
-        if dark > 0.002 {
-            let room = Rect::from_min_size(Vec2::ZERO, vec2(ROOM_W, ROOM_H));
+        if dark > 0.002 && self.room.shell {
+            let room = self.room.bounds;
             self.list
                 .rect(room.center(), room.size(), 0.0, 0.0, NIGHT.alpha(dark));
         }
@@ -2656,6 +2719,13 @@ impl Game {
                 MARQUEE_EDGE.alpha(0.8),
             );
         }
+    }
+
+    /// The frame's shapes, for a host that embeds this room in a picture of
+    /// its own rather than replaying the buffer straight to a canvas — the
+    /// ship game paints the room turned with the ship.
+    pub fn shapes(&self) -> &[f32] {
+        self.list.data()
     }
 
     pub fn draw_ptr(&self) -> *const f32 {

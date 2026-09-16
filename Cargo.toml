@@ -1,7 +1,8 @@
 # The workspace. Nothing is built from here directly — every crate is in
 # `crates/`:
 #
-#   game        the room: the simulation and its wasm exports. A cdylib.
+#   game        the room: the Bims and their world, and its wasm exports. A
+#               cdylib and a library — the ship game runs it aboard.
 #   ship        the design phase and the game it starts. The other cdylib.
 #   world       one system, the ship in it, and the clock they both run on.
 #   flight      ship dynamics and the closed-form plan that flies a trip.

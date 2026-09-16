@@ -17,7 +17,7 @@ use worldgen::math::{DVec2, dvec2};
 
 use crate::data;
 use crate::event::{Refusal, WorldEvent};
-use crate::fixture::{REFERENCE_MONEY, reference_target, reference_world};
+use crate::fixture::{REFERENCE_MONEY, reference_target, reference_world, simulation_world};
 use crate::frame::Frame;
 use crate::speed::Speed;
 use crate::world::{Command, ShipState, World};
@@ -29,14 +29,7 @@ fn close(a: f64, b: f64) -> bool {
 
 /// A world with a named amount of money, for the trading tests.
 fn world_with(design: ShipDesign, money: Money, players: u32) -> World {
-    World::start(
-        design,
-        money,
-        players,
-        data::DEFAULT_SEED,
-        GalaxyType::SpiralTwoArm,
-    )
-    .expect("the default seed should have somewhere to spawn")
+    simulation_world(design, money, players)
 }
 
 fn basic() -> World {
@@ -85,8 +78,10 @@ fn a_world_opens_docked_at_the_spawn_station_with_the_money_left_over() {
         .unwrap();
     assert!(world.ship.position().distance(at) < 1e-9);
 
-    // And the dock the ship is tied to is something the crew have seen.
+    // And the dock the ship is tied to is something the crew have seen —
+    // as is everything else in the system, off the lobby's chart.
     assert!(world.discovered.contains(&worldgen::Node::Station(station)));
+    assert_eq!(world.discovered.len(), world.system.nodes().len());
     assert_eq!(
         world.ship.frame,
         Frame::Local(worldgen::Node::Station(station))
@@ -587,7 +582,9 @@ fn a_redirect_that_cannot_be_flown_holds_and_says_so() {
         world.step(&[]);
     }
     // Somewhere nobody has seen. A node the generator put in this system but
-    // that is beyond the ship's sensors.
+    // that is beyond the ship's sensors — with the chart forgotten first,
+    // because a system opens fully charted.
+    world.uncharted_for_probe();
     let unseen = world
         .system
         .nodes()
@@ -772,6 +769,7 @@ fn what_comes_within_range_of_the_track_is_seen() {
 #[test]
 fn flying_past_something_is_what_discovers_it() {
     let mut world = basic();
+    world.uncharted_for_probe();
     let unseen: Vec<worldgen::Node> = world
         .system
         .nodes()
@@ -992,4 +990,248 @@ fn the_checksum_notices_a_world_that_has_moved() {
     let mut idle = basic();
     idle.step(&[]);
     assert_ne!(confirmed.checksum(), idle.checksum(), "a trip should show");
+}
+
+// --- where a world starts ----------------------------------------------------
+
+/// The lobby names the spawn, and a world starts exactly there — any star
+/// with a station, any station in it — docked, with that dock discovered.
+#[test]
+fn a_world_starts_at_the_station_it_was_told_to() {
+    let galaxy = worldgen::Galaxy::new(data::DEFAULT_SEED, GalaxyType::SpiralTwoArm);
+    // Not the simulation's spawn: the *last* dock in the galaxy, so a world
+    // that quietly fell back to `spawn` would show up.
+    let (star, station) = galaxy
+        .stars
+        .iter()
+        .rev()
+        .find_map(|s| {
+            let system = galaxy.system(s.id)?;
+            let last = system.stations.iter().map(|st| st.id).max()?;
+            Some((s.id, last))
+        })
+        .expect("a galaxy has a station somewhere");
+    assert_ne!((star, station), crate::spawn(&galaxy).unwrap());
+
+    let world = World::start(
+        flyer(2),
+        REFERENCE_MONEY,
+        2,
+        data::DEFAULT_SEED,
+        GalaxyType::SpiralTwoArm,
+        star,
+        station,
+    )
+    .expect("a real station is somewhere to start");
+    assert_eq!(world.star_id, star);
+    assert_eq!(world.ship.state, ShipState::Docked { station });
+    assert!(world.discovered.contains(&worldgen::Node::Station(station)));
+}
+
+/// A spawn that is not there is an error and never a different dock.
+#[test]
+fn a_spawn_that_does_not_exist_is_refused_rather_than_replaced() {
+    let galaxy = worldgen::Galaxy::new(data::DEFAULT_SEED, GalaxyType::SpiralTwoArm);
+    let empty = galaxy
+        .stars
+        .iter()
+        .find(|s| galaxy.system(s.id).unwrap().stations.is_empty())
+        .expect("most stars have no station")
+        .id;
+    let (star, _) = crate::spawn(&galaxy).unwrap();
+    let start = |star, station| {
+        World::start(
+            flyer(2),
+            REFERENCE_MONEY,
+            2,
+            data::DEFAULT_SEED,
+            GalaxyType::SpiralTwoArm,
+            star,
+            station,
+        )
+    };
+    assert_eq!(
+        start(empty, 0).err(),
+        Some(crate::StartError::NoSuchStation)
+    );
+    assert_eq!(
+        start(star, 999).err(),
+        Some(crate::StartError::NoSuchStation)
+    );
+    assert_eq!(
+        start(u32::MAX, 0).err(),
+        Some(crate::StartError::NoSuchStation)
+    );
+}
+
+/// The simulation's ship, at the simulation's dock, with the simulation's
+/// purse: a trip to the nearest thing the crew can see can be planned with
+/// the fuel aboard, or the playtest is a ship that cannot leave the dock.
+#[test]
+fn the_playtest_ship_can_fly_somewhere_from_the_simulation_spawn() {
+    use shipdesign::fixture::playtest_ship;
+    let world = simulation_world(playtest_ship(), data::SIMULATION_MONEY, 1);
+    assert_eq!(world.money, data::SIMULATION_MONEY);
+    assert_eq!(world.ship.crew_count, 1);
+    let ShipState::Docked { station: dock } = world.ship.state else {
+        panic!("not docked");
+    };
+    assert_eq!(
+        world.ship.fuel_aboard(),
+        world.ship.design.capacity(Storage::FuelTank)
+    );
+
+    // The nearest node that is somewhere to *go*. At this spawn nothing but
+    // the dock's own parent body is in sight, and that is where the ship
+    // already is — the planner says `AlreadyThere` — so the trip is to the
+    // next thing out, revealed through the probe seam the way a sensor sweep
+    // would reveal it, and it has to be flyable on the tank.
+    let here = world.ship.position();
+    let mut nodes: Vec<worldgen::Node> = world
+        .system
+        .nodes()
+        .into_iter()
+        .filter(|&n| n != worldgen::Node::Station(dock))
+        .collect();
+    nodes.sort_by(|a, b| {
+        let da = world.system.absolute_position(*a).unwrap().distance(here);
+        let db = world.system.absolute_position(*b).unwrap().distance(here);
+        da.partial_cmp(&db).unwrap()
+    });
+    let mut world = world;
+    let mut quote = None;
+    for node in nodes {
+        let at = world.system.absolute_position(node).unwrap();
+        world.discover_for_probe(at, at);
+        let target = match node {
+            worldgen::Node::Body(id) => Target::Body(id),
+            worldgen::Node::Station(id) => Target::Station(id),
+        };
+        match world.preview(target) {
+            Err(PlanError::AlreadyThere) => continue,
+            other => {
+                quote = Some(other.expect("the trip should plan"));
+                break;
+            }
+        }
+    }
+    let quote = quote.expect("the spawn system has somewhere to fly to");
+    assert!(quote.minutes > 0.0);
+    assert!(
+        quote.fuel <= world.ship.unreserved_fuel() as f64,
+        "the trip wants {} fuel and there are {} aboard",
+        quote.fuel,
+        world.ship.unreserved_fuel()
+    );
+}
+
+// --- the crew ----------------------------------------------------------------
+
+/// The crew are aboard from the first step, and they are the room's Bims:
+/// one per player, each at their own bunk — Bim *i* at bunk *i* in id
+/// order — standing on its use spot, which is deck.
+#[test]
+fn everybody_spawns_at_their_own_bunk() {
+    let world = basic();
+    assert_eq!(world.aboard.count(), 2);
+    let mut bunks: Vec<_> = world
+        .ship
+        .design
+        .parts
+        .iter()
+        .filter(|p| p.kind == PartKind::Bunk)
+        .collect();
+    bunks.sort_by_key(|p| p.id);
+    let grid = world.ship.design.grid();
+    let mut seen = Vec::new();
+    for who in 0..world.aboard.count() {
+        let spot = bunks[who as usize].use_spots()[0];
+        let at = world.aboard.position(who);
+        let want = bims::aboard::tile_middle(spot.0, spot.1);
+        assert!(
+            (at.x - want.x as f64).abs() < 1e-3 && (at.y - want.y as f64).abs() < 1e-3,
+            "bim {who} at {at:?}, bunk {who} is used from {want:?}"
+        );
+        assert_ne!(
+            grid.get(shipdesign::Layer::Floor, spot),
+            0,
+            "bim {who} is not on deck"
+        );
+        assert_eq!(
+            grid.get(shipdesign::Layer::Object, spot),
+            0,
+            "bim {who} is inside something"
+        );
+        assert!(!seen.contains(&spot), "two Bims in one place");
+        seen.push(spot);
+    }
+}
+
+/// Stage 5 runs on the world's clock and nobody else's: the room's clock
+/// aboard reads exactly the world's, step for step, and a Bim that was put
+/// somewhere else shows in the checksum.
+#[test]
+fn the_crew_keep_the_world_s_clock() {
+    let mut world = basic();
+    let mut other = basic();
+    // The room's day starts at eight in the morning, so its clock reads
+    // ahead of the world's by a fixed offset; what has to agree is how far
+    // each has moved.
+    let dawn = world.aboard.minutes();
+    for _ in 0..10 {
+        world.step(&[]);
+        other.step(&[]);
+    }
+    // To a thousandth of a minute: the room keeps its clock in `f32`, and
+    // at eight in the morning an `f32` minute is good to about that.
+    assert!(
+        ((world.aboard.minutes() - dawn) - world.clock_minutes).abs() < 1e-3,
+        "room {} vs world {}",
+        world.aboard.minutes() - dawn,
+        world.clock_minutes
+    );
+    assert_eq!(world.checksum(), other.checksum());
+    let was = other.aboard.position(0);
+    other
+        .aboard
+        .room
+        .put_for_probe(0, bims::math::vec2(was.x as f32 + 60.0, was.y as f32));
+    assert_ne!(
+        world.checksum(),
+        other.checksum(),
+        "a Bim that moved should show"
+    );
+}
+
+/// The room aboard is the room: left to themselves for a game day the
+/// crew walk about, and the deck they walk is the design's — nobody ends
+/// up standing in a wall or off the ship.
+#[test]
+fn the_crew_live_aboard() {
+    use shipdesign::fixture::playtest_ship;
+    let mut world = simulation_world(playtest_ship(), data::SIMULATION_MONEY, 1);
+    assert_eq!(world.aboard.count(), 1);
+    let start = world.aboard.position(0);
+    let mut moved = false;
+    let mut farthest = 0.0f64;
+    let grid = world.ship.design.grid();
+    let tile = shipdesign::parts::TILE as f64;
+    // Six game hours: long enough to be hungry, cook and eat.
+    for _ in 0..(6 * 60 * 60) {
+        world.step(&[]);
+        let at = world.aboard.position(0);
+        let d = at.distance(start);
+        farthest = farthest.max(d);
+        if d > tile {
+            moved = true;
+        }
+        let (tx, ty) = ((at.x / tile).floor() as i32, (at.y / tile).floor() as i32);
+        assert_ne!(
+            grid.get(shipdesign::Layer::Floor, (tx, ty)),
+            0,
+            "the Bim is off the deck at tile ({tx}, {ty}) after {} minutes",
+            world.clock_minutes
+        );
+    }
+    assert!(moved, "the Bim never went anywhere; farthest {farthest}");
 }

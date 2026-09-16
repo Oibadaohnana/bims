@@ -620,12 +620,16 @@
         color: var(--muted);
       }
 
-      #speed-buttons {
+      /* The speed buttons, and the pair that says which way up the view is:
+         one row of choices each, one of them on. */
+      #speed-buttons,
+      #view-buttons {
         display: flex;
         gap: 4px;
       }
 
-      #speed-buttons button {
+      #speed-buttons button,
+      #view-buttons button {
         flex: 1;
         padding: 4px 0;
         border: 1px solid var(--edge);
@@ -637,7 +641,8 @@
         cursor: pointer;
       }
 
-      #speed-buttons button.on {
+      #speed-buttons button.on,
+      #view-buttons button.on {
         border-color: var(--accent);
         color: var(--accent);
       }
@@ -660,6 +665,35 @@
          that gives it a `display` carries `:not([hidden])`. */
       #game-trade[data-panel]:not([hidden]) {
         display: block;
+      }
+
+      /* --- nowhere to start ---------------------------------------------- */
+
+      /* The page opened with no station to start at, or one that is not
+         there. It says so, and offers the way back; it never opens a design
+         phase over a spawn it has not got. */
+      #lost-screen:not([hidden]) {
+        justify-content: center;
+        align-items: center;
+        gap: 14px;
+        text-align: center;
+      }
+
+      #lost-screen h1 {
+        margin: 0;
+        font-size: 22px;
+        font-weight: 600;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+
+      #lost-screen a {
+        display: inline-block;
+        padding: 11px 22px;
+        border: 1px solid var(--accent);
+        border-radius: 9px;
+        color: var(--accent);
+        text-decoration: none;
       }
 
       #error {
@@ -695,8 +729,8 @@
               <span class="price" id="readout-tile"></span>
             </div>
             <div id="keys">
-              R turns · drag to fill · right-drag to clear · middle-drag or
-              WASD to pan · wheel to zoom
+              R turns · drag to fill · right-click peels the top part, again
+              for the next · middle-drag or WASD to pan · wheel to zoom
             </div>
             <div id="said" role="status"></div>
           </div>
@@ -721,6 +755,15 @@
         </div>
       </section>
 
+      <!-- Nowhere to start. Shown instead of the design phase when the query
+           named no station, or one the galaxy has not got. The link is the
+           whole of the way back: the lobby is where a start is chosen. -->
+      <section id="lost-screen" data-screen="lost" hidden>
+        <h1>Nowhere to start</h1>
+        <p id="lost-said" class="muted"></p>
+        <a id="lost-back" href="builder.html">Back to the lobby</a>
+      </section>
+
       <!-- The game. One world, one clock, and the same canvas: the design
            phase's palette and checks are gone and the helm and the station
            are in their place. -->
@@ -742,8 +785,8 @@
               <span class="price" id="heading"></span>
             </div>
             <div id="game-keys">
-              M switches the ship and the map · click the map to plot ·
-              middle-drag or WASD to pan · wheel to zoom
+              M switches the ship and the map · N turns the view head up or north up ·
+              click the map to plot · middle-drag or WASD to pan · wheel to zoom
             </div>
             <div id="log" role="status"></div>
           </div>
@@ -760,6 +803,17 @@
               <h2>Speed</h2>
               <div id="speed-buttons"></div>
               <div id="speed-asks" aria-label="What each player has asked for"></div>
+            </div>
+            <!-- Which way up. North up is the game's own: the ship turns and
+                 the sky stays put. Head up holds the ship square to the
+                 window in both views and turns the sky and the map round
+                 it. A view setting, this player's own, and no command. -->
+            <div id="view">
+              <h2>View</h2>
+              <div id="view-buttons" aria-label="Which way up the view is">
+                <button type="button" data-head-up="0">North up</button>
+                <button type="button" data-head-up="1">Head up</button>
+              </div>
             </div>
             <div id="game-trade" data-panel="trade" hidden>
               <h2>Station</h2>

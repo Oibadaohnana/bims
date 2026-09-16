@@ -69,7 +69,14 @@ class El {
     if (name === "hidden") this.hidden = false;
   }
 
+  /** Appending takes the child out of wherever it was, as the real DOM
+   * does. The builder *moves* its World panel between two tools this way,
+   * and a stub that left a copy behind would answer a `querySelector` off
+   * whichever copy it found first. */
   appendChild(child) {
+    if (child.parentNode) {
+      child.parentNode.children = child.parentNode.children.filter((c) => c !== child);
+    }
     child.parentNode = this;
     this.children.push(child);
     this.doc.index(child);
@@ -489,6 +496,7 @@ function makeSandbox({ doc, win, clock, location }) {
     Object,
     Uint8Array,
     Float32Array,
+    BigInt,
     Error,
     decodeURIComponent,
     encodeURIComponent,
@@ -632,10 +640,12 @@ export async function boot(options = {}) {
   return bootWasmPage({ html: HTML, host: HOST, wasm: WASM, ...options });
 }
 
-/** Boot a page that is only a page: markup and one script, no wasm and no
- * frame loop. `web/builder.html` is the one of them — the start menu, the
- * setup screen and the lobby run entirely in the host, so there is nothing to
- * instantiate or to step.
+/** Boot a page as if it were only a page: markup and one script, no wasm
+ * and no frame loop. `web/builder.html` used to be exactly that, and can
+ * still be booted this way to check the half of it that needs no galaxy —
+ * the menu, the setup screen and the lobby — and that the World tab says
+ * the module is missing rather than sitting there loading. For the World
+ * tab itself it is `bootWasmPage` with `web/lobby.wasm`.
  *
  * Synchronous, because a page with no wasm has nothing to wait for. Time
  * still has to pass, though: the builder hangs remarks off `setTimeout`, and
@@ -648,8 +658,9 @@ export function bootPage({ html = "web/builder.html", host = "web/builder.js", s
   return handle();
 }
 
-/** Boot a page that has its own wasm. `web/ship.html` is the first — a third
- * front end, with `ship.wasm` behind it rather than the room's.
+/** Boot a page that has its own wasm. `web/ship.html` was the first — a
+ * third front end, with `ship.wasm` behind it rather than the room's — and
+ * `web/builder.html` with `web/lobby.wasm` is the second.
  *
  * Everything `boot()` returns, plus `advance` for the timed remarks and
  * `fire` for the keyboard. Async, because instantiating resolves off-thread. */

@@ -25,6 +25,10 @@ import urllib.request
 import webbrowser
 
 DEFAULT_PORT = 8080
+DEFAULT_PAGE = "builder.html"
+# The modules the default front end — the whole game — loads: the lobby's
+# galaxy and the designer's ship, in this order.
+DEFAULT_WASM = ["lobby.wasm", "ship.wasm"]
 # How many ports past the requested one to try before giving up.
 PORT_SEARCH = 20
 
@@ -44,28 +48,40 @@ def build_id(data):
     return hashlib.sha256(data).hexdigest()[:12]
 
 
-def build_on_disk(directory, wasm):
-    with open(os.path.join(directory, wasm), "rb") as f:
-        return build_id(f.read())
+def build_on_disk(directory, wasms):
+    """The identity of the build in `directory`: one hash over every module
+    the front end loads, in order."""
+    parts = []
+    for wasm in wasms:
+        with open(os.path.join(directory, wasm), "rb") as f:
+            parts.append(f.read())
+    return build_id(b"".join(parts))
 
 
-def build_being_served(port, wasm):
+def build_being_served(port, wasms):
     """Which build of Bims is already on `port`, or None if what is listening
     there is not Bims at all. Identified by the served wasm, so an unrelated
     server on the same port cannot be mistaken for one of ours.
 
-    **Its own front end's wasm**, not always the room's. There is more than one
-    cdylib now, and a server identified by a module its page does not load
-    would look unchanged after a rebuild that changed everything it serves —
-    which is exactly the stale-server trap this check exists to close."""
-    try:
-        with urllib.request.urlopen(
-            f"http://localhost:{port}/{wasm}", timeout=2
-        ) as response:
-            data = response.read()
-    except (urllib.error.URLError, OSError, ValueError):
-        return None
-    return build_id(data) if data.startswith(b"\0asm") else None
+    **Every module its front end loads**, hashed together. The whole game is
+    two pages and two modules — the lobby's galaxy and the designer's ship —
+    and a server identified by only one of them would look unchanged after a
+    rebuild that changed the other, which is exactly the stale-server trap
+    this check exists to close. One module that is not wasm, or not there,
+    and it is not one of ours."""
+    parts = []
+    for wasm in wasms:
+        try:
+            with urllib.request.urlopen(
+                f"http://localhost:{port}/{wasm}", timeout=2
+            ) as response:
+                data = response.read()
+        except (urllib.error.URLError, OSError, ValueError):
+            return None
+        if not data.startswith(b"\0asm"):
+            return None
+        parts.append(data)
+    return build_id(b"".join(parts))
 
 
 def open_browser(url, background=True):
@@ -110,16 +126,20 @@ def main():
     parser.add_argument("--directory", default="web")
     parser.add_argument(
         "--page",
-        default="index.html",
-        help="page under the served directory to open (default index.html)",
+        default=DEFAULT_PAGE,
+        help=(
+            f"page under the served directory to open (default {DEFAULT_PAGE}); "
+            "a query string is fine, ship.html?mode=1 is the simulation"
+        ),
     )
     parser.add_argument(
         "--wasm",
-        default="bims.wasm",
+        action="append",
         help=(
-            "the module this front end loads (default bims.wasm), used to tell "
-            "one build from another. Each front end passes its own, or a "
-            "rebuild of one would look like no change to the other's server"
+            "a module this front end loads, used to tell one build from "
+            "another; repeat it for a front end that loads more than one "
+            f"(default {' '.join(DEFAULT_WASM)}). Every module is hashed, so a "
+            "rebuild of any of them reads as a different build"
         ),
     )
     parser.add_argument(
@@ -128,8 +148,8 @@ def main():
         default=DEFAULT_PORT,
         help=(
             f"port to use when none is given (default {DEFAULT_PORT}). Each "
-            "front end has its own, so the room and the builder can be up at "
-            "once out of one directory"
+            "front end has its own, so the game, the simulation and the room can "
+            "be up at once out of one directory"
         ),
     )
     parser.add_argument(
@@ -141,11 +161,12 @@ def main():
     args = parser.parse_args()
 
     port = args.port or args.default_port
-    mine = build_on_disk(args.directory, args.wasm)
+    wasms = args.wasm or DEFAULT_WASM
+    mine = build_on_disk(args.directory, wasms)
 
     # Running the command twice should take you to the game, not start a second
     # copy of it on another port and open a second browser tab.
-    running = build_being_served(port, args.wasm)
+    running = build_being_served(port, wasms)
     if running == mine:
         url = f"http://localhost:{port}/{args.page}"
         print(f"Bims is already running at {url}", flush=True)

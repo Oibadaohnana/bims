@@ -238,3 +238,182 @@ pub fn flyer(crew: u32) -> ShipDesign {
 
     design
 }
+
+// --- the playtest ship ------------------------------------------------------
+
+/// What [`playtest_ship`] hashes to. Pinned for the reason [`REFERENCE_HASH`]
+/// is: `ship_self_check` computes it in wasm and `tests.rs` natively, and a
+/// target that hashed the simulation's ship differently would start a
+/// different simulation. Update it only when the ship below is meant to
+/// change.
+pub const PLAYTEST_HASH: u64 = 0xd235_be32_b183_42e0;
+
+/// How many parts [`playtest_ship`] ends up with. What notices a placement
+/// that was quietly refused — the builder skips rather than panics, for the
+/// reason [`REFERENCE_PARTS`] gives.
+pub const PLAYTEST_PARTS: u32 = 665;
+
+/// Where the playtest ship's thrusters go: hull tiles near the four corners,
+/// which they **replace**, as the flyer's do.
+const PLAYTEST_THRUSTERS: [(u32, u32); 4] = [(2, 1), (17, 1), (2, 18), (17, 18)];
+
+/// The hull tiles the airlock stands in: one column of the right-hand skin,
+/// two tall. They get deck first, because an airlock stands on deck, and
+/// the airlock shields, so the hull is as closed as it was.
+const PLAYTEST_AIRLOCK: [(u32, u32); 2] = [(18, 9), (18, 10)];
+
+/// What the playtest ship carries besides a full tank: enough metal and
+/// components to build with, and a few days of food. Bought through
+/// [`apply`], so the shelf and the cold store are what bound it.
+pub const PLAYTEST_CARGO: [(ResourceId, u32); 5] = [
+    (ResourceId::Fuel, 200),
+    (ResourceId::Metal, 60),
+    (ResourceId::Components, 40),
+    (ResourceId::Vegetable, 40),
+    (ResourceId::Tofu, 20),
+];
+
+/// The ship `nix run .#simulation` opens with: one of everything a crew of
+/// one needs to live and to fly, on a twenty-tile grid, with a full tank and
+/// a stocked hold. Valid for one with **no errors and no warnings**.
+///
+/// It is not [`flyer`] for one crew, though it is close to it, because a
+/// playtest ship is meant to be changed as the game grows — a shower, a
+/// shelf, materials to build with — without moving the reference that two
+/// targets are compared on. Built through [`apply`] like everything else.
+pub fn playtest_ship() -> ShipDesign {
+    let budget = Budget::new(REFERENCE_POOL);
+    let mut design = ShipDesign::new(AREA);
+
+    let put = |design: &mut ShipDesign, kind: PartKind, origin, rotation| {
+        if let Ok(next) = apply(
+            design,
+            &budget,
+            Edit::Place {
+                kind,
+                origin,
+                rotation,
+            },
+        ) {
+            *design = next;
+        }
+    };
+    let take = |design: &mut ShipDesign, tile: (u32, u32)| {
+        let standing = design
+            .grid()
+            .get(Layer::Object, (tile.0 as i32, tile.1 as i32));
+        if standing != 0
+            && let Ok(next) = apply(design, &budget, Edit::Remove { part_id: standing })
+        {
+            *design = next;
+        }
+    };
+
+    // Frame under everything, deck inside, hull round the outside — the
+    // reference's shape exactly.
+    for y in 1..19 {
+        for x in 1..19 {
+            put(&mut design, PartKind::Structure, (x, y), Rotation::R0);
+        }
+    }
+    for y in 2..18 {
+        for x in 2..18 {
+            put(&mut design, PartKind::Floor, (x, y), Rotation::R0);
+        }
+    }
+    for i in 1..19 {
+        put(&mut design, PartKind::OutsideWall, (i, 1), Rotation::R0);
+        put(&mut design, PartKind::OutsideWall, (i, 18), Rotation::R0);
+        put(&mut design, PartKind::OutsideWall, (1, i), Rotation::R0);
+        put(&mut design, PartKind::OutsideWall, (18, i), Rotation::R0);
+    }
+
+    // The hull's working parts, in place of plating: thrusters at the
+    // corners, an array forward, and an airlock in the starboard skin.
+    for tile in PLAYTEST_THRUSTERS {
+        take(&mut design, tile);
+        put(&mut design, PartKind::Thruster, tile, Rotation::R0);
+    }
+    take(&mut design, (9, 1));
+    put(&mut design, PartKind::SensorArray, (9, 1), Rotation::R0);
+    for tile in PLAYTEST_AIRLOCK {
+        take(&mut design, tile);
+        put(&mut design, PartKind::Floor, tile, Rotation::R0);
+    }
+    put(
+        &mut design,
+        PartKind::Airlock,
+        PLAYTEST_AIRLOCK[0],
+        Rotation::R0,
+    );
+
+    // The galley and the heads along the top, facing down the room.
+    put(&mut design, PartKind::ColdStore, (3, 3), Rotation::R0);
+    put(&mut design, PartKind::Worktop, (5, 3), Rotation::R0);
+    put(&mut design, PartKind::Hob, (8, 3), Rotation::R0);
+    put(&mut design, PartKind::Dishwasher, (10, 3), Rotation::R0);
+    put(&mut design, PartKind::Toilet, (12, 3), Rotation::R0);
+    put(&mut design, PartKind::Basin, (14, 3), Rotation::R0);
+    put(&mut design, PartKind::BroomLocker, (16, 3), Rotation::R0);
+
+    // Living space in the middle, stores down the sides, the engine aft.
+    put(&mut design, PartKind::Table, (4, 6), Rotation::R0);
+    put(&mut design, PartKind::Chair, (4, 7), Rotation::R0);
+    put(&mut design, PartKind::Helm, (7, 6), Rotation::R0);
+    put(&mut design, PartKind::Bunk, (14, 8), Rotation::R0);
+    put(&mut design, PartKind::Shower, (16, 6), Rotation::R0);
+    put(&mut design, PartKind::Shelf, (16, 12), Rotation::R0);
+    put(&mut design, PartKind::HydroBay, (10, 10), Rotation::R0);
+    put(&mut design, PartKind::FuelTank, (2, 12), Rotation::R0);
+    put(&mut design, PartKind::Engine, (7, 14), Rotation::R0);
+
+    for (resource, units) in PLAYTEST_CARGO {
+        if let Ok(next) = apply(&design, &budget, Edit::Buy { resource, units }) {
+            design = next;
+        }
+    }
+
+    design
+}
+
+/// [`playtest_ship`] laid out in the middle of a bigger build area — what
+/// the design phase opens with, so nobody starts from an empty grid.
+///
+/// The same parts at the same places, shifted by half the difference, and
+/// the same cargo, all put down through [`apply`] again so the result is a
+/// ship the rules admit on *that* grid rather than a copy with its numbers
+/// changed. `None` for an area the ship does not fit, which is an empty
+/// grid for the player rather than half a ship.
+///
+/// Its hash is not pinned: it is [`PLAYTEST_HASH`]'s ship moved, and the
+/// part count says whether every part came across.
+pub fn playtest_ship_on(area: u32) -> Option<ShipDesign> {
+    if area < AREA {
+        return None;
+    }
+    let shift = (area - AREA) / 2;
+    let budget = Budget::new(REFERENCE_POOL);
+    let source = playtest_ship();
+    let mut design = ShipDesign::new(area);
+    // In id order, which is placement order: the frame went down before the
+    // deck and the deck before what stands on it, and ids only ever climb.
+    for part in &source.parts {
+        if let Ok(next) = apply(
+            &design,
+            &budget,
+            Edit::Place {
+                kind: part.kind,
+                origin: (part.origin.0 + shift, part.origin.1 + shift),
+                rotation: part.rotation,
+            },
+        ) {
+            design = next;
+        }
+    }
+    for (resource, units) in PLAYTEST_CARGO {
+        if let Ok(next) = apply(&design, &budget, Edit::Buy { resource, units }) {
+            design = next;
+        }
+    }
+    Some(design)
+}

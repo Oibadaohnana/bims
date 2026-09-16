@@ -134,6 +134,37 @@ impl Editor {
         }
     }
 
+    /// An editor whose design phase is already over: `design` laid out,
+    /// accepted by everybody, and settled. What the simulation opens with —
+    /// there is no design phase to skip if there was never one, and every
+    /// export that reads the editor still has one to read.
+    pub fn settled(
+        design: ShipDesign,
+        players: u32,
+        local: u32,
+        width: f32,
+        height: f32,
+    ) -> Editor {
+        let mut editor = Editor::new(design.build_area, 0, players, local, width, height);
+        editor.design = design;
+        editor.refresh();
+        for slot in &mut editor.accepts {
+            *slot = Some(editor.hash);
+        }
+        editor.phase = Phase::Game;
+        editor
+    }
+
+    /// Start the design phase on `design` rather than on an empty grid, as
+    /// a gift: the crew's pool is what they brought, and what is already
+    /// there cost them nothing — see [`Budget::with_gift`]. Everything is
+    /// still theirs to change.
+    pub fn give(&mut self, design: ShipDesign) {
+        self.budget = Budget::with_gift(self.budget.pool, &design);
+        self.design = design;
+        self.refresh();
+    }
+
     pub fn hash(&self) -> u64 {
         self.hash
     }
@@ -179,11 +210,7 @@ impl Editor {
         else {
             return EditError::BadCode.code();
         };
-        self.edit(Edit::Place {
-            kind,
-            origin: (x, y),
-            rotation,
-        })
+        self.edit(placing(kind, (x, y), rotation))
     }
 
     pub fn remove(&mut self, part_id: u32) -> u32 {
@@ -304,11 +331,7 @@ impl Editor {
         apply(
             &self.design,
             &self.budget,
-            Edit::Place {
-                kind: self.tool,
-                origin: (x as u32, y as u32),
-                rotation: self.ghost,
-            },
+            placing(self.tool, (x as u32, y as u32), self.ghost),
         )
         .is_ok()
     }
@@ -371,35 +394,40 @@ impl Editor {
             .collect()
     }
 
-    /// The parts a removing drag would take off, **from the top of the stack
-    /// down**: what is standing in the tile and what runs through it, then
-    /// the deck under those, then the frame under that.
+    /// The parts a removing drag would take off: **the top of each tile's
+    /// stack, and only that**. What is standing in a tile comes off before
+    /// what runs through it, that before the deck, and the deck before the
+    /// frame — one layer a click, so a right-click on a hob takes the hob
+    /// and leaves the deck, and a second one takes the deck. A rectangle
+    /// peels every tile in it by one.
     ///
-    /// That order is the whole reason this is worked out here rather than in
-    /// the host: any other way round, every tile with something on it is
-    /// refused as `SupportInUse`, and a right-drag over the galley would
-    /// leave the deck and the frame behind and look like it had half worked.
+    /// The order across tiles is the reason this is worked out here rather
+    /// than in the host: objects first, then deck, then frame, or a tile's
+    /// deck would be refused as `SupportInUse` because the neighbouring
+    /// tile's object, in the same drag, had not come off yet.
     pub fn drag_parts(&self) -> Vec<u32> {
-        let tiles = self.drag_tiles();
-        let grid = self.design.grid();
-        let mut out: Vec<u32> = Vec::new();
-        for layer in [
-            Layer::Utility,
+        const TOP_DOWN: [Layer; 4] = [
             Layer::Object,
+            Layer::Utility,
             Layer::Floor,
             Layer::Structure,
-        ] {
-            let mut ids: Vec<u32> = Vec::new();
-            for &(x, y) in &tiles {
+        ];
+        let tiles = self.drag_tiles();
+        let grid = self.design.grid();
+        let mut picked: Vec<(usize, u32)> = Vec::new();
+        for &(x, y) in &tiles {
+            for (rank, &layer) in TOP_DOWN.iter().enumerate() {
                 let id = grid.get(layer, (x as i32, y as i32));
-                if id != 0 && !ids.contains(&id) {
-                    ids.push(id);
+                if id != 0 {
+                    if !picked.iter().any(|&(_, p)| p == id) {
+                        picked.push((rank, id));
+                    }
+                    break;
                 }
             }
-            ids.sort_unstable();
-            out.extend(ids);
         }
-        out
+        picked.sort_unstable();
+        picked.into_iter().map(|(_, id)| id).collect()
     }
 
     /// Where the ghost's footprint would land, as a tile rectangle. Used by
@@ -443,4 +471,18 @@ fn straight_line(a: (i32, i32), b: (i32, i32)) -> Vec<(i32, i32)> {
         }
     }
     out
+}
+
+/// The edit a tool makes. Deck plating is the one tool that is not a plain
+/// placement: it lays its own frame — see [`Edit::Plate`] — because the
+/// frame and the deck are one thing to a player, and were two clicks.
+fn placing(kind: PartKind, origin: (u32, u32), rotation: Rotation) -> Edit {
+    match kind {
+        PartKind::Floor => Edit::Plate { origin },
+        kind => Edit::Place {
+            kind,
+            origin,
+            rotation,
+        },
+    }
 }

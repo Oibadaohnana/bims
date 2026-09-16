@@ -236,6 +236,15 @@ pub enum Edit {
         origin: (u32, u32),
         rotation: Rotation,
     },
+    /// Deck plating with its own frame: [`PartKind::Structure`] on the tile
+    /// if there is none yet, and [`PartKind::Floor`] on that. What the
+    /// designer's plating tool sends, so that a player lays a deck in one
+    /// pass rather than a frame and then a deck — the two are one thing to
+    /// anybody who is not the connectivity check. Both prices are paid when
+    /// both go down; a tile that already has frame pays for the deck alone.
+    Plate {
+        origin: (u32, u32),
+    },
     Remove {
         part_id: u32,
     },
@@ -338,6 +347,7 @@ pub fn apply(design: &ShipDesign, budget: &Budget, edit: Edit) -> Result<ShipDes
             origin,
             rotation,
         } => place(design, budget, kind, origin, rotation),
+        Edit::Plate { origin } => plate(design, budget, origin),
         Edit::Remove { part_id } => remove(design, part_id),
         Edit::Buy { resource, units } => buy(design, budget, resource, units),
         Edit::Sell { resource, units } => sell(design, resource, units),
@@ -418,6 +428,22 @@ fn place(
     });
     next.next_id += 1;
     Ok(next)
+}
+
+/// Frame first if the tile has none, then deck — two placements, one edit,
+/// and a refusal of either leaves neither behind.
+fn plate(
+    design: &ShipDesign,
+    budget: &Budget,
+    origin: (u32, u32),
+) -> Result<ShipDesign, EditError> {
+    let tile = (origin.0 as i32, origin.1 as i32);
+    let framed = if design.grid().get(Layer::Structure, tile) == 0 {
+        place(design, budget, PartKind::Structure, origin, Rotation::R0)?
+    } else {
+        design.clone()
+    };
+    place(&framed, budget, PartKind::Floor, origin, Rotation::R0)
 }
 
 fn remove(design: &ShipDesign, part_id: u32) -> Result<ShipDesign, EditError> {

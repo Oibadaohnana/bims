@@ -4,7 +4,7 @@
 //! One crate, compiled for **both** sides. The client builds it to wasm to
 //! draw the star map and preview a system; the native server that will one
 //! day be authoritative builds it for x86 and generates exactly the same
-//! world from the same seed. Offline play and `./run builder` use the same
+//! world from the same seed. Offline play and `./run game` use the same
 //! code again, locally. That is the whole reason it is not simply part of the
 //! game: two implementations of a generator are two galaxies.
 //!
@@ -39,7 +39,9 @@
 //! [`data`] — it is short, and it is longer than it looks, because the travel
 //! formula and the day length are on it.
 
+pub mod checksum;
 pub mod data;
+pub mod fixture;
 pub mod galaxy;
 pub mod layout;
 pub mod math;
@@ -47,6 +49,10 @@ pub mod name;
 pub mod rng;
 pub mod system;
 
+#[cfg(test)]
+mod tests;
+
+pub use checksum::galaxy_checksum;
 pub use data::{BodyKind, HazardKind, StationKind, TravelBand};
 pub use galaxy::{Galaxy, GalaxyType, Star, StarClass};
 pub use layout::Fault;

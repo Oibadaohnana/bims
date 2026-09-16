@@ -223,6 +223,16 @@
         color: var(--muted);
       }
 
+      /* Why Start cannot be pressed. Empty once it can. */
+      .screen-foot .why {
+        color: #ffd7a6;
+        font-size: 13px;
+      }
+
+      .screen-foot .why:empty {
+        display: none;
+      }
+
       .body {
         flex: 1;
         min-height: 0;
@@ -447,6 +457,184 @@
         font-weight: 600;
       }
 
+      /* --- the World tab --------------------------------------------- */
+
+      /* One panel, moved between the two tools rather than built twice:
+         there is one galaxy in wasm and one camera over it. */
+      .world {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      .world-head {
+        display: flex;
+        align-items: baseline;
+        gap: 9px;
+      }
+
+      .world-head .name {
+        font-weight: 600;
+      }
+
+      .world-head .spawn {
+        color: var(--accent);
+        font-weight: 600;
+      }
+
+      .world-head .spawn.none {
+        color: var(--muted);
+        font-weight: 400;
+      }
+
+      .seed-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 7px;
+      }
+
+      /* A u64 is twenty digits; the field holds them all without scrolling
+         and, unlike the room-code field, keeps its case and its spacing. */
+      #seed {
+        width: 240px;
+        letter-spacing: 0.04em;
+        text-transform: none;
+        font-variant-numeric: tabular-nums;
+      }
+
+      #seed:disabled {
+        opacity: 0.5;
+      }
+
+      #world-said.warn,
+      .world-note.warn {
+        color: #ffd7a6;
+      }
+
+      .world-note {
+        min-height: 21px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      /* The preview on the left, the system on the right. */
+      .world-map {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 290px;
+        gap: 14px;
+        align-items: start;
+      }
+
+       (max-width: 760px) {
+        .world-map {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .preview-box {
+        display: flex;
+        flex-direction: column;
+        gap: 7px;
+        min-width: 0;
+      }
+
+      #galaxy {
+        display: block;
+        width: 100%;
+        height: 380px;
+        border: 1px solid var(--edge);
+        border-radius: 8px;
+        background: #080d0c;
+        cursor: crosshair;
+        touch-action: none;
+      }
+
+      .preview-foot {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        min-height: 24px;
+      }
+
+      #hover-said {
+        flex: 1;
+        color: var(--muted);
+        font-size: 13px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .system {
+        display: flex;
+        flex-direction: column;
+        gap: 9px;
+      }
+
+      #system-canvas {
+        display: block;
+        width: 100%;
+        height: 230px;
+        border-radius: 6px;
+        background: #080d0c;
+      }
+
+      #bodies,
+      #stations {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      #bodies li {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        font-size: 13px;
+      }
+
+      #bodies .kind {
+        color: var(--muted);
+      }
+
+      #stations li {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 2px 8px;
+        align-items: center;
+        padding: 7px 9px;
+        border: 1px solid var(--edge);
+        border-radius: 8px;
+      }
+
+      #stations li.on {
+        border-color: var(--accent);
+      }
+
+      #stations li.none {
+        display: block;
+        color: var(--muted);
+        border-style: dashed;
+        font-size: 13px;
+      }
+
+      #stations .who {
+        font-weight: 600;
+      }
+
+      #stations .where {
+        grid-column: 1;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      #stations button {
+        grid-column: 2;
+        grid-row: 1 / span 2;
+      }
+
       /* --- the placeholder the builder will grow into ----------------- */
 
       #build-screen .chosen {
@@ -512,6 +700,7 @@
         </div>
         <div class="body"><div id="setup-tool"></div></div>
         <div class="screen-foot">
+          <span class="why" data-start-why></span>
           <button type="button" class="big primary" data-start="solo">
             Start
           </button>
@@ -544,6 +733,7 @@
         </div>
         <div class="screen-foot">
           <span class="said muted" id="lobby-said"></span>
+          <span class="why" data-start-why></span>
           <button type="button" class="big primary" data-start="lobby">
             Start
           </button>

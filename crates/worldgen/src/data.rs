@@ -158,10 +158,17 @@ pub fn target_hop_days(desolation: f64) -> f64 {
 
 // --- stations -----------------------------------------------------------
 
-/// What fraction of systems have a station at all. Most of the galaxy is
-/// empty; this is the number that makes finding one mean something, and it is
-/// a target rather than a quota — each system rolls against it on its own.
-pub const STATION_SHARE: f64 = 0.25;
+/// What fraction of systems have a station at all. A target rather than a
+/// quota — each system rolls against it on its own. It was a quarter, and
+/// the galaxy read as empty: a map where most stars are somewhere you cannot
+/// start and a system with one dock is a system with nowhere to go.
+pub const STATION_SHARE: f64 = 0.6;
+
+/// Once a system has a station, the chance of a second, and then of a
+/// third. Each only where there is a body of the right kind free for it —
+/// [`parent_suits`] and "at most one station per parent body" still hold —
+/// so a one-planet system stays a one-station system whatever these say.
+pub const MORE_STATIONS: [f64; 2] = [0.55, 0.3];
 
 /// Relays want somewhere nobody goes. A system at or above this is a
 /// candidate; below it, a relay is not sited there.

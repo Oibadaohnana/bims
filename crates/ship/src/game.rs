@@ -78,9 +78,18 @@ pub struct Game {
     /// shared: two players hovering over different planets is not an argument
     /// about where the ship is going.
     pub preview: Option<Result<Preview, PlanError>>,
+    /// What the preview is *of*, so the map can ring it. Set and cleared
+    /// with the preview and read by nothing that decides anything.
+    pub aimed: Option<Target>,
     /// The design tile under the pointer, in the ship view. Signed: a pointer
     /// off the hull is off it rather than on the nearest edge.
     pub hover: Option<(i32, i32)>,
+    /// Head up rather than north up: the ship is drawn the way it was laid
+    /// out and the sky, the station alongside and the map turn round it
+    /// instead. A view setting and nothing else — the heading is what it is,
+    /// and nothing that decides anything reads this. Off by default, because
+    /// a fixed sky is what makes a flip legible; see `camera.rs`.
+    pub head_up: bool,
     pub stars: Starfield,
 }
 
@@ -98,10 +107,12 @@ impl Game {
         local: u32,
         seed: u64,
         galaxy_type: GalaxyType,
+        star: u32,
+        station: u32,
         width: f32,
         height: f32,
     ) -> Option<Game> {
-        let world = World::start(design, money, players, seed, galaxy_type).ok()?;
+        let world = World::start(design, money, players, seed, galaxy_type, star, station).ok()?;
         let mut game = Game {
             world,
             mode: ViewMode::Ship,
@@ -111,7 +122,9 @@ impl Game {
             events: Vec::new(),
             queued: Vec::new(),
             preview: None,
+            aimed: None,
             hover: None,
+            head_up: false,
             stars: Starfield::new(seed),
         };
         game.fit_ship();
@@ -137,6 +150,30 @@ impl Game {
             ViewMode::Ship => &mut self.ship_view,
             ViewMode::Map => &mut self.map_view,
         }
+    }
+
+    /// How far the camera is turned, in the screen's sense — the angle
+    /// everything that is *out there* is drawn through, and the one the ship's
+    /// own heading is drawn on top of.
+    ///
+    /// Nothing, north up: the camera never turns and the ship does. Head up,
+    /// it is the heading undone, so the ship comes out at `heading +
+    /// camera_turn() == 0` — square to the window — and the world turns the
+    /// other way by exactly as much. Everything that draws or reads back the
+    /// ship goes through [`Game::ship_turn`], everything that draws or reads
+    /// back the world goes through this alone, and there is no third thing.
+    pub fn camera_turn(&self) -> f64 {
+        if self.head_up {
+            -self.world.ship.heading
+        } else {
+            0.0
+        }
+    }
+
+    /// The angle the ship is drawn through: its heading, less however far the
+    /// camera has turned to keep it upright.
+    pub fn ship_turn(&self) -> f64 {
+        self.world.ship.heading + self.camera_turn()
     }
 
     pub fn set_mode(&mut self, mode: ViewMode) {
@@ -223,9 +260,10 @@ impl Game {
         let (vx, vy) = self.ship_view.to_view(x, y);
         // Screen is y-down and the system is y-up, so the screen offset is
         // turned back into system space before it is turned back into the
-        // grid.
+        // grid. Through the angle the ship was *drawn* at, which is the
+        // heading less the camera's turn — head up, that is nothing at all.
         let system = dvec2(vx as f64, -(vy as f64));
-        let design = angle::unrotate_design(system, self.world.ship.heading)
+        let design = angle::unrotate_design(system, self.ship_turn())
             .add(self.world.ship.dynamics.centre_of_mass);
         (
             (design.x / TILE as f64).floor() as i32,
@@ -237,6 +275,9 @@ impl Game {
     /// map means.
     pub fn point_at(&self, x: f32, y: f32) -> DVec2 {
         let (vx, vy) = self.map_view.to_view(x, y);
+        // Back through the camera's turn before the y-flip, since the turn
+        // was made on screen, after it.
+        let (vx, vy) = turned(vx, vy, -self.camera_turn() as f32);
         self.world
             .ship
             .position()
@@ -258,8 +299,10 @@ impl Game {
                 continue;
             };
             let offset = at.sub(here);
-            let sx = self.map_view.offset_x() + offset.x as f32 * self.map_view.scale();
-            let sy = self.map_view.offset_y() - offset.y as f32 * self.map_view.scale();
+            // Where the map put it: y flipped, then turned with the camera.
+            let (ox, oy) = turned(offset.x as f32, -offset.y as f32, self.camera_turn() as f32);
+            let sx = self.map_view.offset_x() + ox * self.map_view.scale();
+            let sy = self.map_view.offset_y() + oy * self.map_view.scale();
             let away = ((sx - x).powi(2) + (sy - y).powi(2)).sqrt();
             if away <= slop && best.is_none_or(|(near, _)| away < near) {
                 best = Some((away, node));
@@ -277,10 +320,12 @@ impl Game {
     /// right when it was worked out and is wrong now is worse than no number.
     pub fn preview(&mut self, target: Target) {
         self.preview = Some(self.world.preview(target));
+        self.aimed = Some(target);
     }
 
     pub fn clear_preview(&mut self) {
         self.preview = None;
+        self.aimed = None;
     }
 
     /// The speed this player has asked for.
@@ -291,4 +336,12 @@ impl Game {
             .copied()
             .unwrap_or(Speed::Paused)
     }
+}
+
+/// A screen offset turned about the origin by `angle`, in the screen's own
+/// sense — the same matrix `world_paint` turns a tile with and the canvas's
+/// `rotate()` applies, so a positive angle is clockwise on a y-down screen.
+pub fn turned(x: f32, y: f32, angle: f32) -> (f32, f32) {
+    let (s, c) = (angle.sin(), angle.cos());
+    (x * c - y * s, x * s + y * c)
 }

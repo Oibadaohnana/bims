@@ -12,6 +12,7 @@ edition = "2024"
 description = "The one world clock: a system, a ship, and what happens on it"
 
 [dependencies]
+bims = { path = "../game" }
 economy = { path = "../economy" }
 flight = { path = "../flight" }
 physics = { path = "../physics" }

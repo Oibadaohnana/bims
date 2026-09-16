@@ -1,11 +1,19 @@
 // The ship design phase: a palette, a tile grid, and everything that decides
 // whether the ship is finished.
 //
-// This is the page `nix run .#ship` serves. It is a third front end, not a
-// mode of either of the other two: `web/bims.js` is the room and knows
-// nothing about tiles, `web/builder.js` is the menus in front of it and has
-// no wasm at all. This one has its own — `ship.wasm`, out of `crates/ship` —
-// and no `Game` anywhere in it.
+// This is the page the lobby's Start goes to, and the one `nix run
+// .#simulation` opens with `?mode=1` — the world at once, on the playtest
+// ship, with no design phase. It is a third front end, not a mode of either
+// of the other two: `web/bims.js` is the room and knows nothing about tiles,
+// `web/builder.js` is the menus in front of it and loads `lobby.wasm`, a
+// galaxy and nothing more. This one has its own — `ship.wasm`, out of
+// `crates/ship` — and no `Game` anywhere in it.
+//
+// It has **no spawn of its own**. The lobby writes a star and a station into
+// the query and the world opens docked there; a page without them, or with
+// ones the galaxy has not got, shows "Nowhere to start" and the way back. It
+// never picks a different dock. The simulation is the one exception and asks
+// wasm for its own.
 //
 // Two rules the page is built around and that are cheap to break:
 //
@@ -64,9 +72,9 @@ const PART_NAMES = [
  * "Anything else", where it is obvious — instead of quietly not existing.
  * Same arrangement as the room's work panel, and for the same reason. */
 const PART_GROUPS = [
-  // Hull first, in the order a ship is actually built: frame, deck, skin,
-  // then the ways through it.
-  { name: "Hull", kinds: [15, 0, 1, 16, 2, 23] },
+  // Hull first, in the order a ship is actually built: deck, skin, then the
+  // ways through it. The frame is not a tool of its own — see NOT_A_TOOL.
+  { name: "Hull", kinds: [0, 1, 16, 2, 23] },
   { name: "Systems", kinds: [3, 27, 17, 18, 19, 20, 21, 22, 24] },
   { name: "Crew", kinds: [4, 9, 10, 26] },
   { name: "Galley", kinds: [5, 6, 7, 8] },
@@ -74,6 +82,30 @@ const PART_GROUPS = [
   { name: "Storage", kinds: [25] },
   { name: "Bay", kinds: [13, 14] },
 ];
+
+/** Kinds the palette does not offer, though the ship knows them. Structure
+ * is the one: deck plating lays its own frame (`Edit::Plate` in
+ * `shipdesign`), so to a player the frame and the deck are one thing and
+ * a second button for the half underneath would be a trap — a tile of bare
+ * frame looks like a hole and holds nothing up but hull. It is still a part,
+ * still drawn, still peeled off by a right-click after the deck. */
+const NOT_A_TOOL = new Set([15]);
+
+/** Who the crew are, by lobby slot. The simulation has crew member 0 and
+ * crew member 1; the names exist here and in `CREW_NAMES` in web/bims.js —
+ * the room's copy — and nowhere in wasm. The first two are the room's, so
+ * the pair a player met on the deck are the pair aboard the ship. Painted
+ * over each head by `paintCrewNames`, after the shapes: the draw buffer
+ * holds rectangles and ellipses and nothing else. */
+const CREW_NAMES = ["James", "Kate", "Priya", "Tomas"];
+
+/** How the names sit: the size, how far above the head, and yours against
+ * everybody else's. The lift is a body's height in design units, so it is
+ * scaled with the view. */
+const NAME_SIZE = 12;
+const NAME_LIFT = 46;
+const NAME_YOURS = "#7fd1a8";
+const NAME_THEIRS = "#e7efe9";
 
 /** What a station sells, indexed by `physics::ResourceId`. The first four are
  * materials and the last two are food; what makes one food rather than metal
@@ -273,6 +305,17 @@ const U32_MAX = 4294967295;
 /** `worldgen::GalaxyType` has four shapes in it. */
 const GALAXY_MAX = 3;
 
+/** What `?mode=` means: the game proper, with a design phase in front of
+ * it, or the simulation, which opens the world at once on the playtest ship.
+ * A number, because it goes where every other setting goes. */
+const MODE_GAME = 0;
+const MODE_SIMULATION = 1;
+
+/** What `?preset=` means: an empty grid, or the playtest ship laid out on it
+ * as a gift. `PRESET_*` in `crates/ship`. */
+const PRESET_EMPTY = 0;
+const PRESET_PLAYTEST = 1;
+
 /** A number of euros, as words. The **only** place either the sign or the
  * grouping exists — the same rule, and the same function, as web/builder.js:
  * what crosses the boundary is a bare count of euros. */
@@ -368,13 +411,25 @@ async function boot() {
       money: whole(number("money", DEFAULTS.money), 0, MONEY_MAX),
       players,
       slot: whole(number("slot", DEFAULTS.slot), 0, players - 1),
-      // Which world the game will open in. **Temporary**: the lobby's World
-      // tab will pick these, and then they come from there instead of off a
-      // query string. `null` rather than a number when nobody said, so the
-      // fallback can be the one in wasm rather than a second copy here.
+      // Which world the game will open in, as the lobby's World tab wrote
+      // it. `null` rather than a number when nobody said, so the fallback
+      // can be the one in wasm rather than a second copy here.
       seedHi: asked.has("seedHi") ? whole(number("seedHi", 0), 0, U32_MAX) : null,
       seedLo: asked.has("seedLo") ? whole(number("seedLo", 0), 0, U32_MAX) : null,
       galaxy: whole(number("galaxy", DEFAULT_GALAXY), 0, GALAXY_MAX),
+      // And where in it. `null` when the lobby did not say, and there is
+      // deliberately no default: a game with no spawn is the error screen,
+      // never a game somewhere else. The simulation is the one exception,
+      // and it asks wasm for its own.
+      star: asked.has("star") ? whole(number("star", 0), 0, U32_MAX) : null,
+      station: asked.has("station") ? whole(number("station", 0), 0, U32_MAX) : null,
+      // `mode=1` is the simulation: no design phase, the playtest ship, the
+      // world at once. A number, like every other setting.
+      mode: whole(number("mode", MODE_GAME), MODE_GAME, MODE_SIMULATION),
+      // What the grid opens with. The playtest ship unless the query says
+      // an empty one — a ship is a better place to start from than nothing,
+      // and it costs the crew nothing; the numbers are `PRESET_*` in wasm.
+      preset: whole(number("preset", PRESET_PLAYTEST), PRESET_EMPTY, PRESET_PLAYTEST),
     };
   }
 
@@ -420,22 +475,47 @@ async function boot() {
   }
 
   resize();
-  wasm.ship_init(
-    chosen.area,
-    // The same two halves, the other way about. wasm adds the solo bonus and
-    // multiplies by the crew: what goes in is what one Bim brings.
-    Math.floor(chosen.money / 2 ** 32),
-    chosen.money >>> 0,
-    chosen.players,
-    chosen.slot,
-    // The world. Falling back to the wasm's own default rather than to a
-    // number written down here, so there is one copy of it.
-    chosen.seedHi ?? wasm.ship_default_seed_hi(),
-    chosen.seedLo ?? wasm.ship_default_seed_lo(),
-    chosen.galaxy,
-    canvasSize.w,
-    canvasSize.h,
-  );
+
+  /** "The lobby did not say", as wasm spells it: `u32::MAX`, which arrives
+   * back from an export as `-1`. Read off wasm rather than written down. */
+  const NONE = wasm.ship_none();
+
+  // The world. Falling back to the wasm's own default seed rather than to a
+  // number written down here, so there is one copy of it; the spawn has no
+  // fallback at all, and crosses as NONE when it was not given.
+  const seedHi = chosen.seedHi ?? wasm.ship_default_seed_hi();
+  const seedLo = chosen.seedLo ?? wasm.ship_default_seed_lo();
+  const star = chosen.star ?? NONE;
+  const station = chosen.station ?? NONE;
+
+  if (chosen.mode === MODE_SIMULATION) {
+    // Straight into the world on the playtest ship. wasm fills in what the
+    // query left out — its own seed, and the lowest star with a station.
+    wasm.ship_simulate(seedHi, seedLo, chosen.galaxy, star, station, canvasSize.w, canvasSize.h);
+  } else {
+    wasm.ship_init(
+      chosen.area,
+      // The same two halves, the other way about. wasm adds the solo bonus
+      // and multiplies by the crew: what goes in is what one Bim brings.
+      Math.floor(chosen.money / 2 ** 32),
+      chosen.money >>> 0,
+      chosen.players,
+      chosen.slot,
+      seedHi,
+      seedLo,
+      chosen.galaxy,
+      star,
+      station,
+      chosen.preset,
+      canvasSize.w,
+      canvasSize.h,
+    );
+  }
+
+  /** Whether the page has anywhere to start. Asked once, here, before a
+   * design phase is shown: a spawn the lobby did not name, or named wrongly,
+   * is the error screen and a way back — never a different dock. */
+  const lost = chosen.mode !== MODE_SIMULATION && wasm.ship_spawn_ok() === 0;
 
   window.addEventListener("resize", () => {
     resize();
@@ -634,7 +714,7 @@ async function boot() {
     const groups = [];
     const placed = new Set();
     for (const group of PART_GROUPS) {
-      const kinds = group.kinds.filter((kind) => kind < partCount);
+      const kinds = group.kinds.filter((kind) => kind < partCount && !NOT_A_TOOL.has(kind));
       if (kinds.length === 0) continue;
       groups.push(partGroup(group.name, kinds));
       for (const kind of kinds) placed.add(kind);
@@ -643,7 +723,7 @@ async function boot() {
     // healthy build; a heading nobody meant to see is the point.
     const rest = [];
     for (let kind = 0; kind < partCount; kind++) {
-      if (!placed.has(kind)) rest.push(kind);
+      if (!placed.has(kind) && !NOT_A_TOOL.has(kind)) rest.push(kind);
     }
     if (rest.length > 0) groups.push(partGroup("Anything else", rest));
     byId("palette").replaceChildren(...groups);
@@ -1014,8 +1094,27 @@ async function boot() {
     resize();
     wasm.ship_resize(canvasSize.w, canvasSize.h);
     buildSpeeds();
+    buildOrientation();
     buildGameTrade();
     paintGame();
+  }
+
+  /** The two buttons that say which way up the view is. Wired once; which
+   * one is on is read off wasm every frame by `paintOrientation`, since the
+   * N key changes it too and a button marked off its own click would lie. */
+  function buildOrientation() {
+    for (const button of byId("view-buttons").querySelectorAll("button")) {
+      button.addEventListener("click", () => {
+        wasm.ship_set_head_up(Number(button.dataset.headUp));
+      });
+    }
+  }
+
+  function paintOrientation() {
+    const on = wasm.ship_head_up();
+    for (const button of byId("view-buttons").querySelectorAll("button")) {
+      button.className = Number(button.dataset.headUp) === on ? "on" : "";
+    }
   }
 
   const speedButtons = [];
@@ -1103,6 +1202,7 @@ async function boot() {
     paintClock();
     paintHelm();
     paintSpeeds();
+    paintOrientation();
     paintGameTrade();
     paintShipFacts();
     paintGameReadout();
@@ -1597,6 +1697,10 @@ async function boot() {
       wasm.ship_set_view_mode(wasm.ship_view_mode() === VIEW_MAP ? VIEW_SHIP : VIEW_MAP);
       return;
     }
+    if (key === "n" && playing()) {
+      wasm.ship_set_head_up(wasm.ship_head_up() ? 0 : 1);
+      return;
+    }
     if (key === "r") {
       wasm.ship_rotate_ghost();
       paintPalette();
@@ -1736,6 +1840,32 @@ async function boot() {
     }
   }
 
+  /** The crew's names, over their heads. Text is the host's, so it goes on
+   * after the shapes, where wasm says each Bim landed — the same camera the
+   * shapes went through, so a name stays over its head as the ship turns. */
+  function paintCrewNames() {
+    const ctx = stageCtx;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.font = `600 ${NAME_SIZE}px ui-sans-serif, system-ui, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "alphabetic";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = 3;
+    const s = wasm.ship_view_scale();
+    const yours = wasm.ship_local_slot();
+    for (let who = 0; who < wasm.ship_crew_count(); who++) {
+      const x = wasm.ship_view_x() + wasm.ship_crew_x(who) * s;
+      const y = wasm.ship_view_y() + wasm.ship_crew_y(who) * s - NAME_LIFT * s;
+      const name = CREW_NAMES[who] ?? `Crew ${who + 1}`;
+      // Stroked first in the void's own darkness, so a name stays legible
+      // over a pale part as readily as over the deck.
+      ctx.strokeStyle = "rgba(6, 10, 9, 0.85)";
+      ctx.strokeText(name, x, y);
+      ctx.fillStyle = who === yours ? NAME_YOURS : NAME_THEIRS;
+      ctx.fillText(name, x, y);
+    }
+  }
+
   // --- putting it together ------------------------------------------------
 
   /** Everything that depends on the ship rather than on the pointer. Called
@@ -1763,8 +1893,21 @@ async function boot() {
   buildPalette();
   buildMoney();
   buildTrade();
-  show("design");
-  afterChange();
+  if (lost) {
+    // Nowhere to start. The panels above are built so that nothing below
+    // finds a hole where one should be, and then the page says what is
+    // wrong and offers the way back — and never a design phase, because a
+    // ship laid out for an hour with no dock to put it at is worse than no
+    // ship.
+    show("lost");
+    byId("lost-said").textContent =
+      chosen.star === null || chosen.station === null
+        ? "The lobby did not say which station to start at."
+        : `There is no station ${chosen.station} at star ${chosen.star} in this galaxy.`;
+  } else {
+    show("design");
+    afterChange();
+  }
 
   let last = performance.now();
   /** Steps owed to the world, carried between frames.
@@ -1789,7 +1932,10 @@ async function boot() {
 
     wasm.ship_render();
     paint();
-    if (playing()) paintGame();
+    if (playing()) {
+      paintGame();
+      if (wasm.ship_view_mode() === VIEW_SHIP) paintCrewNames();
+    }
     else paintReadout();
     requestAnimationFrame(frame);
   }

@@ -6,6 +6,8 @@ version = 4
 name = "bims"
 version = "0.1.0"
 dependencies = [
+ "physics",
+ "shipdesign",
  "time",
 ]
 
@@ -34,6 +36,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lobby"
+version = "0.1.0"
+dependencies = [
+ "worldgen",
+]
+
+[[package]]
 name = "physics"
 version = "0.1.0"
 dependencies = [
@@ -44,6 +53,7 @@ dependencies = [
 name = "ship"
 version = "0.1.0"
 dependencies = [
+ "bims",
  "economy",
  "flight",
  "physics",
@@ -69,6 +79,7 @@ version = "0.1.0"
 name = "world"
 version = "0.1.0"
 dependencies = [
+ "bims",
  "economy",
  "flight",
  "physics",

@@ -6,27 +6,31 @@
 //! things crossing the boundary are a few numbers and one pointer, so there
 //! is no binding generator anywhere in the build.
 
-mod bath;
-mod bim;
-mod character;
-mod clock;
-mod dish;
-mod draw;
-mod filth;
-mod game;
-mod health;
-mod hydro;
-mod manager;
-mod math;
-mod memory;
-mod nav;
-mod needs;
-mod rng;
-mod room;
-mod schedule;
-mod social;
-mod task;
-mod work;
+// Public, because the ship game runs this room aboard the designed ship —
+// `world` reaches `aboard`, `game`, `room` and `math`. Nothing else outside
+// the crate has any business in here.
+pub mod aboard;
+pub mod bath;
+pub mod bim;
+pub mod character;
+pub mod clock;
+pub mod dish;
+pub mod draw;
+pub mod filth;
+pub mod game;
+pub mod health;
+pub mod hydro;
+pub mod manager;
+pub mod math;
+pub mod memory;
+pub mod nav;
+pub mod needs;
+pub mod rng;
+pub mod room;
+pub mod schedule;
+pub mod social;
+pub mod task;
+pub mod work;
 
 /// The shared `time` crate, pulled into the crate root so every module reaches
 /// it as `crate::time`. That spelling is deliberate: the native probes in
@@ -421,7 +425,11 @@ pub extern "C" fn bims_is_alive(who: u32) -> u32 {
 /// third would be a change in one place.
 #[unsafe(no_mangle)]
 pub extern "C" fn bims_crew() -> u32 {
-    bim::CREW as u32
+    // Asked before `bims_init`, to size the host's tables: the classic room
+    // always has its two, and the game, once there is one, agrees.
+    unsafe { (*(&raw mut GAME)).as_ref() }
+        .map(|game| game.crew_count())
+        .unwrap_or(bim::CREW as u32)
 }
 
 /// Which of them the player steers. Everything on the input half of this

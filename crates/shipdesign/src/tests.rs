@@ -1927,3 +1927,150 @@ fn what_is_welded_in_and_what_is_in_the_hold_are_one_stock() {
         assert!((bound_mass(&design) - hull_mass(&design)).abs() < 1e-9);
     }
 }
+
+// --- the playtest ship ------------------------------------------------------
+
+/// The simulation's ship is one you can live on *and* fly, straight away:
+/// no errors, no warnings, and every part it is meant to have.
+#[test]
+fn the_playtest_ship_is_a_whole_ship_for_one() {
+    use crate::fixture::{PLAYTEST_CARGO, PLAYTEST_PARTS, playtest_ship};
+    let design = playtest_ship();
+    assert_eq!(
+        design.parts.len() as u32,
+        PLAYTEST_PARTS,
+        "the playtest ship lost or gained a part",
+    );
+    let issues = validate(&design, 1);
+    let codes: Vec<u32> = issues.iter().map(|i| i.code).collect();
+    assert!(
+        codes.is_empty(),
+        "the playtest ship still complains: {codes:?}"
+    );
+    assert!(exposure(&design).is_empty());
+
+    for (kind, want) in [
+        (PartKind::Thruster, 4),
+        (PartKind::Airlock, 1),
+        (PartKind::SensorArray, 1),
+        (PartKind::Engine, 1),
+        (PartKind::Helm, 1),
+        (PartKind::FuelTank, 1),
+        (PartKind::Shelf, 1),
+        (PartKind::ColdStore, 1),
+        (PartKind::Worktop, 1),
+        (PartKind::Hob, 1),
+        (PartKind::Dishwasher, 1),
+        (PartKind::Table, 1),
+        (PartKind::Chair, 1),
+        (PartKind::Bunk, 1),
+        (PartKind::Toilet, 1),
+        (PartKind::Basin, 1),
+        (PartKind::Shower, 1),
+        (PartKind::HydroBay, 1),
+        (PartKind::BroomLocker, 1),
+    ] {
+        assert_eq!(design.count(kind), want, "{kind:?}");
+    }
+    for (resource, units) in PLAYTEST_CARGO {
+        assert_eq!(design.carrying(resource), units, "{resource:?}");
+    }
+    // A full tank and not a unit less.
+    assert_eq!(
+        design.carrying(ResourceId::Fuel),
+        design.capacity(Storage::FuelTank)
+    );
+}
+
+/// The other half is `ship_self_check` in `crates/ship`, as for the
+/// reference: the simulation's ship has to hash the same on both targets.
+#[test]
+fn the_playtest_ship_hashes_to_the_number_it_is_pinned_to() {
+    use crate::fixture::{PLAYTEST_HASH, playtest_ship};
+    let design = playtest_ship();
+    assert_eq!(
+        design_hash(&design),
+        PLAYTEST_HASH,
+        "the playtest ship has moved: it now hashes to {:#018x} with {} parts",
+        design_hash(&design),
+        design.parts.len()
+    );
+    assert_ne!(PLAYTEST_HASH, REFERENCE_HASH[0]);
+}
+
+/// The ship the design phase opens with is the playtest ship, whole, on the
+/// lobby's grid: every part came across, it is as valid there as it was on
+/// its own, and it is given rather than bought.
+#[test]
+fn the_playtest_ship_moves_onto_a_bigger_grid_whole() {
+    use crate::fixture::{AREA, PLAYTEST_CARGO, PLAYTEST_PARTS, playtest_ship_on};
+    for area in [AREA, 30, 40, 60] {
+        let design = playtest_ship_on(area).expect("it fits");
+        assert_eq!(design.build_area, area);
+        assert_eq!(design.parts.len() as u32, PLAYTEST_PARTS, "on {area}");
+        let issues = validate(&design, 1);
+        assert!(issues.is_empty(), "on {area}: {issues:?}");
+        for (resource, units) in PLAYTEST_CARGO {
+            assert_eq!(design.carrying(resource), units);
+        }
+        // Given: the crew's pool is untouched by what was already there.
+        let pool = 120_000;
+        let budget = Budget::with_gift(pool, &design);
+        assert_eq!(budget.remaining(&design), pool);
+        // And a part taken off is money in hand, as any removal is.
+        let engine = design
+            .parts
+            .iter()
+            .find(|p| p.kind == PartKind::Engine)
+            .unwrap()
+            .id;
+        let fewer = apply(&design, &budget, Edit::Remove { part_id: engine }).unwrap();
+        assert_eq!(
+            budget.remaining(&fewer),
+            pool + PartKind::Engine.def().price
+        );
+    }
+    // Too small a grid is no ship, not half of one.
+    assert!(playtest_ship_on(AREA - 1).is_none());
+    assert!(playtest_ship_on(8).is_none());
+}
+
+/// Deck plating brings its own frame: one edit on a bare tile is structure
+/// and floor, priced as both; on a framed tile it is the floor alone; and a
+/// refusal of either half leaves nothing behind.
+#[test]
+fn plating_lays_its_own_frame() {
+    let budget = rich();
+    let design = ShipDesign::new(10);
+    let plated = apply(&design, &budget, Edit::Plate { origin: (3, 3) }).unwrap();
+    assert_eq!(plated.count(PartKind::Structure), 1);
+    assert_eq!(plated.count(PartKind::Floor), 1);
+    assert_eq!(
+        Budget::spent(&plated),
+        PartKind::Structure.def().price + PartKind::Floor.def().price
+    );
+
+    // On frame that is already there, only the deck goes down.
+    let framed = place(&design, &budget, PartKind::Structure, (4, 4), Rotation::R0).unwrap();
+    let both = apply(&framed, &budget, Edit::Plate { origin: (4, 4) }).unwrap();
+    assert_eq!(both.count(PartKind::Structure), 1);
+    assert_eq!(both.count(PartKind::Floor), 1);
+
+    // Deck already there: refused as the deck would be, and the frame count
+    // does not move.
+    assert_eq!(
+        apply(&plated, &budget, Edit::Plate { origin: (3, 3) }).err(),
+        Some(EditError::DuplicateFloor)
+    );
+    // Out of bounds, and nothing at all.
+    assert_eq!(
+        apply(&design, &budget, Edit::Plate { origin: (10, 3) }).err(),
+        Some(EditError::OutOfBounds)
+    );
+    // Too poor for the frame: nothing goes down, not even the frame.
+    let broke = Budget::new(PartKind::Structure.def().price);
+    assert_eq!(
+        apply(&design, &broke, Edit::Plate { origin: (3, 3) }).err(),
+        Some(EditError::Unaffordable)
+    );
+}

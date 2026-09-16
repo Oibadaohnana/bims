@@ -122,10 +122,15 @@ impl Bay {
     /// also standing against the table edge, and clear of the run between the
     /// table and the heads.
     pub fn new(interior: Rect) -> Bay {
-        let frame = Rect::from_min_size(
+        Bay::at(Rect::from_min_size(
             vec2(interior.min.x + 16.0, interior.max.y - 56.0),
             vec2(282.0, 56.0),
-        );
+        ))
+    }
+
+    /// A bay wherever a layout puts it. The trays divide its width; the Bim
+    /// stands along the top edge, so a bay is used from the north.
+    pub fn at(frame: Rect) -> Bay {
         let inner = frame.expand(-7.0);
         let width = inner.width() / SPOTS as f32;
         let trays = core::array::from_fn(|i| {

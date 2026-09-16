@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # Build the wasm modules and drop them next to the pages in web/.
 #
-# There are two cdylibs now: the room (`bims`) and the ship designer (`ship`).
-# `cargo build` at the workspace root builds every member, so one command does
-# both — but each one has to be *copied*, and a front end whose wasm was never
-# copied is a page that fetches a 404 and shows nothing.
+# There are three cdylibs now: the room (`bims`), the ship designer (`ship`)
+# and the lobby's World tab (`lobby`). `cargo build` at the workspace root
+# builds every member, so one command does all three — but each one has to be
+# *copied*, and a front end whose wasm was never copied is a page that
+# fetches a 404 and shows nothing.
 set -euo pipefail
 cd "$(dirname "$0")"
 
 build() {
   cargo build --release
-  for name in bims ship; do
+  for name in bims ship lobby; do
     cp "target/wasm32-unknown-unknown/release/$name.wasm" "web/$name.wasm"
     echo "built web/$name.wasm ($(wc -c < "web/$name.wasm") bytes)"
   done

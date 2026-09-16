@@ -339,10 +339,16 @@ fn place_stations(
             wanted.push(kind);
         }
     }
-    // A second one, now and then, and only where there is room for it. This
-    // is what gives "at most one station per parent body" something to bite
-    // on — with one station a system it could never be broken.
-    if !wanted.is_empty() && rng.chance(0.12) {
+    // A second and a third, where the rolls fall and only where there is
+    // room. This is what gives "at most one station per parent body"
+    // something to bite on — with one station a system it could never be
+    // broken. Each roll is drawn whether or not the last one took, so the
+    // stream stays in step between systems that stopped at one and at two.
+    for &chance in &data::MORE_STATIONS {
+        let more = rng.chance(chance);
+        if wanted.is_empty() || !more {
+            continue;
+        }
         if let Some(kind) = pick_kind(&mut rng, desolation, bodies, &wanted) {
             wanted.push(kind);
         }
@@ -710,13 +716,19 @@ mod tests {
     }
 
     #[test]
-    fn about_a_quarter_of_systems_have_a_station() {
+    fn about_three_fifths_of_systems_have_a_station() {
         let (_, systems) = every_system(3, GalaxyType::Spiral);
         let with = systems.iter().filter(|s| !s.stations.is_empty()).count();
         let share = with as f64 / systems.len() as f64;
         assert!(
-            (0.18..0.32).contains(&share),
+            (0.5..0.7).contains(&share),
             "{share} of systems had a station"
+        );
+        // And a good many of those have more than one: somewhere to go.
+        let several = systems.iter().filter(|s| s.stations.len() > 1).count();
+        assert!(
+            several as f64 / with as f64 > 0.25,
+            "{several} of {with} systems with a station had a second"
         );
     }
 

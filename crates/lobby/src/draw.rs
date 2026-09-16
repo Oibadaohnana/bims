@@ -1,14 +1,15 @@
-//! The bridge to the renderer, again.
+//! The bridge to the renderer, a third time.
 //!
-//! **This is a deliberate copy** of the room's `crates/game/src/draw.rs`, not
-//! a shared module. The *format* is shared — twelve floats a shape, in the
-//! order below — because one replay loop in JavaScript can then paint either
-//! page. The *code* is not, because the room is a crate the designer has no
-//! business importing: nothing here may reach into `room.rs`, `nav.rs` or
-//! `task.rs`, and an import of `draw` would be the first crack in that.
+//! **This is a deliberate copy** of the room's `crates/game/src/draw.rs` and
+//! the designer's `crates/ship/src/draw.rs`, not a shared module. The
+//! *format* is shared — twelve floats a shape, in the order below — because
+//! one replay loop in JavaScript can then paint any of the three pages. The
+//! *code* is not, because the room and the designer are crates the lobby has
+//! no business importing: this one knows about a galaxy and nothing else, and
+//! an import of either `draw` would be the first crack in that.
 //!
-//! If the format ever changes it changes in two files, and the host reads the
-//! stride at runtime from whichever wasm it loaded so the two can differ
+//! If the format ever changes it changes in three files, and each host reads
+//! the stride at runtime from whichever wasm it loaded so they can differ
 //! while that is happening.
 
 /// Floats per shape: kind, x, y, w, h, rot, radius, line, r, g, b, a.
@@ -60,25 +61,6 @@ impl DrawList {
 
     pub fn as_ptr(&self) -> *const f32 {
         self.data.as_ptr()
-    }
-
-    /// Turn every shape pushed since the buffer was `from` floats long about
-    /// the origin, by `angle` in the screen's sense: each centre goes through
-    /// the rotation and each `rot` has it added. What the game view does to
-    /// the sky and the map when the camera is head up rather than north up,
-    /// and it works on the buffer after the fact so the pictures of planets
-    /// and stations need know nothing about it.
-    pub fn turn_from(&mut self, from: usize, angle: f32) {
-        if angle == 0.0 {
-            return;
-        }
-        let (s, c) = (angle.sin(), angle.cos());
-        for shape in self.data[from..].chunks_exact_mut(STRIDE) {
-            let (x, y) = (shape[1], shape[2]);
-            shape[1] = x * c - y * s;
-            shape[2] = x * s + y * c;
-            shape[5] += angle;
-        }
     }
 
     pub fn len(&self) -> usize {

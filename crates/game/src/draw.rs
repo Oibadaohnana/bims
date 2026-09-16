@@ -58,6 +58,10 @@ impl DrawList {
         self.data.clear();
     }
 
+    pub fn data(&self) -> &[f32] {
+        &self.data
+    }
+
     pub fn as_ptr(&self) -> *const f32 {
         self.data.as_ptr()
     }

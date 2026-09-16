@@ -10,6 +10,12 @@
 //! everything else — the starfield, a station drawn alongside, the map — stays
 //! square to the window.
 //!
+//! That is the default and not the only way: `Game::head_up` is the player
+//! asking for the other one, the ship held square and the world turned round
+//! it, and it is done in `world_paint` by turning what is out there after the
+//! fact rather than by anything in here. This camera still never rotates;
+//! `Game::camera_turn` is the whole of the difference.
+//!
 //! The transform is the same one the design phase's [`crate::view::View`]
 //! hands out (`screen = world * scale + offset`), so `web/ship.js` paints
 //! either page with one loop. The difference is what the origin is: the design

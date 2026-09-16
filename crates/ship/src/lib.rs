@@ -53,9 +53,38 @@ static mut GAME: Option<Game> = None;
 static mut LIST: Option<draw::DrawList> = None;
 
 /// What the lobby asked for, kept from `ship_init` until Accept hands it to
-/// the world. Two numbers, because that is all a galaxy is.
+/// the world. A galaxy is a seed and a type; where in it the game starts is
+/// a star and a station, and `None` when the lobby did not say — which is
+/// an error screen, never a different dock. See [`ship_spawn_ok`].
 static mut SEED: u64 = world::data::DEFAULT_SEED;
 static mut GALAXY: u32 = 0;
+static mut SPAWN: Option<(u32, u32)> = None;
+
+/// "The lobby did not say." What `star` and `station` arrive as when the
+/// query string had neither — `u32::MAX`, the same value the lobby's own
+/// exports use for nothing, because star 0 and station 0 both exist.
+pub const NONE: u32 = u32::MAX;
+
+fn galaxy_type(code: u32) -> GalaxyType {
+    GalaxyType::ALL
+        .get(code as usize)
+        .copied()
+        .unwrap_or(GalaxyType::SpiralTwoArm)
+}
+
+/// The spawn the page was given, or none. Both halves have to be there —
+/// a star with no station is no more a spawn than nothing at all.
+fn spawn_from(star: u32, station: u32) -> Option<(u32, u32)> {
+    (star != NONE && station != NONE).then_some((star, station))
+}
+
+/// [`NONE`], for the host, so it is written down once. It arrives in
+/// JavaScript as `-1` — a `u32` with its top bit set does — and the host
+/// compares against whatever this returns rather than against a number.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_none() -> u32 {
+    NONE
+}
 
 fn editor() -> &'static mut Editor {
     unsafe {
@@ -84,15 +113,19 @@ fn design() -> &'static ShipDesign {
 
 /// Open the world with the accepted design. Called the moment the last Accept
 /// lands and at no other time.
+///
+/// With no spawn there is no world: the page checked [`ship_spawn_ok`] at
+/// boot and showed the error screen instead of a design phase, so this is
+/// only reached without one if something went round that check — and then
+/// the honest outcome is still no game rather than a game somewhere else.
 fn start_game() {
     if game().is_some() {
         return;
     }
-    let (seed, galaxy) = unsafe { (SEED, GALAXY) };
-    let galaxy_type = GalaxyType::ALL
-        .get(galaxy as usize)
-        .copied()
-        .unwrap_or(GalaxyType::SpiralTwoArm);
+    let (seed, galaxy, spawn) = unsafe { (SEED, GALAXY, SPAWN) };
+    let Some((star, station)) = spawn else {
+        return;
+    };
     let editor = editor();
     let Some(design) = editor.finish_design().cloned() else {
         return;
@@ -104,7 +137,9 @@ fn start_game() {
         editor.players,
         editor.local,
         seed,
-        galaxy_type,
+        galaxy_type(galaxy),
+        star,
+        station,
         editor.view.width,
         editor.view.height,
     );
@@ -150,10 +185,16 @@ pub extern "C" fn ship_tile() -> u32 {
 /// the same way.
 ///
 /// `seed_hi`/`seed_lo` and `galaxy` are the world the game will open in, and
-/// they are **temporary in exactly one way**: today they come off the query
-/// string with a fixed default behind them, and when the lobby's World tab
-/// exists they will come off that instead. Nothing else about them changes —
-/// a galaxy has always been a seed and a type.
+/// `star` and `station` are where in it — all five off the query string the
+/// lobby's World tab wrote. The seed has a fixed default behind it for a page
+/// opened with no lobby; the spawn deliberately has **none**: [`NONE`] for
+/// either half is a page that shows an error and a way back to the lobby,
+/// never a game somewhere else. [`ship_spawn_ok`] is how the page finds out.
+///
+/// `preset` is what is on the grid to begin with: [`PRESET_EMPTY`] for a bare
+/// build area, [`PRESET_PLAYTEST`] for the playtest ship laid out in the
+/// middle of it, as a gift — the pool is untouched and everything is still
+/// the crew's to change. A build area the ship does not fit is left empty.
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_init(
     build_area: u32,
@@ -164,22 +205,126 @@ pub extern "C" fn ship_init(
     seed_hi: u32,
     seed_lo: u32,
     galaxy: u32,
+    star: u32,
+    station: u32,
+    preset: u32,
     width: f32,
     height: f32,
 ) {
+    let mut editor = Editor::new(
+        build_area,
+        money(money_per_bim_hi, money_per_bim_lo),
+        players,
+        local_slot,
+        width,
+        height,
+    );
+    if preset == PRESET_PLAYTEST
+        && let Some(given) = shipdesign::fixture::playtest_ship_on(build_area)
+    {
+        editor.give(given);
+    }
     unsafe {
         SEED = ((seed_hi as u64) << 32) | seed_lo as u64;
         GALAXY = galaxy;
+        SPAWN = spawn_from(star, station);
         GAME = None;
-        EDITOR = Some(Editor::new(
-            build_area,
-            money(money_per_bim_hi, money_per_bim_lo),
-            players,
-            local_slot,
+        EDITOR = Some(editor);
+    }
+}
+
+/// What a design phase opens on. The codes cross the boundary as `preset=`
+/// on the query string; `PRESET_PLAYTEST` is what a page gets when it does
+/// not say, because a player who wanted an empty grid can clear one and a
+/// player who wanted a ship cannot conjure one.
+pub const PRESET_EMPTY: u32 = 0;
+pub const PRESET_PLAYTEST: u32 = 1;
+
+/// Whether the spawn the page was given is a station this galaxy has: both
+/// halves present, the star in the galaxy, the station in its system. Asked
+/// once, at boot, before a design phase is shown — a player who laid out a
+/// ship for an hour and then learnt at Accept that there was nowhere to put
+/// it would be right to be cross.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_spawn_ok() -> u32 {
+    let (seed, galaxy, spawn) = unsafe { (SEED, GALAXY, SPAWN) };
+    let Some((star, station)) = spawn else {
+        return 0;
+    };
+    let galaxy = worldgen::Galaxy::new(seed, galaxy_type(galaxy));
+    let found = galaxy
+        .system(star)
+        .is_some_and(|system| system.station(station).is_some());
+    u32::from(found)
+}
+
+/// Skip the design phase and open the world on the playtest ship: what
+/// `nix run .#simulation` is.
+///
+/// One player, slot 0, [`shipdesign::fixture::playtest_ship`] already
+/// settled, [`world::data::SIMULATION_MONEY`] in hand. The seed, the type and
+/// the spawn are the query's when it has them and the simulation's defaults
+/// when it does not — [`world::data::DEFAULT_SEED`], a two-arm spiral, and
+/// the lowest star with a station, which is the one place [`world::spawn`]
+/// is still used. Every other number is fixed on purpose: a playtest that
+/// opened somewhere different each time would be a playtest of nothing.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_simulate(
+    seed_hi: u32,
+    seed_lo: u32,
+    galaxy: u32,
+    star: u32,
+    station: u32,
+    width: f32,
+    height: f32,
+) {
+    let seed = ((seed_hi as u64) << 32) | seed_lo as u64;
+    let spawn = spawn_from(star, station)
+        .or_else(|| world::spawn(&worldgen::Galaxy::new(seed, galaxy_type(galaxy))));
+    let design = shipdesign::fixture::playtest_ship();
+    let editor = Editor::settled(design.clone(), 1, 0, width, height);
+    let started = spawn.and_then(|(star, station)| {
+        Game::start(
+            design,
+            world::data::SIMULATION_MONEY,
+            1,
+            0,
+            seed,
+            galaxy_type(galaxy),
+            star,
+            station,
             width,
             height,
-        ))
+        )
+    });
+    unsafe {
+        SEED = seed;
+        GALAXY = galaxy;
+        SPAWN = spawn;
+        EDITOR = Some(editor);
+        GAME = started;
     }
+}
+
+/// The simulation's spawn for the seed and type the page opened with: the
+/// lowest star with a station, and the lowest station in it. Read by the
+/// harnesses, which need *a* valid spawn to open a design phase with and
+/// have no lobby to get one from.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_simulation_star() -> u32 {
+    simulation_spawn().map(|(star, _)| star).unwrap_or(NONE)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_simulation_station() -> u32 {
+    simulation_spawn()
+        .map(|(_, station)| station)
+        .unwrap_or(NONE)
+}
+
+fn simulation_spawn() -> Option<(u32, u32)> {
+    let (seed, galaxy) = unsafe { (SEED, GALAXY) };
+    world::spawn(&worldgen::Galaxy::new(seed, galaxy_type(galaxy)))
 }
 
 /// The seed a page opened with no lobby behind it gets, in the two halves
@@ -188,7 +333,8 @@ pub extern "C" fn ship_init(
 /// Exported rather than written down in `web/ship.js` so there is **one** copy
 /// of it: a default that exists in two places is a default that will disagree
 /// with itself, and two players in the same lobby would end up in two
-/// galaxies. It goes when the lobby's World tab arrives.
+/// galaxies. A page the lobby started never needs it — the World tab always
+/// writes a seed — so this is for `ship.html` opened on its own.
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_default_seed_hi() -> u32 {
     (world::data::DEFAULT_SEED >> 32) as u32
@@ -231,7 +377,12 @@ pub extern "C" fn ship_resize(width: f32, height: f32) {
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_render() {
     match game() {
-        Some(game) => world_paint::paint(game, list()),
+        Some(game) => {
+            // The room aboard draws itself once a frame, here, and not once
+            // a step: at 24x that is one picture rather than twenty-four.
+            game.world.aboard.render();
+            world_paint::paint(game, list())
+        }
         None => paint::paint(editor(), list()),
     }
 }
@@ -955,6 +1106,49 @@ pub extern "C" fn ship_trip_aborting() -> u32 {
         .is_some_and(|plan| plan.aborting) as u32
 }
 
+// --- the crew ---------------------------------------------------------------
+//
+// One per player, aboard from the first step. The wasm draws them; what the
+// host wants is where each one is on the canvas, to paint a name over — the
+// names are the host's, as they are in the room, and `CREW_NAMES` in
+// `web/ship.js` is where they live.
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_crew_count() -> u32 {
+    game().map(|g| g.world.aboard.count()).unwrap_or(0)
+}
+
+/// Where a Bim is, in the ship view's camera units about the ship — what
+/// `ship_view_x`/`_y` and `ship_view_scale` turn into a canvas pixel, the
+/// same way the shapes are. `0` for a Bim that is not there.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_crew_x(who: u32) -> f32 {
+    crew_on_screen(who).0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_crew_y(who: u32) -> f32 {
+    crew_on_screen(who).1
+}
+
+fn crew_on_screen(who: u32) -> (f32, f32) {
+    let Some(game) = game() else {
+        return (0.0, 0.0);
+    };
+    if who >= game.world.aboard.count() {
+        return (0.0, 0.0);
+    }
+    world_paint::crew_on_screen(game, who)
+}
+
+/// The star the world is in, or [`NONE`] before there is a world. With
+/// [`ship_docked_at`] it is how a harness checks the game opened where the
+/// lobby said.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_world_star() -> u32 {
+    game().map(|g| g.world.star_id).unwrap_or(NONE)
+}
+
 /// The station it is tied to, **plus one**, or 0 for nowhere. There is no
 /// negative `u32` to say "nothing" with, and station ids start at zero.
 #[unsafe(no_mangle)]
@@ -1339,6 +1533,22 @@ pub extern "C" fn ship_set_view_mode(mode: u32) {
     }
 }
 
+/// Whether the view is head up — the ship square to the window and the sky
+/// and the map turned round it — rather than north up. A view setting, the
+/// local player's own, and no command: it changes nothing anybody else can
+/// see. `web/ship.js` keeps the toggle marked off this and not off its own
+/// idea of what was pressed.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_head_up() -> u32 {
+    game().map(|g| g.head_up as u32).unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_set_head_up(on: u32) {
+    if let Some(game) = game() {
+        game.head_up = on != 0;
+    }
+}
 /// The pointer, over the ship view. Turned back through the heading, so a
 /// click lands on the tile it looks like it landed on at any heading.
 #[unsafe(no_mangle)]
@@ -1439,7 +1649,29 @@ pub extern "C" fn ship_self_check() -> u32 {
     if world::fixture::reference_run() == world::fixture::REFERENCE_CHECKSUM {
         bits |= 1 << 6;
     }
+    // And the simulation's ship, for the same reason as the reference: the
+    // playtest that opens on this target has to be the playtest that opens
+    // on the other. `the_playtest_ship_hashes_to_the_number_it_is_pinned_to`
+    // in `shipdesign` is the native half.
+    let playtest = shipdesign::fixture::playtest_ship();
+    if shipdesign::design_hash(&playtest) == shipdesign::fixture::PLAYTEST_HASH
+        && playtest.parts.len() as u32 == shipdesign::fixture::PLAYTEST_PARTS
+    {
+        bits |= 1 << 7;
+    }
     bits
+}
+
+/// The playtest ship's hash as this target computes it, so a failed
+/// [`ship_self_check`] can be read rather than guessed at.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_playtest_hash_hi() -> u32 {
+    (shipdesign::design_hash(&shipdesign::fixture::playtest_ship()) >> 32) as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_playtest_hash_lo() -> u32 {
+    shipdesign::design_hash(&shipdesign::fixture::playtest_ship()) as u32
 }
 
 /// The world checksum as this target computes it, so a failed

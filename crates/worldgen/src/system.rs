@@ -9,10 +9,9 @@
 //!
 //! A [`StationBlueprint`] is not a map. There are no tiles here, no rooms, no
 //! items on the deck — only the facts a later map generator will need before
-//! it can make any of those: what kind of station it is, what is in its
-//! stores, how much of it is wrecked, and one seed to build the interior
-//! from. Every field earns its place by being something that generator either
-//! places or honours.
+//! it can make any of those: what kind of station it is, how much of it is
+//! wrecked, and one seed to build the interior from. Every field earns its
+//! place by being something that generator either places or honours.
 //!
 //! # How a system gets its shape
 //!
@@ -31,31 +30,18 @@ use crate::layout;
 use crate::math::{DVec2, dvec2};
 use crate::name::{self, Name};
 use crate::rng::{Purpose, Rng};
-use physics::ResourceId;
 
-/// The lobby settings that are allowed to reach world generation.
-///
-/// **One field, and it had better stay that way.** A galaxy is identified by
-/// its seed, its type and the generator version, and by nothing else: two
-/// players whose lobbies disagree about the build area or the crew ceiling
-/// must still be looking at the same stars, the same planets and the same
-/// stations in the same places. The stockpile multiplier is here because a
-/// station's stores are a *starting condition* rather than a fact about the
-/// world — it scales what is in the crates and touches nothing else, which
-/// `settings_cannot_move_anything` exists to keep true.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct WorldSettings {
-    /// The lobby's "starting stores" dial: 0.5, 1 or 2 today.
-    pub stockpile_factor: f64,
-}
-
-impl Default for WorldSettings {
-    fn default() -> WorldSettings {
-        WorldSettings {
-            stockpile_factor: 1.0,
-        }
-    }
-}
+// No lobby setting reaches world generation at all any more.
+//
+// There used to be one — a multiplier on what a station had in its stores —
+// and it went when the crew started bringing **money** instead of starting
+// with stores. A galaxy is now identified by its seed, its type and the
+// generator version and by **nothing else**, which is a stronger version of
+// the rule `WorldSettings` was written to keep: two players whose lobbies
+// disagree about anything at all are still looking at the same stars, the
+// same planets and the same stations in the same places. Anything that wants
+// to reintroduce a setting here has to answer why it is a fact about the
+// world rather than a starting condition.
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Body {
@@ -76,10 +62,6 @@ pub struct StationBlueprint {
     pub parent_body: Option<u32>,
     pub position: DVec2,
     pub name: Name,
-    /// **Final amounts**: the table for its kind, varied by the seed, scaled
-    /// by the lobby's multiplier and rounded. Nothing downstream multiplies
-    /// this again.
-    pub starting_stockpile: Vec<(ResourceId, u32)>,
     /// Wrecks to pull apart. Only derelicts have any — see
     /// [`data::salvage_sites`], which is where an exception would go.
     pub salvage_sites: u32,
@@ -174,9 +156,9 @@ impl Galaxy {
     /// Returns `None` for a star that is not in this galaxy. Nothing is
     /// cached: it is a few dozen draws and a handful of allocations, and a
     /// cache would be one more thing that could disagree with the server.
-    pub fn system(&self, star_id: u32, settings: WorldSettings) -> Option<StarSystem> {
+    pub fn system(&self, star_id: u32) -> Option<StarSystem> {
         self.star(star_id)?;
-        Some(generate(self, star_id, settings))
+        Some(generate(self, star_id))
     }
 }
 
@@ -193,13 +175,17 @@ const MAX_BODIES: u32 = 7;
 /// on a system whose minimum hop leaves nowhere legal to stand.
 const PLACEMENT_TRIES: u32 = 32;
 
+/// Angles tried when every drawn one was blocked. Evenly spaced, starting
+/// from the best guess — see [`site`], where the sweep is.
+const SWEEP_STEPS: u32 = 64;
+
 /// How far off its parent body a station sits, as a fraction of the minimum
 /// separation. Small — it is in orbit, not in the next postcode — but not
 /// zero: a station at exactly its parent's position would make "which of
 /// these did I click" unanswerable.
 const STATION_ORBIT: f64 = 0.02;
 
-fn generate(galaxy: &Galaxy, star_id: u32, settings: WorldSettings) -> StarSystem {
+fn generate(galaxy: &Galaxy, star_id: u32) -> StarSystem {
     let (seed, version) = (galaxy.seed, galaxy.generator_version);
     let promised = galaxy.designation_for(star_id);
 
@@ -213,9 +199,7 @@ fn generate(galaxy: &Galaxy, star_id: u32, settings: WorldSettings) -> StarSyste
     }
 
     let bodies = place_bodies(seed, star_id, version, desolation, promised);
-    let stations = place_stations(
-        seed, star_id, version, desolation, promised, &bodies, settings,
-    );
+    let stations = place_stations(seed, star_id, version, desolation, promised, &bodies);
 
     StarSystem {
         star_id,
@@ -341,7 +325,6 @@ fn place_stations(
     desolation: f64,
     promised: Option<StationKind>,
     bodies: &[Body],
-    settings: WorldSettings,
 ) -> Vec<StationBlueprint> {
     let mut rng = Rng::stream(seed, star_id, version, Purpose::Stations);
 
@@ -372,9 +355,7 @@ fn place_stations(
             continue;
         };
         let id = built.len() as u32;
-        built.push(furnish(
-            seed, star_id, version, id, kind, parent, position, settings,
-        ));
+        built.push(furnish(seed, star_id, version, id, kind, parent, position));
     }
 
     // A station with nowhere in its own system to fly to is a station the
@@ -482,10 +463,16 @@ fn site(
         }
     }
 
-    // Every angle was blocked, which only happens where another body is
-    // sitting a whisker over the minimum from this one. Stand on the far side
-    // of the parent from whatever is nearest: that is the best angle there
-    // is, and picking it outright beats drawing thirty-two more.
+    // Every angle drawn was blocked, which only happens where something else
+    // is sitting a whisker over the minimum from this body. Sweep instead of
+    // drawing: start on the far side of the parent from whatever is nearest —
+    // the best single guess there is — and go round from there.
+    //
+    // **The sweep checks, it does not assume.** Standing opposite the nearest
+    // thing clears *that* one and can walk the station a fifth of a percent
+    // closer to a third body, which is a `TooClose` of about 0.99 days
+    // against a minimum of 1.0: legal-looking, invisible, and exactly the
+    // fault this used to produce before the sweep was here.
     let nearest = bodies
         .iter()
         .filter(|b| b.id != parent_id)
@@ -493,16 +480,36 @@ fn site(
         .min_by(|a, b| {
             let (da, db) = (a.distance(parent.position), b.distance(parent.position));
             da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-        })?;
-    let away = parent.position.sub(nearest);
-    let length = away.length();
-    if length == 0.0 {
-        return None;
+        });
+    let start = match nearest {
+        Some(near) => {
+            let away = parent.position.sub(near);
+            if away.length() == 0.0 {
+                0.0
+            } else {
+                away.y.atan2(away.x)
+            }
+        }
+        None => 0.0,
+    };
+    for i in 0..SWEEP_STEPS {
+        let angle = start + std::f64::consts::TAU * i as f64 / SWEEP_STEPS as f64;
+        let offset = DVec2::polar(angle, min_gap * STATION_ORBIT);
+        let absolute = parent.position.add(offset);
+        let clear_of_bodies = bodies
+            .iter()
+            .filter(|b| b.id != parent_id)
+            .all(|b| b.position.distance(absolute) >= min_gap);
+        if clear_of_bodies && clear_of_stations(absolute, bodies, built, min_gap) {
+            return Some((Some(parent_id), offset));
+        }
     }
-    Some((
-        Some(parent_id),
-        away.scale(min_gap * STATION_ORBIT / length),
-    ))
+
+    // Hemmed in from every side. There is nowhere legal to bolt it on, which
+    // is the same ordinary outcome as a second station in a one-planet
+    // system: the station is simply not there. A system with a body pair that
+    // tight has barely room for the pair.
+    None
 }
 
 /// Somewhere in this system that is certainly clear of everything in it:
@@ -560,22 +567,11 @@ fn furnish(
     kind: StationKind,
     parent_body: Option<u32>,
     position: DVec2,
-    settings: WorldSettings,
 ) -> StationBlueprint {
     let base = Rng::stream(seed, star_id, version, Purpose::StationContents);
     // Branched by id rather than drawn in sequence: the second station's
     // stores must not change because the first one gained a hazard.
     let mut rng = base.branch(id as u64);
-
-    let factor = settings.stockpile_factor.max(0.0);
-    let starting_stockpile = data::base_stockpile(kind)
-        .into_iter()
-        .map(|(resource, amount)| {
-            let vary = 1.0 + rng.range(-data::STOCKPILE_SPREAD, data::STOCKPILE_SPREAD);
-            let final_amount = (amount as f64 * vary * factor).round();
-            (resource, final_amount.max(0.0) as u32)
-        })
-        .collect();
 
     let salvage_sites = data::salvage_sites(kind, rng.unit());
 
@@ -594,7 +590,6 @@ fn furnish(
         parent_body,
         position,
         name: station_name(&base, id),
-        starting_stockpile,
         salvage_sites,
         hazard_sites,
         // Its own stream, so an interior does not change when anything about
@@ -623,9 +618,7 @@ mod tests {
 
     fn every_system(seed: u64, t: GalaxyType) -> (Galaxy, Vec<StarSystem>) {
         let g = Galaxy::new(seed, t);
-        let systems = (0..STAR_COUNT)
-            .map(|id| g.system(id, WorldSettings::default()).unwrap())
-            .collect();
+        let systems = (0..STAR_COUNT).map(|id| g.system(id).unwrap()).collect();
         (g, systems)
     }
 
@@ -633,11 +626,11 @@ mod tests {
     fn a_system_is_the_same_however_often_it_is_asked_for() {
         let g = Galaxy::new(808, GalaxyType::Spiral);
         for id in [0, 1, 17, 500, 999] {
-            let a = g.system(id, WorldSettings::default()).unwrap();
-            let b = g.system(id, WorldSettings::default()).unwrap();
+            let a = g.system(id).unwrap();
+            let b = g.system(id).unwrap();
             assert_eq!(a, b);
         }
-        assert!(g.system(STAR_COUNT, WorldSettings::default()).is_none());
+        assert!(g.system(STAR_COUNT).is_none());
     }
 
     /// The reason there is no shared stream. Looking at one system must not
@@ -645,65 +638,30 @@ mod tests {
     #[test]
     fn the_order_systems_are_asked_for_in_does_not_matter() {
         let g = Galaxy::new(1234, GalaxyType::Elliptical);
-        let forwards: Vec<_> = (0..40)
-            .map(|id| g.system(id, WorldSettings::default()).unwrap())
-            .collect();
-        let mut backwards: Vec<_> = (0..40)
-            .rev()
-            .map(|id| g.system(id, WorldSettings::default()).unwrap())
-            .collect();
+        let forwards: Vec<_> = (0..40).map(|id| g.system(id).unwrap()).collect();
+        let mut backwards: Vec<_> = (0..40).rev().map(|id| g.system(id).unwrap()).collect();
         backwards.reverse();
         assert_eq!(forwards, backwards);
         // And asking for one in the middle on its own gives the same answer.
-        assert_eq!(
-            g.system(21, WorldSettings::default()).unwrap(),
-            forwards[21]
-        );
+        assert_eq!(g.system(21).unwrap(), forwards[21]);
     }
 
-    /// The whole of the lobby's reach into the world: stores, and nothing
-    /// else. If this ever fails, two players with different settings are
-    /// looking at different galaxies.
+    /// A system is a seed, a star and a version, and **nothing a lobby can
+    /// pick**. There used to be one setting that reached this far — a
+    /// multiplier on a station's stores — and it went with the stores
+    /// themselves; what is left is a generator whose whole input is the three
+    /// numbers `Galaxy` was built with. Two galaxies of the same seed and
+    /// type are the same galaxy, whatever the lobbies around them said.
     #[test]
-    fn settings_cannot_move_anything() {
-        let g = Galaxy::new(55, GalaxyType::SpiralTwoArm);
+    fn a_seed_and_a_type_are_the_whole_of_the_input() {
+        let one = Galaxy::new(55, GalaxyType::SpiralTwoArm);
+        let two = Galaxy::new(55, GalaxyType::SpiralTwoArm);
         for id in 0..120 {
-            let lean = g
-                .system(
-                    id,
-                    WorldSettings {
-                        stockpile_factor: 0.5,
-                    },
-                )
-                .unwrap();
-            let full = g
-                .system(
-                    id,
-                    WorldSettings {
-                        stockpile_factor: 2.0,
-                    },
-                )
-                .unwrap();
-            assert_eq!(lean.bodies, full.bodies, "star {id}");
-            assert_eq!(lean.desolation, full.desolation);
-            assert_eq!(lean.stations.len(), full.stations.len());
-            for (a, b) in lean.stations.iter().zip(full.stations.iter()) {
-                assert_eq!(a.kind, b.kind);
-                assert_eq!(a.parent_body, b.parent_body);
-                assert_eq!(a.position, b.position);
-                assert_eq!(a.map_seed, b.map_seed);
-                assert_eq!(a.salvage_sites, b.salvage_sites);
-                assert_eq!(a.hazard_sites, b.hazard_sites);
-                // Only this moves, and it moves the way the dial says.
-                for (&(_, lean_n), &(_, full_n)) in
-                    a.starting_stockpile.iter().zip(b.starting_stockpile.iter())
-                {
-                    assert!(
-                        full_n >= lean_n * 3,
-                        "x2 should be about four times x0.5: {lean_n} -> {full_n}"
-                    );
-                }
-            }
+            assert_eq!(
+                one.system(id).unwrap(),
+                two.system(id).unwrap(),
+                "star {id}"
+            );
         }
     }
 
@@ -851,8 +809,6 @@ mod tests {
         let mut checked = 0;
         for s in &systems {
             for st in &s.stations {
-                assert_eq!(st.starting_stockpile.len(), ResourceId::ALL.len());
-                assert!(st.starting_stockpile.iter().any(|&(_, n)| n > 0));
                 assert!(map_seeds.insert(st.map_seed), "two stations, one map seed");
                 if st.kind == StationKind::Derelict {
                     assert!(st.salvage_sites > 0);
@@ -893,7 +849,7 @@ mod tests {
     fn positions_add_up_through_the_parent_chain() {
         let g = Galaxy::new(6, GalaxyType::Spiral);
         for id in 0..300 {
-            let s = g.system(id, WorldSettings::default()).unwrap();
+            let s = g.system(id).unwrap();
             for st in &s.stations {
                 let at = s.absolute_position(Node::Station(st.id)).unwrap();
                 match st.parent_body {

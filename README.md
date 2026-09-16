@@ -92,9 +92,10 @@ in the first one as host, the rest open and waiting. Across the top, the room
 code, set like something you read out to somebody. On the right, the same
 tabbed tool the setup screen uses:
 
-- **Game setup** — starting stores at ×0.5, ×1 or ×2, and the ship you start
-  with at 30 × 30, 40 × 40 or 60 × 60 tiles. ×1 and 40 × 40 unless you say
-  otherwise.
+- **Game setup** — the money each Bim brings at €50 000, €100 000 or
+  €200 000, and the ship you start with at 30 × 30, 40 × 40 or 60 × 60 tiles.
+  €100 000 and 40 × 40 unless you say otherwise. Nobody starts with stores:
+  everybody's money goes into **one pool** and the designer spends that.
 - **World** — where the ship is and what it can reach. Nothing behind it yet;
   the tab says so rather than showing an empty box.
 
@@ -103,9 +104,11 @@ the setup screen is what the lobby shows and the other way about.
 
 **Start** hands the game to the ship designer, which is a page of its own —
 see below. What crosses is four numbers in a query string and nothing else:
-the stockpile factor, the build area in tiles, how many players there are, and
-which slot you are. `"large"` and `"half"` exist for the buttons; what a game
-is *started with* is what will cross into wasm, and no strings do.
+the money each Bim brings, the build area in tiles, how many players there
+are, and which slot you are. `"large"` and `"full"` exist for the buttons;
+what a game is *started with* is what will cross into wasm, and no strings do
+— which goes for the euro sign as well, so what is written down is a bare
+count of euros.
 `scratchpad/builder-check.mjs` asserts that, query parameter by query
 parameter.
 
@@ -120,8 +123,8 @@ object and to nothing else.
 
 Two things it already does properly, because they are easy to get wrong later:
 the settings tool knows how to be read-only, for a guest in somebody else's
-lobby, and the settings themselves are plain numbers — a factor and a tile
-count. Nothing but numbers can cross into the simulation anyway.
+lobby, and the settings themselves are plain numbers — a sum of money and a
+tile count. Nothing but numbers can cross into the simulation anyway.
 
 ## The ship designer
 
@@ -131,28 +134,41 @@ It is `web/ship.html` and `web/ship.js` with a wasm of its own, `ship.wasm`,
 out of `crates/ship`.
 
 **No Bims exist during this phase.** Placing a part and taking it off again
-are both instant and free: nothing has been welded yet, and the station's
-stockpile is only being promised. That stops the moment everybody accepts —
-after that, every change is a Bim's work.
+are both instant and free: nothing has been welded yet, and the money is only
+being promised. That stops the moment everybody accepts — after that, every
+change is a Bim's work.
 
-A tile is 52 world units and holds at most two things: the **deck plating**
-under your boots, and the one thing standing on it. A wall is on the object
-layer like everything else, because a wall and a bunk in one tile is equally
-nonsense; a wall is the only object that can stand where there is no deck,
-which is what lets a hull be drawn before it is floored.
+A tile is 52 world units and holds at most one part per **layer**, of which
+there are four:
+
+- **Structure** is the frame the ship is built on. It needs nothing under it,
+  and it is the first thing anybody lays: nothing else goes down without it.
+- **Floor** is the deck plating you walk on. It needs structure.
+- **Object** is the one thing standing in the tile — a wall, a bunk, an
+  engine. Most need deck; the hull parts stand straight on the frame, which
+  is what lets a ship be skinned before it is floored.
+- **Utility** runs *through* a tile without filling it: power conduit, which a
+  body walks over and a hob can stand on.
+
+A wall is on the object layer like everything else, because a wall and a bunk
+in one tile is equally nonsense. What each part needs under it is one column
+of the part table, and removal reads the same column backwards: nothing comes
+out from under something that is standing on it.
 
 ### Laying one out
 
-The palette down the left is grouped the way a ship is thought about —
-structure, engines, crew, galley, heads, bay — rather than the way the enum is
+The palette down the left is grouped the way a ship is thought about — hull,
+systems, crew, galley, heads, storage, bay — rather than the way the enum is
 numbered. The rows are built from what the wasm says exists, so a part added
 and forgotten in the grouping turns up under **Anything else** instead of
 quietly not existing.
 
-- **Click** to place. **Drag a rectangle** for deck plating, **drag a line**
-  for walls, **right-drag a rectangle** to clear — objects first and the deck
-  underneath afterwards, because the other way round every tile with something
-  standing on it would be refused and the drag would look half broken.
+- **Click** to place. **Drag a rectangle** for the things you fill an area
+  with — structure, deck plating, conduit — **drag a line** for both kinds of
+  wall, **right-drag a rectangle** to clear. A clearing drag comes off top
+  down: what is standing in the tile and what runs through it, then the deck,
+  then the frame. Any other order and every tile with something on it would be
+  refused and the drag would look half broken.
 - **R** turns the ghost a quarter clockwise. The footprint and the use spots
   turn with it, and the palette shows the turned size.
 - **Middle-drag** or **WASD** pans; the **wheel** zooms. The view is clamped
@@ -171,11 +187,70 @@ the deck with markers.
 
 ### What it costs, and what it checks
 
-Across the top is what is left of the station's stockpile, per resource,
-beside what there was to start with. The lobby's factor decides that and
-nothing else does. A removal hands back the **whole** cost, and what is left
-over at the end **stays at the station** — it is not cargo, it is not aboard,
-and it does not count towards what the ship weighs.
+Across the top is what is left of the crew's money, beside what there was to
+start with. There is **one pool**: every Bim's purse goes into it, a lone
+player gets a fixed bonus on top because a ship for one costs what a ship for
+four does, and every part anybody places comes out of the same figure. Each
+part has a price in euros. A removal hands back the **whole** price, and what
+is left over at the end is money rather than cargo — it is not aboard, and it
+does not count towards what the ship weighs.
+
+What is left is always **worked out from the design**, never decremented as
+parts go down: a refused edit, a removal and a replayed run of edits cannot
+drift apart from what is actually on the ship. The sum itself —
+`money_per_bim × players`, plus the solo bonus — is `crates/economy`, so the
+browser and the native server that will one day be authoritative arrive at the
+pool the same way, in whole euros, with overflow an error rather than a wrap.
+
+### Buying what the ship will live on
+
+Under **Station** on the right is what there is to buy: ore, metal, fuel,
+components, vegetables and tofu, at a price a unit. Buttons move one, ten or a
+hundred, and selling hands back the whole price — nothing has left the dock,
+so there is nothing to lose on the deal.
+
+Two things bound a purchase, and the station is neither of them. Supply is
+unlimited and every station charges the same; what refuses an order is **the
+pool** — goods come out of the same money the hull does, so a player who
+spends everything on plating has nothing to load it with — or **the ship**.
+Goods are stowed: food in a cold store, fuel in a tank, everything else on a
+shelf. The readout under the rows is how full each class is, and a ship with
+no tank cannot take fuel at all however much money there is.
+
+What is bought is aboard from the moment it is bought. It is in the design
+hash, so a purchase clears everybody's Accept the way a wall does; it is in
+the ship's mass, so the acceleration on the handoff screen already accounts
+for it; and a shelf with something on it cannot be taken off until it is sold.
+
+### Everything is made of something, and it weighs what it is made of
+
+Every part has a **recipe** — so many units of metal, so many of components,
+and never ore, fuel or food, which are mined, burnt and eaten rather than
+built with. A part's mass is that recipe added up and there is no other
+number: a wall is two metal, and two metal is what a wall weighs.
+
+That is what makes construction a **move** rather than a purchase. Take two
+metal out of the hold, put a wall on the frame, and the ship weighs exactly
+what it weighed a moment ago — the materials have changed where they are and
+nothing else. Take the wall off again and all two units come back; there is no
+wastage, no scrap and no scrapping penalty. A ship's mass changes only by
+trading at a station, by burning fuel, by food being eaten or grown, and by
+crew coming aboard or leaving.
+
+None of that is visible yet, because in the design phase there is a station
+outside and everything is bought with money. **Money only works docked** —
+that is where euros and materials swap for each other — and the design phase
+happens docked at the spawn station, which is the whole reason a part can go
+down instantly. Out between stations there is nobody to buy from, and what
+gets built comes out of the hold or does not get built. A part's price in
+euros and its recipe are deliberately unrelated: they are two different
+transactions that happen to end in the same wall.
+
+The rule is written down and tested now, against every part in the table, in
+`crates/shipdesign/src/materials.rs`. Nothing calls it — the construction step
+will, with a Bim doing the work.
+
+### What it checks
 
 Down the right is what is wrong with it. An **error** blocks Accept; a
 **warning** is the design saying what it will be like to live with. Resting on
@@ -191,10 +266,32 @@ The errors are:
 - parts nobody could walk between — over deck, through doors, which count as a
   way through.
 
-The warnings are no engine, no engine on some axis, no hydroponic bay and no
-broom locker. **Engines are never an error**: a ship that cannot fly is still
-a ship you can live on, and refusing to let a player accept one would be the
-design phase having an opinion about how to play.
+The warnings are no engine, no engine on some axis, no hydroponic bay, no
+broom locker, no helm, nothing to eat aboard — and **radiation**.
+
+**Engines are never an error**: a ship that cannot fly is still a ship you can
+live on, and refusing to let a player accept one would be the design phase
+having an opinion about how to play.
+
+### Radiation, which is a warning and is louder than the errors
+
+Hull keeps it out. The **outside wall**, the **airlock**, the **sensor array**
+and the **engine** block shield; a plain internal wall does not, and neither
+does a door — so a ship skinned in ordinary walls is a ship whose crew are
+being cooked.
+
+It is worked out by flooding in from outside the build area, four ways only,
+through everything that does not shield. Every tile the flood reaches and
+finds a part in is **exposed**, and the deck is tinted over every one of them
+— not when you rest on the row, but always, because a player who has not
+looked at the checks panel is exactly the one about to accept a ship with a
+hole in it. The row sits first in the list and is styled louder than any error.
+
+It does not block Accept. That is deliberate: it is a decision about how to
+play, and the design phase does not take those. It only makes sure nobody
+takes it by accident. Two hull parts meeting at a corner seal that corner —
+the flood is four-way, so a hull drawn as a staircase does not leak at every
+step of it.
 
 That required list is a **mirror of what the room's chains walk to today** — a
 meal is a cold store, a worktop, a hob, a table with a chair and a dishwasher;
@@ -213,10 +310,11 @@ no longer on screen.
 
 When everybody's Accept matches the current hash the phase ends: editing locks
 and the handoff screen takes over. It says the play phase is not implemented
-yet, and shows what would be handed on — the part count, the ship's mass and
-its acceleration on each axis, all of it out of `physics`, so the numbers
-flight will one day want are computed and looked at now rather than discovered
-to be wrong later.
+yet, and shows what would be handed on — the part count, the money left, what
+is in the hold, how many tiles are exposed, the ship's mass and its
+acceleration on each axis, all of it out of `physics`, so the numbers flight
+will one day want are computed and looked at now rather than discovered to be
+wrong later.
 
 Solo, one Accept settles it.
 
@@ -233,6 +331,14 @@ Solo, one Accept settles it.
   `scratchpad/ship-check.mjs`.
 - **`crates/ship`** is the browser's half: the camera, the pointer, the ghost,
   the draw buffer. It decides nothing about what may be placed — it asks.
+- **`crates/economy`** is the money: whole euros, the shared pool, what a
+  station charges for a unit of anything, and which class of hold it goes in.
+  Every sum in it is checked — overflow is an error, never a wrap.
+
+What the play phase is promised is written down at the top of
+`crates/shipdesign/src/lib.rs`: the exposure map is the input for radiation,
+food is in cold stores and fuel in tanks, Bim *i* spawns at bunk *i*, and the
+money left over carries across.
 
 Its multiplayer seam is the same idea as the builder's. `net` in
 `web/ship.js` has a transport's shape, every Edit and every Accept goes
@@ -1501,7 +1607,7 @@ crossing the boundary are a handful of numbers and one pointer, which means no
 binding generator and no JavaScript in the build — `cargo build` is the whole
 pipeline, and the module has zero imports.
 
-### Four crates
+### Eight crates
 
 The repository is a cargo workspace and everything is under `crates/`. The
 split is not tidiness — each line of it is something that has to give the same
@@ -1509,14 +1615,19 @@ answer in two places at once:
 
 | Crate | What it is | Who else needs it |
 | --- | --- | --- |
-| `game` | The room: the simulation, and the wasm exports. The only cdylib | — |
+| `game` | The room: the simulation, and its wasm exports. A cdylib | — |
+| `ship` | The design phase in the browser: camera, pointer, draw buffer. The other cdylib | — |
+| `shipdesign` | What a ship is made of and the rules for putting one together | `ship` now; the play phase later; the native server, which has to admit the same ships |
 | `worldgen` | The galaxy, what is in each system, and station blueprints | The native server that will one day be authoritative, which has to generate the identical world from the same seed |
 | `physics` | Ship mass, engine thrust, travel time. Pure arithmetic | `worldgen` now, to check its layouts; the builder and the flight step later |
+| `economy` | Money: whole euros, the shared pool, what a station charges and which hold it goes in | `shipdesign` and `ship` now; anything that ever charges for anything later |
+| `health` | One body's health: conditions with stages, mending, death. Radiation dose, sickness and cancer are the first two | The play phase, which will hold one per Bim; the native server, which has to agree about who survived |
 | `time` | How long a minute, an hour and a day are | All of them — a day that is two lengths is two games |
 
-`worldgen`, `physics` and `time` build for `wasm32` and for the host both, and
+Everything but the two cdylibs builds for `wasm32` and for the host both, and
 `nix flake check` builds them both ways and runs their unit tests natively.
-`game` is wasm-shaped and is checked by the probes in `scratchpad/` instead.
+`game` and `ship` are wasm-shaped and are checked by the probes and harnesses
+in `scratchpad/` instead.
 
 ### Inside the room
 

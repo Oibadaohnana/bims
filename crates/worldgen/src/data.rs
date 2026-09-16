@@ -12,7 +12,7 @@
 //! length in the `time` crate, the travel-time formula itself, and the
 //! desolation mapping below.
 //!
-//! The station shares, stockpiles and hazards are *not* on that list on
+//! The station shares, the salvage and the hazards are *not* on that list on
 //! purpose: they change what is in a system without changing whether a layout
 //! passes validation, so they can be tuned while the world stays the shape it
 //! was.
@@ -37,11 +37,10 @@ pub const TRAVEL_BAND: TravelBand = TravelBand {
 
 /// The ship every layout is measured against.
 ///
-/// **Fixed.** Not the player's ship, not derived from the lobby's stockpile
-/// multiplier or its build area or how many people are in it — the world has
-/// to come out the same for a seed whatever the lobby settings say, and a
-/// reference ship that moved with them would quietly make a four-player
-/// galaxy a different galaxy.
+/// **Fixed.** Not the player's ship, not derived from the build area or from
+/// how many people are in the lobby — the world has to come out the same for
+/// a seed whatever the lobby settings say, and a reference ship that moved
+/// with them would quietly make a four-player galaxy a different galaxy.
 ///
 /// The values are chosen so the derived forward acceleration is exactly
 /// `1.0`: two engines of a thousand against two thousand of mass. That is
@@ -300,35 +299,13 @@ pub fn hazard_pressure(kind: StationKind) -> f64 {
     }
 }
 
-// --- what is in the stores ----------------------------------------------
-
-/// What a station of each kind has lying about, before the lobby's multiplier
-/// and before the seeded variation.
-///
-/// This is the material the crew build their ship out of, so the shape of it
-/// is the shape of what they can build: a refinery is all fuel and metal and
-/// a mining outpost is all rock, which is the difference between starting
-/// somewhere you can weld and starting somewhere you have to smelt first.
-pub fn base_stockpile(kind: StationKind) -> [(ResourceId, u32); 4] {
-    let (ore, metal, fuel, components) = match kind {
-        StationKind::Orbital => (200, 400, 300, 120),
-        StationKind::Refinery => (600, 700, 900, 60),
-        StationKind::MiningOutpost => (1400, 150, 200, 40),
-        // Nothing was left tidily. What there is, is in the salvage.
-        StationKind::Derelict => (80, 120, 60, 30),
-        StationKind::Relay => (60, 180, 400, 260),
-    };
-    [
-        (ResourceId::Ore, ore),
-        (ResourceId::Metal, metal),
-        (ResourceId::Fuel, fuel),
-        (ResourceId::Components, components),
-    ]
-}
-
-/// How much a station's stores vary from the table above: plus or minus this
-/// fraction, drawn per resource.
-pub const STOCKPILE_SPREAD: f64 = 0.25;
+// A station used to have stores, and a blueprint used to carry them. Both
+// went when the crew started bringing **money** rather than starting with
+// material: what a ship costs is now a price in euros out of one shared pool
+// — see `crates/economy` and `crates/shipdesign` — and a station holding
+// crates of metal was a starting condition dressed up as a fact about the
+// world. Trading is a separate thing that does not exist yet, and when it
+// does, what a station will sell is a price list rather than a stockpile.
 
 #[cfg(test)]
 mod tests {
@@ -417,14 +394,6 @@ mod tests {
             } else {
                 assert_eq!(n, 0, "{k:?} had salvage");
             }
-        }
-    }
-
-    #[test]
-    fn every_kind_of_station_has_something_in_its_stores() {
-        for &k in &StationKind::ALL {
-            let total: u32 = base_stockpile(k).iter().map(|&(_, n)| n).sum();
-            assert!(total > 0, "{k:?} started with nothing at all");
         }
     }
 }

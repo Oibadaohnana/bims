@@ -13,11 +13,17 @@
 /** What the settings come out as, and the only things that leave this page:
  * plain numbers. The simulation takes numbers across the wasm boundary and no
  * strings at all, and starting as we mean to go on keeps the boundary honest
- * when the builder actually starts a game. */
-const STOCKPILES = [
-  { id: "half", label: "Lean", factor: 0.5, sub: "×0.5" },
-  { id: "base", label: "Standard", factor: 1, sub: "×1" },
-  { id: "double", label: "Full", factor: 2, sub: "×2" },
+ * when the builder actually starts a game.
+ *
+ * Money is a **whole number of euros**. Nobody starts with stores any more:
+ * each of the crew brings this much, it all goes into one pool, and the
+ * designer spends that pool. The euro sign and the digit grouping below are
+ * the host's business — `euros()` is the only place either exists, and what
+ * crosses in the query string is the bare number. */
+const MONEY = [
+  { id: "lean", label: "Lean", amount: 50000, sub: euros(50000) },
+  { id: "standard", label: "Standard", amount: 100000, sub: euros(100000) },
+  { id: "full", label: "Full", amount: 200000, sub: euros(200000) },
 ];
 
 /** Starting ship, in tiles a side. */
@@ -28,7 +34,7 @@ const SHIPS = [
 ];
 
 /** The defaults a game starts from if nobody touches anything. */
-const DEFAULT_STOCKPILE = 1;
+const DEFAULT_MONEY = 100000;
 const DEFAULT_SHIP = 40;
 
 /** Berths in a lobby. Four is a guess at the eventual crew ceiling; it is one
@@ -46,6 +52,14 @@ const YOU = "James";
 /** How long a passing remark stays on screen. */
 const NOTE_SECONDS = 4;
 
+/** A number of euros, as words. The **only** place either the sign or the
+ * grouping exists: everything that leaves this page — the query string, and
+ * one day the wasm boundary — is a bare count of euros. */
+function euros(amount) {
+  const grouped = String(amount).replace(/\B(?=(\d{3})+(?!\d))/g, "\u00a0");
+  return `€${grouped}`;
+}
+
 boot();
 
 function boot() {
@@ -57,7 +71,7 @@ function boot() {
   // it and re-reads it when it is shown, so the solo screen and the lobby
   // cannot disagree about what was picked.
   const settings = {
-    stockpile: DEFAULT_STOCKPILE,
+    moneyPerBim: DEFAULT_MONEY,
     ship: DEFAULT_SHIP,
   };
 
@@ -216,6 +230,13 @@ function boot() {
         sub.textContent = option.sub;
         button.append(label, sub);
         button.addEventListener("click", () => {
+          // A guest in somebody else's lobby watches the settings rather than
+          // setting them, and `setEditable` disables every option to say so.
+          // The guard is here as well because `disabled` is the *browser's*
+          // half of that rule: anything else that can reach a handler — a
+          // harness, a script, a transport replaying a click — has to be
+          // refused by the page itself.
+          if (button.disabled) return;
           settings[key] = value(option);
           sync();
           onChange(key, settings[key]);
@@ -231,11 +252,11 @@ function boot() {
 
     addTab("setup", "Game setup", (panel) => {
       addChoice(panel, {
-        key: "stockpile",
-        name: "Starting stores",
-        note: "What is aboard on day one",
-        options: STOCKPILES,
-        value: (o) => o.factor,
+        key: "moneyPerBim",
+        name: "Money per Bim",
+        note: "What each of you brings; it all goes into one pool",
+        options: MONEY,
+        value: (o) => o.amount,
       });
       addChoice(panel, {
         key: "ship",
@@ -407,20 +428,21 @@ function boot() {
   //
   // Start hands the game over to the ship designer — `web/ship.html`, a page
   // of its own with its own wasm. What crosses is four numbers in a query
-  // string and nothing else: the stockpile factor, the build area in tiles,
-  // how many players there are, and which slot you are.
+  // string and nothing else: the money each Bim brings, the build area in
+  // tiles, how many players there are, and which slot you are.
   //
-  // Numbers rather than ids on purpose. `"double"` and `"large"` exist for the
+  // Numbers rather than ids on purpose. `"full"` and `"large"` exist for the
   // buttons; what a game is *started with* is what will cross into wasm, and
-  // no strings do. The designer reads the same four, clamps them, and falls
-  // back to its own defaults for anything missing.
+  // no strings do — which goes for the euro sign as well. The designer reads
+  // the same four, clamps them, and falls back to its own defaults for
+  // anything missing.
 
   const chosen = byId("chosen");
 
   /** Everything the designer needs, as numbers. */
   function started() {
     return {
-      stock: settings.stockpile,
+      money: settings.moneyPerBim,
       area: settings.ship,
       players: net.code ? Math.max(1, net.players.length) : 1,
       slot: 0,
@@ -429,15 +451,15 @@ function boot() {
 
   function startQuery() {
     const it = started();
-    return `?stock=${it.stock}&area=${it.area}&players=${it.players}&slot=${it.slot}`;
+    return `?money=${it.money}&area=${it.area}&players=${it.players}&slot=${it.slot}`;
   }
 
   function describe() {
     const ship = SHIPS.find((s) => s.tiles === settings.ship);
-    const store = STOCKPILES.find((s) => s.factor === settings.stockpile);
+    const purse = MONEY.find((m) => m.amount === settings.moneyPerBim);
     return [
       ["Ship", `${ship ? ship.label : "Custom"} — ${settings.ship} × ${settings.ship} tiles`],
-      ["Stores", `${store ? store.label : "Custom"} — ×${settings.stockpile}`],
+      ["Money", `${purse ? purse.label : "Custom"} — ${euros(settings.moneyPerBim)} each`],
       ["Crew", net.code ? `${net.players.length} in the lobby` : "One"],
       ["Room", net.code ?? "Solo"],
     ];

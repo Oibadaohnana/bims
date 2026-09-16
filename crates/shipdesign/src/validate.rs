@@ -21,8 +21,23 @@
 //! walks to, this list changes with it** — a ship validated against a stale
 //! list is a ship whose crew starve standing in front of the fixture that was
 //! never required.
+//!
+//! # Radiation
+//!
+//! [`exposure`] is the other half of this file and it is not a list of
+//! fixtures at all: it is a flood fill from **outside the ship** through
+//! everything that does not shield. What it reaches and finds a part in is a
+//! tile the outside can see into, and a Bim standing there is a Bim being
+//! irradiated.
+//!
+//! It is a **warning**, not an error, and it is the loudest thing on the
+//! page. A ship with a hole in it is a ship you can still fly, right up until
+//! it is not; refusing to let a player accept one would be the design phase
+//! having an opinion about how to play, and saying nothing would be letting
+//! them kill the crew by accident. So: first in the list, tinted on the deck
+//! whether or not anybody is pointing at the row, and never a refusal.
 
-use physics::Facing;
+use physics::{Facing, ResourceId};
 
 use crate::design::{Grid, ShipDesign};
 use crate::parts::{Layer, PartKind};
@@ -70,6 +85,16 @@ pub enum IssueCode {
     /// No hydroponic bay. The food aboard is all the food there will be.
     NoHydroBay = 22,
     NoBroomLocker = 23,
+    /// The outside can see in. Tiles the radiation reaches — see
+    /// [`exposure`], and the module note above for why this is a warning
+    /// rather than a refusal.
+    RadiationExposure = 24,
+    /// Nothing to eat aboard. The bay grows more, but it grows it slowly and
+    /// a crew that launches with an empty cold store is a crew eating
+    /// whatever the bay has when it runs out.
+    NoFoodAboard = 25,
+    /// Nowhere to fly the ship from.
+    NoHelm = 26,
 }
 
 impl IssueCode {
@@ -146,6 +171,9 @@ pub fn validate(design: &ShipDesign, crew_count: u32) -> Vec<Issue> {
     let grid = design.grid();
     let mut issues = Vec::new();
 
+    // First, and deliberately: it is the one fault on this list that kills
+    // people. The host paints the list in the order it arrives in.
+    radiation(design, &grid, &mut issues);
     connectivity(design, &grid, &mut issues);
     crew(design, crew_count, &mut issues);
     required(design, &mut issues);
@@ -162,14 +190,169 @@ pub fn validate(design: &ShipDesign, crew_count: u32) -> Vec<Issue> {
     issues
 }
 
+/// Where the outside can see in.
+///
+/// A flood fill from a **one-tile ring outside the build area**, 4-neighbour
+/// only, through every tile whose object-layer part does not shield. A tile
+/// the fill reaches and that holds any part at all is exposed.
+///
+/// Three things about that are load-bearing:
+///
+/// - **The ring is outside.** Starting from the edge tiles of the build area
+///   would make a ship built flush to the edge look sealed by the edge, which
+///   is a wall that does not exist.
+/// - **4-neighbour, never 8.** Two shielding parts that touch only at a
+///   corner seal that corner. Eight-way would leak through every diagonal
+///   join and no hull drawn by hand would ever pass.
+/// - **A shielding part's own tiles are never exposed**, because the fill
+///   cannot enter them. That falls out of the rule rather than being a
+///   special case: the hull is what is keeping the radiation out, so the hull
+///   is not what is being irradiated.
+///
+/// A door does **not** shield. Neither does a plain internal wall. What does
+/// is in `PartDef::shields`.
+pub fn exposure(design: &ShipDesign) -> ExposureMap {
+    let side = design.build_area;
+    let grid = design.grid();
+
+    // The fill runs over a grid one tile bigger all round, so the ring has
+    // somewhere to be. Offsets by one throughout; `at` is the only place that
+    // arithmetic happens.
+    let span = side as usize + 2;
+    let at = |(x, y): (i32, i32)| ((y + 1) as usize) * span + (x + 1) as usize;
+
+    let shields = |tile: (i32, i32)| {
+        let id = grid.get(Layer::Object, tile);
+        id != 0 && design.part(id).is_some_and(|p| p.kind.def().shields)
+    };
+
+    let mut seen = vec![false; span * span];
+    let mut stack: Vec<(i32, i32)> = Vec::new();
+    let edge = side as i32;
+    for i in -1..=edge {
+        for start in [(i, -1), (i, edge), (-1, i), (edge, i)] {
+            if !seen[at(start)] {
+                seen[at(start)] = true;
+                stack.push(start);
+            }
+        }
+    }
+
+    let mut exposed = vec![false; (side as usize) * (side as usize)];
+    let mut tiles: Vec<(u32, u32)> = Vec::new();
+    while let Some((x, y)) = stack.pop() {
+        for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+            let next = (x + dx, y + dy);
+            if next.0 < -1 || next.1 < -1 || next.0 > edge || next.1 > edge {
+                continue;
+            }
+            if seen[at(next)] || shields(next) {
+                continue;
+            }
+            seen[at(next)] = true;
+            stack.push(next);
+        }
+    }
+
+    // In row order, so the list is stable and reads the way the ship does.
+    for y in 0..side {
+        for x in 0..side {
+            let tile = (x as i32, y as i32);
+            if seen[at(tile)] && grid.occupied(tile) {
+                exposed[(y as usize) * (side as usize) + x as usize] = true;
+                tiles.push((x, y));
+            }
+        }
+    }
+
+    ExposureMap {
+        side,
+        exposed,
+        tiles,
+    }
+}
+
+/// Which tiles the outside can see into.
+///
+/// **The input the play phase wants** for radiation: a Bim standing in one of
+/// these is in the open, whatever the deck under it looks like. Nothing
+/// consumes it that way yet; the design phase draws it and warns about it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ExposureMap {
+    side: u32,
+    exposed: Vec<bool>,
+    tiles: Vec<(u32, u32)>,
+}
+
+impl ExposureMap {
+    pub fn is_empty(&self) -> bool {
+        self.tiles.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.tiles.len()
+    }
+
+    /// Every exposed tile, in row order.
+    pub fn tiles(&self) -> &[(u32, u32)] {
+        &self.tiles
+    }
+
+    pub fn side(&self) -> u32 {
+        self.side
+    }
+
+    pub fn contains(&self, (x, y): (i32, i32)) -> bool {
+        if x < 0 || y < 0 || x as u32 >= self.side || y as u32 >= self.side {
+            return false;
+        }
+        self.exposed[(y as usize) * (self.side as usize) + x as usize]
+    }
+}
+
+/// The exposure map as an issue: the tiles, and everything with a tile or a
+/// use spot in one of them.
+///
+/// Use spots are in it because a part can be perfectly well shielded and
+/// still be worked from a tile that is not — a worktop against a breached
+/// wall is a Bim standing in the open for twenty minutes a meal.
+fn radiation(design: &ShipDesign, grid: &Grid, issues: &mut Vec<Issue>) {
+    let map = exposure(design);
+    if map.is_empty() {
+        return;
+    }
+    let mut parts: Vec<u32> = parts_on(design, grid, map.tiles());
+    for part in &design.parts {
+        if parts.contains(&part.id) {
+            continue;
+        }
+        if part.use_spots().iter().any(|&spot| map.contains(spot)) {
+            parts.push(part.id);
+        }
+    }
+    parts.sort_unstable();
+    issues.push(Issue {
+        severity: Severity::Warning,
+        code: IssueCode::RadiationExposure.code(),
+        parts,
+        tiles: map.tiles().to_vec(),
+    });
+}
+
 /// Whether the design has any `Error` in it. What the Accept toggle is
 /// disabled on.
 pub fn has_errors(issues: &[Issue]) -> bool {
     issues.iter().any(|i| i.severity == Severity::Error)
 }
 
-/// One ship, not two. Every occupied tile — either layer — has to be
-/// 4-connected to every other.
+/// One ship, not two.
+///
+/// Asked of the **structure** layer and of nothing else. The frame is what
+/// the ship is; everything else stands on it, directly or through the deck,
+/// so a frame in one piece is a ship in one piece and there is no second
+/// question to ask. Before there was a structure layer this walked every
+/// occupied tile, which meant a wall touching nothing but another wall
+/// counted as holding the ship together.
 fn connectivity(design: &ShipDesign, grid: &Grid, issues: &mut Vec<Issue>) {
     let side = grid.side();
     let mut seen = vec![false; (side as usize) * (side as usize)];
@@ -178,10 +361,10 @@ fn connectivity(design: &ShipDesign, grid: &Grid, issues: &mut Vec<Issue>) {
     for y in 0..side {
         for x in 0..side {
             let i = (y as usize) * (side as usize) + x as usize;
-            if seen[i] || !grid.occupied((x as i32, y as i32)) {
+            if seen[i] || !grid.has_structure((x as i32, y as i32)) {
                 continue;
             }
-            components.push(flood(grid, &mut seen, (x, y), |g, t| g.occupied(t)));
+            components.push(flood(grid, &mut seen, (x, y), |g, t| g.has_structure(t)));
         }
     }
 
@@ -240,12 +423,11 @@ fn flood(
     out
 }
 
-/// Every part id standing in any of `tiles`, on either layer, without
-/// repeats.
+/// Every part id standing in any of `tiles`, on any layer, without repeats.
 fn parts_on(design: &ShipDesign, grid: &Grid, tiles: &[(u32, u32)]) -> Vec<u32> {
     let mut ids: Vec<u32> = Vec::new();
     for &(x, y) in tiles {
-        for layer in [Layer::Floor, Layer::Object] {
+        for layer in Layer::ALL {
             let id = grid.get(layer, (x as i32, y as i32));
             if id != 0 && design.part(id).is_some() && !ids.contains(&id) {
                 ids.push(id);
@@ -368,5 +550,15 @@ fn comforts(design: &ShipDesign, issues: &mut Vec<Issue>) {
     }
     if design.count(PartKind::BroomLocker) == 0 {
         issues.push(Issue::warning(IssueCode::NoBroomLocker));
+    }
+    if design.count(PartKind::Helm) == 0 {
+        issues.push(Issue::warning(IssueCode::NoHelm));
+    }
+    // Food is what is *aboard*, not what the ship could hold: a cold store
+    // with nothing in it feeds nobody. The bay is a separate warning and a
+    // separate problem — it makes more, slowly.
+    let food = design.carrying(ResourceId::Vegetable) + design.carrying(ResourceId::Tofu);
+    if food == 0 {
+        issues.push(Issue::warning(IssueCode::NoFoodAboard));
     }
 }

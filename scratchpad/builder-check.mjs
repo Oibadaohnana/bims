@@ -53,17 +53,30 @@ const chosenIn = (tool, field) => {
   return on ? on.dataset.option : "(none)";
 };
 
-check("stores start at ×1", chosenIn(setupTool, "stockpile") === "base", chosenIn(setupTool, "stockpile"));
+check(
+  "money starts at €100 000 a Bim",
+  chosenIn(setupTool, "moneyPerBim") === "standard",
+  chosenIn(setupTool, "moneyPerBim"),
+);
 check("the ship starts at 40 × 40", chosenIn(setupTool, "ship") === "standard", chosenIn(setupTool, "ship"));
 
 const optionIn = (tool, field, id) =>
   tool.querySelector(`[data-field=${field}] [data-option=${id}]`);
 
 // Every option offered is one of the three the game knows about, in order.
-const storeLabels = setupTool
-  .querySelectorAll("[data-field=stockpile] .option .sub")
+// The euro sign and the grouping are read off the page rather than written
+// out here: they exist in exactly one place in the host and a copy down here
+// would be a second one to keep in step.
+const moneyLabels = setupTool
+  .querySelectorAll("[data-field=moneyPerBim] .option .sub")
   .map((s) => s.textContent);
-check("stores offer ×0.5, ×1, ×2", storeLabels.join(" ") === "×0.5 ×1 ×2", storeLabels.join(" "));
+const bare = moneyLabels.map((t) => t.replace(/[^0-9]/g, ""));
+check("money offers 50 000, 100 000 and 200 000", bare.join(" ") === "50000 100000 200000", moneyLabels.join(" "));
+check(
+  "and says so in euros",
+  moneyLabels.every((t) => t.startsWith("€")),
+  moneyLabels.join(" "),
+);
 const shipLabels = setupTool
   .querySelectorAll("[data-field=ship] .option .sub")
   .map((s) => s.textContent);
@@ -73,9 +86,13 @@ check(
   shipLabels.join(" "),
 );
 
-optionIn(setupTool, "stockpile", "double").dispatch("click");
+optionIn(setupTool, "moneyPerBim", "full").dispatch("click");
 optionIn(setupTool, "ship", "large").dispatch("click");
-check("picking ×2 sticks", chosenIn(setupTool, "stockpile") === "double", chosenIn(setupTool, "stockpile"));
+check(
+  "picking €200 000 sticks",
+  chosenIn(setupTool, "moneyPerBim") === "full",
+  chosenIn(setupTool, "moneyPerBim"),
+);
 check("picking 60 × 60 sticks", chosenIn(setupTool, "ship") === "large", chosenIn(setupTool, "ship"));
 
 // The World tab is a real tab with a placeholder behind it, not an empty box.
@@ -111,12 +128,35 @@ check(
 // One settings object behind both tools: what was picked on the setup screen
 // is what the lobby shows.
 const lobbyTool = byId.get("lobby-tool");
-check("the lobby carries the ×2 picked earlier", chosenIn(lobbyTool, "stockpile") === "double", chosenIn(lobbyTool, "stockpile"));
+check(
+  "the lobby carries the €200 000 picked earlier",
+  chosenIn(lobbyTool, "moneyPerBim") === "full",
+  chosenIn(lobbyTool, "moneyPerBim"),
+);
 check("and the 60 × 60 ship", chosenIn(lobbyTool, "ship") === "large", chosenIn(lobbyTool, "ship"));
 
 // As host you can still change them.
-optionIn(lobbyTool, "stockpile", "half").dispatch("click");
-check("the host can change a setting", chosenIn(lobbyTool, "stockpile") === "half", chosenIn(lobbyTool, "stockpile"));
+optionIn(lobbyTool, "moneyPerBim", "lean").dispatch("click");
+check(
+  "the host can change a setting",
+  chosenIn(lobbyTool, "moneyPerBim") === "lean",
+  chosenIn(lobbyTool, "moneyPerBim"),
+);
+
+// A guest cannot. Nothing decides who is a guest yet — the host is always
+// you — but `setEditable` disables every option for one, and the click
+// handler refuses a disabled button rather than leaning on the browser to
+// swallow the event. Disabling the button is exactly what a guest's lobby
+// does to it, so this is that path and not a mock of it.
+const full = optionIn(lobbyTool, "moneyPerBim", "full");
+full.disabled = true;
+full.dispatch("click");
+check(
+  "a guest cannot change the money",
+  chosenIn(lobbyTool, "moneyPerBim") === "lean",
+  chosenIn(lobbyTool, "moneyPerBim"),
+);
+full.disabled = false;
 
 check("the lobby admits nothing can reach it", byId.get("lobby-said").textContent.length > 0);
 
@@ -150,7 +190,7 @@ check("Start shows the handover", showing().join() === "build", showing().join()
 
 const said = byId.get("chosen").textContent;
 check("it names the ship that was chosen", said.includes("60 × 60"), said);
-check("and the stores", said.includes("×0.5"), said);
+check("and the money each Bim brings", /50.?000/.test(said) && said.includes("€"), said);
 
 // And then it actually goes there. The designer is a page of its own, so
 // Start is a navigation — and what crosses is **numbers in a query string**,
@@ -165,7 +205,7 @@ const query = new Map(
     .split("&")
     .map((pair) => pair.split("=")),
 );
-check("it carries the stockpile factor", query.get("stock") === "0.5", went);
+check("it carries the money each Bim brings", query.get("money") === "50000", went);
 check("and the build area in tiles", query.get("area") === "60", went);
 check("and how many are playing", query.get("players") === "1", went);
 check("and which slot you are", query.get("slot") === "0", went);

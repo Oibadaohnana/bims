@@ -1,5 +1,5 @@
-//! The design phase as a state machine: one design, one budget, one camera,
-//! and everybody's Accept.
+//! The design phase as a state machine: one design, one pool of money, one
+//! camera, and everybody's Accept.
 //!
 //! Every rule about what may be placed where is in `shipdesign` and none of
 //! it is repeated here. What is here is the part that only makes sense with a
@@ -15,10 +15,13 @@
 //! is the whole of the protocol: there is no way to be holding an Accept for
 //! a ship that is no longer on screen.
 
+use physics::ResourceId;
 use shipdesign::design::{Edit, EditError};
 use shipdesign::parts::{Layer, PartKind, Rotation, footprint};
-use shipdesign::validate::Issue;
-use shipdesign::{Budget, ShipDesign, apply, design_hash, validate};
+use shipdesign::validate::{ExposureMap, Issue};
+use shipdesign::{
+    Budget, Money, ShipDesign, apply, design_hash, exposure, starting_pool, validate,
+};
 
 use crate::view::View;
 
@@ -71,13 +74,26 @@ pub struct Editor {
     pub focus: Option<usize>,
 
     issues: Vec<Issue>,
+    /// Where the outside can see in. Kept beside the issues and refreshed
+    /// with them: the painter tints it every frame and working it out sixty
+    /// times a second for a ship nobody is changing would be a flood fill a
+    /// frame for nothing.
+    exposed: ExposureMap,
     hash: u64,
 }
 
 impl Editor {
+    /// Open a design phase.
+    ///
+    /// The pool is worked out **here and once**: every Bim's money, plus the
+    /// lone player's bonus, through the one function in `economy` that a
+    /// native server would use as well. A pool that could not be worked out —
+    /// a crew of nobody, or a figure so large it overflows — is nothing to
+    /// spend rather than a panic: a cdylib that panics aborts, and an abort
+    /// tells the player nothing at all.
     pub fn new(
         area: u32,
-        stock_permille: u32,
+        money_per_bim: Money,
         players: u32,
         local: u32,
         width: f32,
@@ -87,9 +103,10 @@ impl Editor {
         let design = ShipDesign::new(area.max(1));
         let hash = design_hash(&design);
         let issues = validate(&design, players);
+        let exposed = exposure(&design);
         Editor {
             design,
-            budget: Budget::from_factor(stock_permille),
+            budget: Budget::new(starting_pool(money_per_bim, players).unwrap_or(0)),
             view: View::new(area.max(1), width, height),
             players,
             local: local.min(players - 1),
@@ -101,6 +118,7 @@ impl Editor {
             drag: None,
             focus: None,
             issues,
+            exposed,
             hash,
         }
     }
@@ -113,6 +131,12 @@ impl Editor {
         &self.issues
     }
 
+    /// Which tiles the outside can see into. What the painter tints, and
+    /// what stage 5 will one day be handed.
+    pub fn exposed(&self) -> &ExposureMap {
+        &self.exposed
+    }
+
     pub fn has_errors(&self) -> bool {
         shipdesign::has_errors(&self.issues)
     }
@@ -123,6 +147,7 @@ impl Editor {
     fn refresh(&mut self) {
         self.hash = design_hash(&self.design);
         self.issues = validate(&self.design, self.players);
+        self.exposed = exposure(&self.design);
         self.focus = None;
         // A ship that has changed is a ship nobody has accepted.
         for slot in &mut self.accepts {
@@ -152,6 +177,24 @@ impl Editor {
 
     pub fn remove(&mut self, part_id: u32) -> u32 {
         self.edit(Edit::Remove { part_id })
+    }
+
+    /// Take goods aboard, or put them back. `0` means it took; anything else
+    /// is an [`EditError`] code, exactly as for a part — a purchase is an
+    /// edit, so it goes through the same door and clears everybody's Accept
+    /// the same way.
+    pub fn buy(&mut self, resource: u32, units: u32) -> u32 {
+        match ResourceId::ALL.get(resource as usize).copied() {
+            Some(resource) => self.edit(Edit::Buy { resource, units }),
+            None => EditError::BadCode.code(),
+        }
+    }
+
+    pub fn sell(&mut self, resource: u32, units: u32) -> u32 {
+        match ResourceId::ALL.get(resource as usize).copied() {
+            Some(resource) => self.edit(Edit::Sell { resource, units }),
+            None => EditError::BadCode.code(),
+        }
     }
 
     fn edit(&mut self, edit: Edit) -> u32 {
@@ -290,16 +333,22 @@ impl Editor {
     /// the way it is read.
     ///
     /// The shape depends on the tool, which is the whole of the drag
-    /// vocabulary: a rectangle for deck and for taking things off, a straight
-    /// line for walls, and one tile for everything else — a cold store is
-    /// placed, not painted.
+    /// vocabulary: a rectangle for the things you fill an area with — frame,
+    /// deck, conduit — and for taking things off, a straight line for the
+    /// things you draw a run of, which is both kinds of wall, and one tile
+    /// for everything else. A cold store is placed, not painted.
     pub fn drag_tiles(&self) -> Vec<(u32, u32)> {
         let Some(drag) = self.drag else {
             return Vec::new();
         };
-        let cells = if drag.removing || self.tool == PartKind::Floor {
+        let area = matches!(
+            self.tool,
+            PartKind::Structure | PartKind::Floor | PartKind::PowerConduit
+        );
+        let run = matches!(self.tool, PartKind::Wall | PartKind::OutsideWall);
+        let cells = if drag.removing || area {
             rectangle(drag.from, drag.to)
-        } else if self.tool == PartKind::Wall {
+        } else if run {
             straight_line(drag.from, drag.to)
         } else {
             vec![drag.to]
@@ -311,18 +360,24 @@ impl Editor {
             .collect()
     }
 
-    /// The parts a removing drag would take off, **objects first and deck
-    /// afterwards**.
+    /// The parts a removing drag would take off, **from the top of the stack
+    /// down**: what is standing in the tile and what runs through it, then
+    /// the deck under those, then the frame under that.
     ///
     /// That order is the whole reason this is worked out here rather than in
-    /// the host: the other way round, every floor tile with something on it
-    /// is refused as `FloorUnderObject`, and a right-drag over the galley
-    /// would leave the deck behind and look like it had half worked.
+    /// the host: any other way round, every tile with something on it is
+    /// refused as `SupportInUse`, and a right-drag over the galley would
+    /// leave the deck and the frame behind and look like it had half worked.
     pub fn drag_parts(&self) -> Vec<u32> {
         let tiles = self.drag_tiles();
         let grid = self.design.grid();
         let mut out: Vec<u32> = Vec::new();
-        for layer in [Layer::Object, Layer::Floor] {
+        for layer in [
+            Layer::Utility,
+            Layer::Object,
+            Layer::Floor,
+            Layer::Structure,
+        ] {
             let mut ids: Vec<u32> = Vec::new();
             for &(x, y) in &tiles {
                 let id = grid.get(layer, (x as i32, y as i32));

@@ -1,16 +1,21 @@
 # The workspace. Nothing is built from here directly — every crate is in
 # `crates/`:
 #
-#   game      the room: the simulation and its wasm exports. The cdylib.
-#   worldgen  the galaxy, systems and station blueprints. Client and server.
-#   physics   ship mass, engine thrust and travel time. Pure arithmetic.
-#   time      how long a minute, an hour and a day are. Defined once.
+#   game        the room: the simulation and its wasm exports. A cdylib.
+#   ship        the design phase in the browser. The other cdylib.
+#   shipdesign  what a ship is made of and the rules for building one.
+#   worldgen    the galaxy, systems and station blueprints. Client and server.
+#   physics     ship mass, engine thrust and travel time. Pure arithmetic.
+#   economy     money: whole euros and the crew's one shared pool.
+#   health      one body: its health, what is wrong with it, and what that costs.
+#   time        how long a minute, an hour and a day are. Defined once.
 #
 # The split is not tidiness. `worldgen` has to produce the same world on the
-# wasm client and on the native server that will one day be authoritative, and
+# wasm client and on the native server that will one day be authoritative,
 # `physics` has to give the same answers to the world generator now that it
-# gives the builder and the flight step later. Two implementations of either
-# would be two different games.
+# gives the builder and the flight step later, and `shipdesign` and `economy`
+# have to admit the same ships and charge the same prices on both. Two
+# implementations of any of them would be two different games.
 [workspace]
 members = ["crates/*"]
 resolver = "3"

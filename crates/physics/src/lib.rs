@@ -84,8 +84,8 @@ impl Mass {
 /// What a cargo manifest weighs: units of each resource times what a unit of
 /// it weighs.
 ///
-/// Only what is **physically on the ship** belongs in the manifest. A
-/// station's stockpile is not the ship's mass however much of it the crew
+/// Only what is **physically on the ship** belongs in the manifest. A crate
+/// standing on a station is not the ship's mass however much of it the crew
 /// intend to use — it counts from the moment it is loaded and not before.
 pub fn cargo_mass(cargo: &[(ResourceId, u32)]) -> f64 {
     cargo

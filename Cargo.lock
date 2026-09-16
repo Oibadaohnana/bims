@@ -10,6 +10,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "economy"
+version = "0.1.0"
+dependencies = [
+ "physics",
+]
+
+[[package]]
+name = "health"
+version = "0.1.0"
+dependencies = [
+ "time",
+]
+
+[[package]]
 name = "physics"
 version = "0.1.0"
 dependencies = [
@@ -20,6 +34,7 @@ dependencies = [
 name = "ship"
 version = "0.1.0"
 dependencies = [
+ "economy",
  "physics",
  "shipdesign",
 ]
@@ -28,6 +43,7 @@ dependencies = [
 name = "shipdesign"
 version = "0.1.0"
 dependencies = [
+ "economy",
  "physics",
 ]
 

@@ -13,15 +13,20 @@
 use physics::{EngineSpec, Facing, Mass, MassError};
 
 use crate::design::ShipDesign;
-use crate::parts::PartKind;
+use crate::parts::{PartKind, part_mass};
 
-/// Every part welded to the hull, added up.
+/// Every part welded to the hull, added up. The frame, the plating and
+/// everything standing on it — but **not** what is in the hold; that is
+/// [`ShipDesign::manifest`] and it is added separately in [`ship_mass`].
 ///
-/// The remaining stockpile is **not** in here. It stays at the station: a
-/// design is a promise about what to build, not a manifest of what is aboard,
-/// and loading cargo is a thing that does not exist yet.
+/// A part weighs its recipe, through [`part_mass`], which is what makes this
+/// figure and the manifest two readings of the same materials: build a wall
+/// out of the hold and this goes up by exactly what the manifest goes down
+/// by. See [`crate::materials`].
+///
+/// What is left in the pool is not in either. Money is not cargo.
 pub fn hull_mass(design: &ShipDesign) -> f64 {
-    design.parts.iter().map(|p| p.kind.def().mass).sum()
+    design.parts.iter().map(|p| part_mass(p.kind)).sum()
 }
 
 /// The engines, as `physics` wants them: a thrust and a direction of push.
@@ -41,14 +46,19 @@ pub fn engines(design: &ShipDesign) -> Vec<EngineSpec> {
         .collect()
 }
 
-/// What the ship weighs with its crew aboard and nothing in the hold.
+/// What the ship weighs: the hull, the crew aboard, and **what is in the
+/// hold**.
+///
+/// The cargo is bought during the design phase and it is aboard from the
+/// moment it is bought — a player who fills the tanks has a heavier ship and
+/// should see the acceleration say so before they accept it, not after.
 ///
 /// An empty design comes back as [`MassError::HullTooLight`] rather than as
 /// zero, because `physics` refuses a ship that weighs nothing — one would
 /// accelerate infinitely, and rounding it up would hide whatever lost the
 /// parts.
 pub fn ship_mass(design: &ShipDesign, crew_count: u32) -> Result<Mass, MassError> {
-    physics::ship_mass(hull_mass(design), &[], crew_count)
+    physics::ship_mass(hull_mass(design), &design.manifest(), crew_count)
 }
 
 /// How hard the ship accelerates along one of its own axes, or `None` if it

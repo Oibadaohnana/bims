@@ -35,9 +35,10 @@ const SPOT: Color = Color::rgba(0.98, 0.82, 0.35, 0.85);
 /// One colour per [`PartKind`], indexed by discriminant. `PARTS` order, and
 /// the same order the palette is built in.
 ///
-/// Index 0 is the deck, which is drawn as a tile rather than as an object; it
-/// is in the table anyway so the palette button for it has a swatch.
-pub static PART_COLORS: [Color; 15] = [
+/// Index 0 is the deck and index 15 is the frame; both are drawn as tiles
+/// rather than as objects, and both are in the table anyway so the palette
+/// buttons for them have swatches.
+pub static PART_COLORS: [Color; 27] = [
     Color::rgb(0.13, 0.15, 0.18), // Floor
     Color::rgb(0.30, 0.34, 0.40), // Wall
     Color::rgb(0.38, 0.86, 0.95), // Door
@@ -53,7 +54,28 @@ pub static PART_COLORS: [Color; 15] = [
     Color::rgb(0.64, 0.72, 0.78), // Basin
     Color::rgb(0.40, 0.66, 0.30), // HydroBay
     Color::rgb(0.50, 0.42, 0.30), // BroomLocker
+    Color::rgb(0.22, 0.24, 0.27), // Structure — the frame, darker than deck
+    Color::rgb(0.46, 0.52, 0.58), // OutsideWall — hull, paler than a wall
+    Color::rgb(0.38, 0.72, 0.86), // Helm
+    Color::rgb(0.86, 0.62, 0.24), // Reactor
+    Color::rgb(0.74, 0.66, 0.22), // PowerConduit
+    Color::rgb(0.62, 0.58, 0.30), // Battery
+    Color::rgb(0.40, 0.48, 0.58), // FuelTank
+    Color::rgb(0.34, 0.62, 0.52), // LifeSupport
+    Color::rgb(0.58, 0.68, 0.74), // Airlock
+    Color::rgb(0.70, 0.74, 0.80), // SensorArray
+    Color::rgb(0.48, 0.44, 0.36), // Shelf
+    Color::rgb(0.60, 0.70, 0.76), // Shower
 ];
+
+/// The frame, drawn as the tile under everything. Dimmer than the deck and
+/// without its edge, so a floored tile still reads as floored.
+const FRAME: Color = Color::rgb(0.10, 0.11, 0.13);
+const FRAME_EDGE: Color = Color::rgba(0.55, 0.85, 0.95, 0.06);
+
+/// A conduit: a thin run across the tile rather than a block, because
+/// something else can be standing on the same tile.
+const CONDUIT: Color = Color::rgba(0.74, 0.66, 0.22, 0.75);
 
 /// Tile coordinates to world units.
 fn world(tile: i32) -> f32 {
@@ -70,8 +92,14 @@ pub fn paint(editor: &Editor, list: &mut DrawList) {
     list.box_between(0.0, 0.0, span, span, 0.0, AREA);
 
     seams(editor, list, span);
+    frame(editor, list);
     deck(editor, list);
+    conduit(editor, list);
     objects(editor, list);
+    // Before the faults, so an issue outline is still legible over it, and
+    // after the parts, so it reads as a wash over the ship rather than as
+    // something underneath it.
+    radiation(editor, list);
     faults(editor, list);
     pointed_at(editor, list);
     ghost(editor, list);
@@ -90,6 +118,55 @@ fn seams(editor: &Editor, list: &mut DrawList, span: f32) {
     list.stroke_between(0.0, 0.0, span, span, 0.0, 2.0, AREA_EDGE);
 }
 
+/// The frame, under everything. Drawn for its own tiles whether or not
+/// there is deck on them: a half-built ship is mostly bare frame and it has
+/// to be visible to be built on.
+fn frame(editor: &Editor, list: &mut DrawList) {
+    let t = TILE as f32;
+    for part in &editor.design.parts {
+        if part.layer() != Layer::Structure {
+            continue;
+        }
+        for (x, y) in part.tiles() {
+            let (x0, y0) = (world(x as i32), world(y as i32));
+            list.box_between(x0, y0, x0 + t, y0 + t, 0.0, FRAME);
+            list.stroke_between(x0, y0, x0 + t, y0 + t, 0.0, 1.0, FRAME_EDGE);
+        }
+    }
+}
+
+/// What runs through a tile rather than filling it. A cross, so it reads as
+/// a run of conduit and is still visible under whatever is standing on it.
+fn conduit(editor: &Editor, list: &mut DrawList) {
+    let t = TILE as f32;
+    let thick = 4.0;
+    for part in &editor.design.parts {
+        if part.layer() != Layer::Utility {
+            continue;
+        }
+        for (x, y) in part.tiles() {
+            let (x0, y0) = (world(x as i32), world(y as i32));
+            let (cx, cy) = (x0 + t / 2.0, y0 + t / 2.0);
+            list.box_between(x0, cy - thick / 2.0, x0 + t, cy + thick / 2.0, 0.0, CONDUIT);
+            list.box_between(cx - thick / 2.0, y0, cx + thick / 2.0, y0 + t, 0.0, CONDUIT);
+        }
+    }
+}
+
+/// Where the outside can see in, washed over the tiles it reaches.
+///
+/// **Not tied to the issue list.** Every other highlight on this page waits
+/// for a pointer to rest on a row; this one does not, because a player who
+/// has not looked at the checks panel is exactly the player about to accept a
+/// ship with a hole in it.
+fn radiation(editor: &Editor, list: &mut DrawList) {
+    let t = TILE as f32;
+    for &(x, y) in editor.exposed().tiles() {
+        let (x0, y0) = (world(x as i32), world(y as i32));
+        list.box_between(x0, y0, x0 + t, y0 + t, 0.0, WARN.alpha(0.22));
+    }
+}
+
 fn deck(editor: &Editor, list: &mut DrawList) {
     let t = TILE as f32;
     for part in &editor.design.parts {
@@ -106,7 +183,7 @@ fn deck(editor: &Editor, list: &mut DrawList) {
 
 fn objects(editor: &Editor, list: &mut DrawList) {
     for part in &editor.design.parts {
-        if part.layer() == Layer::Floor {
+        if part.layer() != Layer::Object {
             continue;
         }
         let (w, h) = footprint(part.kind, part.rotation);
@@ -171,6 +248,14 @@ fn faults(editor: &Editor, list: &mut DrawList) {
             Severity::Warning => GLOW,
         };
         let focused = editor.focus == Some(i);
+        // Radiation already has the whole deck washed in `radiation` above.
+        // Outlining its tiles as well would put a cyan box round every tile
+        // of an unhulled ship — a grid of markers over a wash, saying the
+        // same thing twice and making neither legible. Resting on the row
+        // still rings them, which is what the highlight is for.
+        if issue.code == shipdesign::IssueCode::RadiationExposure.code() && !focused {
+            continue;
+        }
         for &(x, y) in &issue.tiles {
             let (x0, y0) = (world(x as i32), world(y as i32));
             if focused {

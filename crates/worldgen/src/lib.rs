@@ -22,9 +22,11 @@
 //!    inside systems must never move a star, because a player learns the map
 //!    long before they learn a system. [`rng::Purpose`] is how that is
 //!    enforced rather than merely intended.
-//! 2. **A galaxy is a seed, a type and a version.** Nothing else. The lobby's
-//!    stockpile multiplier scales what is in the crates and touches nothing
-//!    else at all — see [`system::WorldSettings`].
+//! 2. **A galaxy is a seed, a type and a version.** Nothing else, and no
+//!    lobby setting reaches in at all. There was one — a multiplier on what a
+//!    station had in its stores — and it went with the stores themselves when
+//!    the crew started bringing money instead; `a_seed_and_a_type_are_the_whole_of_the_input`
+//!    in [`system`] is what keeps it that way.
 //! 3. **Distances are in days, not units.** Every layout rule is written
 //!    against [`data::REFERENCE_SHIP`], which is fixed and is not anybody's
 //!    actual ship. [`layout`] is the specification; [`system`] is the
@@ -50,7 +52,7 @@ pub use galaxy::{Galaxy, GalaxyType, Star, StarClass};
 pub use layout::Fault;
 pub use math::DVec2;
 pub use name::Name;
-pub use system::{Body, Node, StarSystem, StationBlueprint, WorldSettings};
+pub use system::{Body, Node, StarSystem, StationBlueprint};
 
 /// Which generation this world was made by.
 ///
@@ -60,4 +62,4 @@ pub use system::{Body, Node, StarSystem, StationBlueprint, WorldSettings};
 /// that alters where anything is has to be declared, because the alternative
 /// is two players on different builds walking around what they both think is
 /// the same station.
-pub const GENERATOR_VERSION: u32 = 1;
+pub const GENERATOR_VERSION: u32 = 2;

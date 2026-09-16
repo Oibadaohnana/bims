@@ -14,9 +14,10 @@
 //!
 //! # The two phases
 //!
-//! **Design** — this crate. Placing and removing is instant, paid out of the
-//! station's stockpile, checked by [`validate`], and finished when every
-//! player has accepted the same [`design_hash`]. No Bims exist.
+//! **Design** — this crate. Placing, removing, buying and selling are all
+//! instant, all paid out of the crew's shared pool of money, checked by
+//! [`validate`], and finished when every player has accepted the same
+//! [`design_hash`]. No Bims exist.
 //!
 //! **Play** — stage 5, not written. Bims spawn, and every later change has to
 //! be constructed or deconstructed by one of them.
@@ -50,28 +51,56 @@
 //!   lobby-slot order. Which is why ids only ever climb and a removed one is
 //!   never reissued.
 //! - **After Accept, nothing is instant.** Every change is a Bim's work:
-//!   construction or deconstruction. The stockpile stops being a budget and
-//!   becomes something that has to be hauled.
+//!   construction or deconstruction. Money stops being a budget to draw a
+//!   ship against and becomes something that has to be earned and spent
+//!   somewhere.
+//! - **[`validate::ExposureMap`] is the input for radiation.** Which tiles
+//!   the outside can see into is worked out here and handed over; what it
+//!   does to a Bim standing in one — over what time, with what effect on
+//!   health — is the play phase's and is not decided.
+//! - **What is bought is stowed where its class says.** Food in a cold
+//!   store, fuel in a tank, everything else on a shelf; `economy::storage` is
+//!   the mapping and `PartDef::capacity` is what provides each class. A play
+//!   phase that moves a crate of ore into the fridge has broken the contract
+//!   the purchase was checked against.
+//! - **The money left over carries into the play phase.** It is not spent at
+//!   Accept and it is not converted into anything: it is what the crew have
+//!   in hand when they undock. It is only **spendable while docked**, and the
+//!   design phase is docked at the spawn station — which is the whole reason
+//!   everything in it is instant. Out between stations there is nothing to
+//!   buy from, and a part comes out of the hold or does not get built.
+//! - **Mass is conserved.** A part weighs its recipe and nothing else, so
+//!   construction moves materials from the hold into the hull and
+//!   deconstruction moves all of them back. [`materials`] is the contract and
+//!   the two functions that keep it; the play phase has to build on the same
+//!   rule or a ship will change weight by being rebuilt.
 //!
 //! # What is deliberately absent
 //!
 //! Power, oxygen and airtightness, engine exhaust clearance, ship rotation,
-//! construction labour, hauling, undo, and the final art. A part has a mass,
-//! a cost, a footprint and somewhere to stand — and nothing else, because
-//! every field that exists is a field something has to keep true.
+//! construction labour, hauling, construction sites, scrap, undo, and the
+//! final art. A part has a recipe, a price, a footprint and somewhere to
+//! stand — and nothing else, because every field that exists is a field
+//! something has to keep true.
 
 pub mod budget;
 pub mod design;
 pub mod fixture;
 pub mod mass;
+pub mod materials;
 pub mod parts;
 pub mod validate;
 
-pub use budget::{BASE_STOCKPILE, Budget, RESOURCE_COUNT};
-pub use design::{Edit, EditError, Grid, PlacedPart, ShipDesign, apply, design_hash};
+pub use budget::Budget;
+pub use design::{CARGO_SLOTS, Edit, EditError, Grid, PlacedPart, ShipDesign, apply, design_hash};
+// Money and what a station sells are the design phase's units, so they are
+// re-exported here rather than leaving every caller to depend on `economy`
+// for the sake of a type and two lookups.
+pub use economy::{Money, Storage, starting_pool, storage, trade_price, trade_value};
 pub use mass::{acceleration, hull_mass, ship_mass};
-pub use parts::{Layer, PartDef, PartKind, Rotation, TILE};
-pub use validate::{Issue, IssueCode, Severity, has_errors, validate};
+pub use materials::{bound_materials, build_from_cargo, deconstruct_to_cargo};
+pub use parts::{Layer, PartDef, PartKind, Rotation, TILE, part_mass};
+pub use validate::{ExposureMap, Issue, IssueCode, Severity, exposure, has_errors, validate};
 
 #[cfg(test)]
 mod tests;

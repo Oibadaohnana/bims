@@ -23,12 +23,24 @@ pub const PLAYER_MASS: f64 = 100.0;
 /// nothing is a bug upstream and quietly rounding it up would hide that.
 pub const MIN_HULL_MASS: f64 = 1.0;
 
-/// What a ship can be built from and carry. Four, no production chains, and
-/// no recipe anywhere — an id and what a unit of it weighs is the whole of
-/// what this step needs.
+/// What a ship can be built from and carry. Six, no production chains, and
+/// no recipe **here** — an id and what a unit of it weighs is the whole of
+/// what this crate needs. What a given part is made of is
+/// `shipdesign::PartDef::recipe`, which is a fact about a part, and this
+/// crate deliberately knows nothing about parts. A part weighs its recipe
+/// added up out of the masses below, so building one moves mass from the hold
+/// into the hull without changing the total.
+///
+/// The first four are materials and the last two are food. Food is here
+/// rather than somewhere of its own because it is **cargo**: it is bought at
+/// a station, it is stowed in a cold store, and the engines have to push it
+/// like anything else. What makes it food rather than metal is where it is
+/// stowed and what a Bim does with it, and neither of those is this crate's
+/// business — see `economy::storage`.
 ///
 /// The discriminants are written out because they cross the wasm boundary as
 /// numbers one day, and a reordered enum must not silently renumber a save.
+/// **0 to 3 are fixed** and a new resource is appended.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u32)]
 pub enum ResourceId {
@@ -36,16 +48,20 @@ pub enum ResourceId {
     Metal = 1,
     Fuel = 2,
     Components = 3,
+    Vegetable = 4,
+    Tofu = 5,
 }
 
 impl ResourceId {
     /// Every resource, in discriminant order. `ALL[id as usize].id == id`,
     /// which [`ResourceId::def`] relies on and [`defs_are_sound`] checks.
-    pub const ALL: [ResourceId; 4] = [
+    pub const ALL: [ResourceId; 6] = [
         ResourceId::Ore,
         ResourceId::Metal,
         ResourceId::Fuel,
         ResourceId::Components,
+        ResourceId::Vegetable,
+        ResourceId::Tofu,
     ];
 
     pub fn def(self) -> &'static ResourceDef {
@@ -70,8 +86,10 @@ pub struct ResourceDef {
 }
 
 /// The table. Ore is the raw rock, metal is what it refines to, fuel is
-/// lighter than either and components are light and fiddly.
-pub static RESOURCES: [ResourceDef; 4] = [
+/// lighter than either and components are light and fiddly. A crate of
+/// vegetables and a block of tofu are lighter again — a week's meals for two
+/// weighs less than one girder, which is the relation that matters.
+pub static RESOURCES: [ResourceDef; 6] = [
     ResourceDef {
         id: ResourceId::Ore,
         mass_per_unit: 10.0,
@@ -87,6 +105,14 @@ pub static RESOURCES: [ResourceDef; 4] = [
     ResourceDef {
         id: ResourceId::Components,
         mass_per_unit: 2.0,
+    },
+    ResourceDef {
+        id: ResourceId::Vegetable,
+        mass_per_unit: 0.5,
+    },
+    ResourceDef {
+        id: ResourceId::Tofu,
+        mass_per_unit: 0.5,
     },
 ];
 

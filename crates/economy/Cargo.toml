@@ -1,0 +1,18 @@
+# Money: what the crew bring aboard, and the arithmetic that adds it up.
+#
+# Pure. A pool of euros is the one number the design phase spends against, and
+# a native server has to arrive at exactly the same figure as the wasm the
+# players are running, so everything in here is integer arithmetic on `u64`
+# with no rounding, no floats and no saturation anywhere.
+#
+# It depends on `physics` for `ResourceId` and on nothing else. A price and a
+# storage class are facts *about a resource*, and the alternative — a second
+# enum of the same six things — is two lists to keep in step.
+[package]
+name = "economy"
+version = "0.1.0"
+edition = "2024"
+description = "Money — whole euros, the shared pool, and the arithmetic that must not wrap"
+
+[dependencies]
+physics = { path = "../physics" }

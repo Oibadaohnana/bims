@@ -7,10 +7,11 @@
 // PNG. After any change to crates/ship/src/paint.rs this is worth thirty
 // seconds.
 //
-//   node scratchpad/ship-layout.mjs empty   > /tmp/ship.svg
-//   node scratchpad/ship-layout.mjs ship    > /tmp/ship.svg
-//   node scratchpad/ship-layout.mjs ghost   > /tmp/ship.svg
-//   node scratchpad/ship-layout.mjs spots   > /tmp/ship.svg
+//   node scratchpad/ship-layout.mjs empty    > /tmp/ship.svg
+//   node scratchpad/ship-layout.mjs ship     > /tmp/ship.svg
+//   node scratchpad/ship-layout.mjs ghost    > /tmp/ship.svg
+//   node scratchpad/ship-layout.mjs spots    > /tmp/ship.svg
+//   node scratchpad/ship-layout.mjs exposure > /tmp/ship.svg
 //
 // It writes the SVG to stdout and a line about what it caught to stderr, so a
 // redirect gives a clean file.
@@ -33,12 +34,16 @@ const TOILET = 11;
 const BASIN = 12;
 const HYDRO_BAY = 13;
 const BROOM_LOCKER = 14;
+const STRUCTURE = 15;
+const OUTSIDE_WALL = 16;
+const HELM = 17;
+const POWER_CONDUIT = 19;
 
 const page = await bootWasmPage({
   html: "web/ship.html",
   host: "web/ship.js",
   wasm: "web/ship.wasm",
-  search: "?stock=1&area=20&players=1&slot=0",
+  search: "?money=100000&area=20&players=1&slot=0",
 });
 const { byId, root, wasm } = page;
 const canvas = byId.get("stage");
@@ -67,13 +72,21 @@ function put(kind, tx, ty) {
 }
 
 function buildShip() {
+  // Frame one tile wider than the deck, because the hull stands on it.
+  pick(STRUCTURE);
+  drag(1, 1, 18, 18);
   pick(FLOOR);
   drag(2, 2, 17, 17);
-  pick(WALL);
+  pick(OUTSIDE_WALL);
   drag(1, 1, 18, 1);
   drag(1, 18, 18, 18);
   drag(1, 1, 1, 18);
   drag(18, 1, 18, 18);
+  // A run of conduit down the middle, to see it drawn under what stands on
+  // it rather than instead of it.
+  pick(POWER_CONDUIT);
+  drag(9, 4, 9, 16);
+  put(HELM, 6, 6);
   put(COLD_STORE, 3, 3);
   put(WORKTOP, 5, 3);
   put(HOB, 8, 3);
@@ -94,19 +107,53 @@ if (WHEN === "empty") {
 } else if (WHEN === "ghost") {
   // A turned engine hanging over the edge of the deck: the ghost should be
   // red, and the use spot should be north of it rather than west.
+  //
+  // The frame reaches further than the deck on purpose: bare frame has to
+  // read as *something built* rather than as empty build area, and this is
+  // the only view that shows the two side by side.
+  pick(STRUCTURE);
+  drag(2, 2, 14, 14);
   pick(FLOOR);
   drag(2, 2, 10, 10);
   pick(ENGINE);
   page.fire("keydown", { key: "r" });
   canvas.dispatch("pointermove", at(9, 6));
-  caught = "a turned engine half off the deck — the ghost is refused";
+  caught =
+    "a turned engine half off the deck — the ghost is refused, with bare " +
+    "frame beyond the plating";
 } else if (WHEN === "spots") {
   // Resting on a placed part: it is ringed, and its use spots are marked.
+  pick(STRUCTURE);
+  drag(2, 2, 12, 12);
   pick(FLOOR);
   drag(2, 2, 12, 12);
   put(ENGINE, 6, 5);
   canvas.dispatch("pointermove", at(7, 6));
   caught = "the pointer on an engine — ringed, with the tile it is used from";
+} else if (WHEN === "exposure") {
+  // A room with a hole in its hull. The tint over every tile the outside can
+  // see into is the one piece of this page nothing else can show: it is not
+  // tied to the issue list, so there is no row to point at and no assertion
+  // that can tell you it looks right.
+  pick(STRUCTURE);
+  drag(3, 3, 14, 14);
+  pick(FLOOR);
+  drag(4, 4, 13, 13);
+  pick(OUTSIDE_WALL);
+  drag(3, 3, 14, 3);
+  drag(3, 14, 14, 14);
+  drag(3, 3, 3, 14);
+  drag(14, 3, 14, 14);
+  // Two holes: one in the wall, and an internal wall that is not hull, so
+  // the far room stays lit through it.
+  drag(8, 3, 8, 3, 2);
+  pick(WALL);
+  drag(4, 9, 13, 9);
+  put(HOB, 6, 6);
+  put(BUNK, 11, 11);
+  caught =
+    "a hull with a hole in it — every tile the outside can see into, tinted, " +
+    "including through the internal wall";
 } else {
   buildShip();
   canvas.dispatch("pointermove", at(3, 3));
@@ -159,5 +206,5 @@ process.stdout.write(out.join("\n") + "\n");
 process.stderr.write(
   `${WHEN}: ${caught}\n` +
     `  ${shapes.length / stride} shapes, ${wasm.ship_part_total()} parts, ` +
-    `scale ${scale.toFixed(3)}\n`,
+    `${wasm.ship_exposed_count()} exposed, scale ${scale.toFixed(3)}\n`,
 );

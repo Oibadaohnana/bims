@@ -81,36 +81,38 @@
         flex: 1;
       }
 
-      #stores {
+      #money {
         display: flex;
         gap: 14px;
       }
 
-      #stores .store {
+      #money .money {
         display: flex;
         align-items: baseline;
         gap: 5px;
       }
 
-      #stores .store .name {
+      #money .money .name {
         color: var(--muted);
         font-size: 11px;
         letter-spacing: 0.06em;
         text-transform: uppercase;
       }
 
-      #stores .store .left {
+      #money .money .left {
         font-variant-numeric: tabular-nums;
         font-weight: 600;
       }
 
-      #stores .store .of {
+      #money .money .of {
         color: var(--muted);
         font-size: 11px;
         font-variant-numeric: tabular-nums;
       }
 
-      #stores .store.short .left {
+      /* What the tool under the pointer would overdraw. The only warning a
+         player gets before a click is simply refused. */
+      #money .money.short .left {
         color: var(--warn);
       }
 
@@ -128,6 +130,12 @@
         overflow-y: auto;
         background: var(--panel);
         padding: 10px;
+      }
+
+      /* The right-hand side carries the trade panel as well as the checks,
+         so it is wider than the palette. */
+      #checks {
+        width: 268px;
       }
 
       #palette {
@@ -272,6 +280,83 @@
         display: none;
       }
 
+      /* --- the station's goods -------------------------------------------- */
+
+      #trade .good,
+      #trade .hold {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 2px 0;
+        font-variant-numeric: tabular-nums;
+      }
+
+      #trade .good .name {
+        min-width: 74px;
+      }
+
+      #trade .good .price,
+      #trade .hold .used {
+        margin-left: auto;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      #trade .good .units {
+        min-width: 26px;
+        text-align: right;
+        color: var(--muted);
+      }
+
+      #trade .good.carried .units {
+        color: var(--ink);
+        font-weight: 600;
+      }
+
+      #trade .deal {
+        display: flex;
+        gap: 2px;
+      }
+
+      #trade .deal-on {
+        padding: 1px 3px;
+        border: 1px solid var(--edge);
+        border-radius: 3px;
+        background: none;
+        color: var(--muted);
+        font: inherit;
+        font-size: 10px;
+        font-variant-numeric: tabular-nums;
+        cursor: pointer;
+      }
+
+      #trade .deal-on.buy:hover:not([disabled]) {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+
+      #trade .deal-on.sell:hover:not([disabled]) {
+        border-color: var(--warn);
+        color: var(--warn);
+      }
+
+      #trade .deal-on[disabled] {
+        cursor: default;
+        opacity: 0.3;
+      }
+
+      /* A hold with no room left in it. What a player is about to be refused
+         for, said before the click rather than after it. */
+      #trade .hold.full .used {
+        color: var(--warn);
+      }
+
+      #trade .holds {
+        margin-top: 6px;
+        padding-top: 5px;
+        border-top: 1px solid var(--edge);
+      }
+
       /* --- what is wrong with it ------------------------------------------ */
 
       #issues ul {
@@ -298,6 +383,19 @@
 
       #issues li.warning {
         border-left-color: var(--glow);
+      }
+
+      /* Radiation. Louder than an error, on purpose and as an exception to
+         everything else on this page: it is the only fault that kills the
+         crew, and it does not block Accept — so the only way it can be heard
+         is by being said louder. The deck carries the same warning colour
+         over every exposed tile, whether or not anybody is pointing here. */
+      #issues li.grave {
+        border-left-color: var(--warn);
+        border-left-width: 3px;
+        background: #3a1d18;
+        color: #ffd9cf;
+        font-weight: 600;
       }
 
       #issues .clean {
@@ -431,7 +529,7 @@
           <h1>Ship design</h1>
           <span class="muted" id="area"></span>
           <span class="spacer"></span>
-          <div id="stores" aria-label="What is left at the station"></div>
+          <div id="money" aria-label="What is left in the pool"></div>
         </header>
         <div id="work">
           <aside id="palette" aria-label="Parts"></aside>
@@ -449,6 +547,11 @@
             <div id="said" role="status"></div>
           </div>
           <aside id="checks">
+            <div id="trade">
+              <h2>Station</h2>
+              <div id="goods" aria-label="What the station sells"></div>
+              <div class="holds" id="holds" aria-label="What the ship can hold"></div>
+            </div>
             <div id="issues">
               <h2>Checks</h2>
               <ul id="issue-list"></ul>

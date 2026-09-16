@@ -244,10 +244,11 @@
                 # Named packages rather than --workspace: `bims` and `ship`
                 # are cdylibs meant for wasm and their tests are the probes
                 # and harnesses in scratchpad/, which want a terminal. These
-                # four are plain libraries and their tests are plain
+                # six are plain libraries and their tests are plain
                 # `cargo test`.
                 cargo test --locked --offline \
-                  -p time -p physics -p worldgen -p shipdesign \
+                  -p time -p physics -p worldgen -p shipdesign -p economy \
+                  -p health \
                   --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget}
                 touch "$out"
               '';

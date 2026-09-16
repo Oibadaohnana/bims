@@ -13,4 +13,5 @@ edition = "2024"
 description = "Ship parts, the rules for placing them, and what the result weighs"
 
 [dependencies]
+economy = { path = "../economy" }
 physics = { path = "../physics" }

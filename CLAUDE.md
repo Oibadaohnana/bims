@@ -64,17 +64,20 @@ The page loads `bims.js` and `bims.wasm` under a per-load query string and the
 server sends `no-store`, so a stale *browser* cache is not usually the culprit —
 a stale *server* is.
 
-## It is a workspace now, and the room is one crate of six
+## It is a workspace now, and the room is one crate of eight
 
 Everything is under `crates/`. There are **two cdylibs**: `game` is the room —
 the simulation and its wasm exports, what used to be `src/` — and `ship` is the
 design phase, the camera and pointer and draw buffer behind `web/ship.html`.
-Beside them are four libraries that have to give the same answer in more than
+Beside them are six libraries that have to give the same answer in more than
 one place: `worldgen` (the galaxy, systems and station blueprints, which a
 native server will one day generate identically), `physics` (ship mass, thrust
 and travel time, wanted by `worldgen` now and by the designer and the flight
 step later), `shipdesign` (what a ship is made of and the rules for putting one
-together, wanted by the designer now and by the play phase later) and `time`
+together, wanted by the designer now and by the play phase later), `economy`
+(money: whole euros, the crew's shared pool, and sums that must not wrap),
+`health` (one body's health points, what is wrong with it and what that costs
+— radiation dose, sickness and cancer, wanted by the play phase) and `time`
 (how long a day is).
 
 Five things about that are easy to get wrong:
@@ -89,8 +92,8 @@ Five things about that are easy to get wrong:
 - **The libraries' tests are `cargo test`, the cdylibs' are the probes and the
   harnesses.** Running them wants a target: `.cargo/config.toml` pins
   `wasm32-unknown-unknown`, so it is `cargo test --target
-  x86_64-unknown-linux-gnu -p physics -p worldgen -p shipdesign`.
-  `nix flake check` runs exactly that as `checks.tests`.
+  x86_64-unknown-linux-gnu -p physics -p worldgen -p shipdesign -p economy
+  -p health`. `nix flake check` runs exactly that as `checks.tests`.
 - **The rules go in `shipdesign`, never in `ship`.** `ship` may ask whether a
   part can be placed; it may not decide. A native server has to give the same
   answer, and `design_hash` — which is what an Accept is recorded against — has
@@ -939,6 +942,21 @@ which heading it lives under. Same shape as `memory.rs`'s `What` and
 `work.rs`'s `Job`, and for the same reason: no strings cross the boundary, so
 the ship knows `PartKind::Hob` and only the host knows "Hob".
 
+The row itself is five decisions, and three of them are easy to get wrong by
+leaving them at the default:
+
+- **`layer` and `requires`.** What the part *is* and what has to be there
+  already. `defs_are_sound` refuses a part that needs its own layer and one
+  that needs nothing unless it is the frame; nothing else can catch a hull
+  part that quietly asks for deck.
+- **`recipe`.** What it is made of, which is also **what it weighs** — there
+  is no mass column. See the next section.
+- **`shields`.** Whether it keeps the radiation out. Defaulting to `false` is
+  safe; defaulting to `true` on something that is not hull puts a hole in
+  every exposure check that will never be noticed.
+- **`capacity`.** A class of storage and how much, or `None`. A container
+  with no capacity holds nothing and refuses every purchase.
+
 The first three are fixed-size arrays, so leaving one out is a compile error.
 The last two are not, and both fail quietly — which is what
 `scratchpad/ship-check.mjs` is for. It counts palette buttons against
@@ -951,6 +969,110 @@ An `IssueCode` is the same trap with worse consequences: an issue whose code
 has no line in `ISSUE_LINES` is **dropped from the page**, exactly as a diary
 entry with no `MEMORY_LINES` is. What catches it is the row count against
 `ship_issue_count()`, and nothing else would.
+
+## A part weighs its recipe, and there is no mass column
+
+`PartDef::recipe` is what a part is made of — metal and components, never ore
+and never food — and `parts::part_mass` adds it up. **That is the only place a
+mass comes from.** A separate `mass` field existed and is gone, because two
+numbers that are meant to agree are two numbers that will not: a part heavier
+than what went into it is mass appearing out of nothing every time one is
+built.
+
+What that buys is in `crates/shipdesign/src/materials.rs`, and it is a
+contract rather than a feature. Building moves the recipe out of the hold and
+into the part; deconstructing moves **all** of it back. Total ship mass is
+unchanged either way, and changes only through trading while docked, fuel
+burnt, food eaten or grown, and crew joining or leaving. `build_from_cargo`
+and `deconstruct_to_cargo` are that rule written down and tested against every
+part in the table; **nothing calls them** — the construction step will, with a
+Bim and a site in the middle.
+
+Three things that go with it:
+
+- **Money only works at a station.** The design phase is instant and paid in
+  euros because it is docked at the spawn station. Away from one, `price` means
+  nothing and a part comes out of the hold or is not built. `price` and
+  `recipe` are deliberately **unrelated** — nothing derives one from the other.
+- **The centre of mass is not conserved, only the total.** Parts sit at their
+  tile centres and cargo and crew at the centre of mass, so welding the hold
+  into an engine at the stern moves it. Nothing reads that yet; `mass.rs` is
+  one figure.
+- **Deconstruction can be refused for want of a shelf.** The materials have to
+  go somewhere, and a ship whose only shelf is the part coming off has nowhere
+  — `NoRoomAboard`, measured against the design *after* the removal. Losing
+  them quietly would be the one thing the contract forbids.
+
+## Four layers, and the stack is a chain of `requires`
+
+A tile holds at most one part per `Layer`: `Structure` under everything,
+`Floor` on it, `Object` standing on that, and `Utility` running through the
+tile alongside whatever is standing in it. `PartDef::requires` is the whole of
+the rule — `Some(Layer::Structure)` for the frame's own plating and for the
+hull parts that stand straight on it, `Some(Layer::Floor)` for everything
+else, `None` for `Structure` itself.
+
+Three consequences that are not obvious:
+
+- **Removal is the same rule read backwards.** `remove` asks every layer of
+  every tile whether the part there `requires` this one's layer. That is why
+  there is no list of "what holds up what" anywhere: there is one column of
+  the table and both directions read it.
+- **A right-drag has to come off top-down** — utility and object, then floor,
+  then structure. `Editor::drag_parts` does that ordering, not the host. Any
+  other order refuses everything under the first thing it meets.
+- **Connectivity is asked of the structure layer alone.** A ship is its
+  frame; everything else stands on it. Walking every occupied tile instead
+  would let a wall touching nothing but another wall count as holding the
+  ship together.
+
+## Radiation is a warning that outranks the errors
+
+`validate::exposure` floods in from a **one-tile ring outside the build area**,
+4-neighbour, through every tile whose object-layer part does not shield. A
+reached tile holding any part is exposed.
+
+- **The ring is outside the area**, or a ship built flush to the edge would be
+  sealed by a wall that does not exist.
+- **Never 8-neighbour.** Two hull parts meeting at a corner seal it; eight-way
+  would leak through every diagonal join and no hand-drawn hull would pass.
+- **A shielding part is never exposed itself**, because the fill cannot enter
+  it. That falls out of the rule rather than being a special case.
+- **A door does not shield, and neither does a plain wall.** `OutsideWall`,
+  `Airlock`, `SensorArray` and `Engine` do, and that list is in
+  `shielding_and_storage_are_where_they_are_meant_to_be`.
+
+It is `IssueCode::RadiationExposure = 24`, it is **first in the issue list**,
+and the host styles it `grave` — louder than an error, which is a deliberate
+exception to "an error blocks Accept and a warning does not". It does not
+block; it shouts, because it is the only fault on the list that kills people
+and a player who never opens the checks panel is exactly the one about to
+accept it. The deck carries the tint whether or not anybody is pointing at
+the row, which is why `paint::faults` skips outlining that one issue — a wash
+and a grid of markers saying the same thing makes neither legible.
+
+`scratchpad/ship-layout.mjs exposure` is the only way to look at it.
+
+## Cargo is part of the design, not something beside it
+
+`ShipDesign::cargo` is units per `ResourceId`, bought and sold through `apply`
+like any other edit. Four things hang off that and all four are load-bearing:
+
+- **It is in `design_hash`**, after the parts. Two players accepting are
+  accepting the same ship *and* the same manifest, so a Buy clears every
+  Accept exactly as a wall does.
+- **It is in `Budget::spent`.** Parts and goods come out of one pool, which is
+  the whole of the decision the design phase asks anybody to make.
+- **It is in `ship_mass`.** A ship with full tanks is heavier and the
+  acceleration on the handoff screen says so before Accept, not after.
+- **It is bounded by the ship, never by the station.** Supply is unlimited;
+  what refuses a purchase is the pool or the hold. `economy::storage` says
+  which class a resource goes in and `PartDef::capacity` says what provides
+  it — a shelf and a second shelf are two hundred units of one class, not two
+  holds.
+
+A storage part with something in it cannot be removed. Sell first; the error
+is `StorageInUse` and the sentence says so.
 
 ## The designer's rules are in `shipdesign`, and `apply` is the only door
 
@@ -965,12 +1087,39 @@ Three rules the crate is built around:
   only way a design ever changes.** It hands back a new design, so a refused
   edit cannot leave a half-changed one behind. Nothing in the UI mutates
   `parts` directly, and neither should anything else.
-- **Remaining stores are derived, never decremented.** `Budget` holds the
-  stockpile and nothing else; what is left is worked out from the design every
-  time it is asked. A counter kept alongside would drift from the ship the
-  first time an edit was refused or replayed.
+- **Remaining money is derived, never decremented.** `Budget` holds the pool
+  and nothing else; what is left is worked out from the design every time it
+  is asked. A counter kept alongside would drift from the ship the first time
+  an edit was refused or replayed.
 - **The occupancy grid is rebuilt from `parts` on demand.** A cached one is a
   second source of truth about what is where.
+
+## Money is one pool, in whole euros, and every sum is checked
+
+Nobody starts with stores. Each Bim brings money, all of it goes into one
+pool, and every part has a price in euros paid out of that pool —
+`crates/economy` is the arithmetic, `PartDef::price` is the table, and
+`shipdesign::Budget` is what spends it.
+
+Four things that are load-bearing rather than tidy:
+
+- **`Money` is a `u64` of whole euros and never a float.** Two players have
+  to end up with the same pool down to the last euro, and a rounding rule is
+  something two machines can disagree about. The euro sign and the digit
+  grouping exist **only in the host** — `euros()` in `web/builder.js` and in
+  `web/ship.js`, one copy each, and nothing else makes either.
+- **Overflow is an error, never a wrap and never a saturation.** A wrap hands
+  somebody a fortune; a saturation quietly makes two different lobbies agree.
+  `economy::starting_pool` refuses both, and a crew of nobody as well.
+- **The solo bonus is a lump, not a multiplier.** A ship for one costs what a
+  ship for four does — the hull, the galley and the heads are the same — so a
+  lone player gets `SOLO_BONUS` on top of their own purse. Scaling it would
+  miss the point, which is that the *fixed* part of a ship does not scale.
+- **Money crosses the wasm boundary in two `u32` halves**, `_hi` and `_lo`,
+  the same way `design_hash` does. That goes for `ship_init` as well: what
+  goes *in* is what one Bim brings, and wasm does the multiplying, so the pool
+  is worked out in exactly one place for the browser and for a native server
+  both.
 
 ## An Accept is for a hash, not for "the design"
 
@@ -1044,6 +1193,15 @@ as a Bim frozen mid-errand, which is the hardest failure aboard to diagnose.
 The contract is written out at the top of `crates/shipdesign/src/lib.rs`; keep
 the two in step.
 
+## A drag reports its *first* refusal, not its last
+
+A removing drag goes from the top of the stack down, so the first thing to
+refuse is the thing the player was pointing at — and everything underneath it
+then refuses too, because it is holding that up. Reporting the last one
+answers a question nobody asked: "take what is standing on it off first" about
+the frame, when what actually said no was the shelf with a hundred units of
+ore in it.
+
 ## The required-fixture list is a mirror of the chains
 
 `REQUIRED` in `crates/shipdesign/src/validate.rs` is table, cold store,
@@ -1054,3 +1212,61 @@ else. It is not a design decision about what a ship should have.
 If stage 5 changes what a chain walks to, this list changes with it. A ship
 validated against a stale list is a ship whose crew starve standing in front of
 the fixture nobody required.
+
+## `crates/health` is not `crates/game/src/health.rs`
+
+Two files with the same name and nothing else in common. The one in `game` is
+the behaviour test room's hunger-and-sleep bar; the crate is one body's
+health for the ship game — conditions with stages, mending and death, with
+radiation as the first source. **Nothing imports the other**, and the room's
+hunger, sleep and filth have deliberately *not* been ported: they are meant
+to arrive as further `Condition` variants, and translating the room's clocks
+is its own step.
+
+The one thing taken across is the lesson written in the room's file: health
+that mends every frame will undo a killing blow before anything checks
+whether the body is dead. In the crate that cannot happen twice over —
+everything that does damage also suppresses mending, and `update` returns the
+instant health reaches nothing rather than carrying on through the rest of
+the interval.
+
+## One update of a day, or 1440 of a minute, and no difference
+
+`health::update` is called every frame by the browser, with hours by a
+fast-forward, and with a day by a native server catching up on a
+disconnection. All three have to agree or the same ship gives two answers
+about who survived, so the interval is **cut at every boundary it crosses** —
+a dose threshold, a dose reaching nothing, cancer beginning or advancing,
+health reaching full or nothing — and each piece is applied in closed form at
+a rate that does not change inside it. Nothing integrates numerically and
+nothing has a fixed internal tick; either would make the answer depend on how
+the caller happened to chop the time up. `a_step_of_any_length_gives_the_same_answer`
+is what holds it, and it compares the events as well as the state.
+
+Two corners in that loop that will bite whoever adds hunger:
+
+- **A band is closed at the bottom, but a falling dose on the line is already
+  out of it.** A dose of exactly `CRITICAL` reads as critical — and the next
+  instant of a dose coming down is elevated. Charging the segment at the
+  critical rate would take health off for time the body was never critical
+  for, and worse, the segment would be of no length at all and the loop would
+  not advance. `RadiationStage::below` is that distinction and it is the only
+  place it exists.
+- **Every segment edge must be strictly in the future.** A body already at
+  full health "mends" at a boundary it is standing on, which is why
+  `rate_of` returns nothing for it rather than the mending rate. Any new
+  condition with a rate needs the same question asked of it.
+
+## A health event is the only thing that says a line was crossed
+
+`update` hands back one `HealthEvent` per transition, in order. A caller that
+wants to say "James is ill" watches for the event; a caller that wants to
+draw a bar reads the state. Polling the state for a change instead misses a
+crossing that happened and reversed inside one update, which is exactly what
+a long step does — and a step long enough to take a body from a clean bill to
+radiation sickness emits all three events on the way rather than only naming
+where it ended up.
+
+`ISSUE_LINES` and `MEMORY_LINES` are the shape the host's half of this will
+take: a code with no sentence is a row that never appears, so whatever draws
+these will need a count check the way `smoke.mjs` has one.

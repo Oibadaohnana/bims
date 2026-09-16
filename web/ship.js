@@ -9,9 +9,12 @@
 //
 // Two rules the page is built around and that are cheap to break:
 //
-//   * **No strings cross the wasm boundary.** The parts, the resources, the
+//   * **No strings cross the wasm boundary.** The parts, the prices, the
 //     reasons an edit was refused and the faults in a design are all numbers.
-//     The four tables below are where every word on this page lives.
+//     The three tables below are where every word on this page lives, and
+//     `euros()` is where the euro sign and the digit grouping live — money
+//     crosses as a plain count of euros, in the two `u32` halves the boundary
+//     carries a 64-bit number in.
 //   * **Everything that changes the ship goes through `net`.** It is a local
 //     stand-in with a transport's shape, exactly as in web/builder.js: no
 //     click handler calls `wasm.ship_place` directly, every Edit carries the
@@ -38,6 +41,18 @@ const PART_NAMES = [
   "Basin",
   "Hydroponic bay",
   "Broom locker",
+  "Structure",
+  "Outside wall",
+  "Helm",
+  "Reactor",
+  "Power conduit",
+  "Battery",
+  "Fuel tank",
+  "Life support",
+  "Airlock",
+  "Sensor array",
+  "Shelf",
+  "Shower",
 ];
 
 /** The palette, grouped the way a ship is thought about rather than the way
@@ -48,16 +63,35 @@ const PART_NAMES = [
  * "Anything else", where it is obvious — instead of quietly not existing.
  * Same arrangement as the room's work panel, and for the same reason. */
 const PART_GROUPS = [
-  { name: "Structure", kinds: [0, 1, 2] },
-  { name: "Engines", kinds: [3] },
-  { name: "Crew", kinds: [4, 10, 9] },
+  // Hull first, in the order a ship is actually built: frame, deck, skin,
+  // then the ways through it.
+  { name: "Hull", kinds: [15, 0, 1, 16, 2, 23] },
+  { name: "Systems", kinds: [3, 17, 18, 19, 20, 21, 22, 24] },
+  { name: "Crew", kinds: [4, 9, 10, 26] },
   { name: "Galley", kinds: [5, 6, 7, 8] },
   { name: "Heads", kinds: [11, 12] },
+  { name: "Storage", kinds: [25] },
   { name: "Bay", kinds: [13, 14] },
 ];
 
-/** Indexed by `physics::ResourceId`. */
-const RESOURCE_NAMES = ["Ore", "Metal", "Fuel", "Components"];
+/** What a station sells, indexed by `physics::ResourceId`. The first four are
+ * materials and the last two are food; what makes one food rather than metal
+ * is which hold it goes in, and that is `economy::storage`. */
+const RESOURCE_NAMES = [
+  "Ore",
+  "Metal",
+  "Fuel",
+  "Components",
+  "Vegetables",
+  "Tofu",
+];
+
+/** Where goods are stowed, indexed by `economy::Storage`. */
+const STORAGE_NAMES = ["Shelves", "Fuel tanks", "Cold stores"];
+
+/** How many units a buy or sell button moves. Three sizes, because a hundred
+ * units of ore one at a time is not a decision anybody is making. */
+const TRADE_STEPS = [1, 10, 100];
 
 /** Why an edit was refused. Indexed by `EditError`; 0 never appears here
  * because 0 is "it took". */
@@ -66,11 +100,18 @@ const EDIT_LINES = {
   2: "Something is already standing there.",
   3: "There is no deck under it.",
   4: "There is deck there already.",
-  5: "The station does not have the stores for that.",
+  5: "There is not the money left for that.",
   6: "That part is not there any more.",
   7: "Take what is standing on it off first.",
   8: "The page asked for something that is not a part.",
   9: "The design is settled — nothing can be moved now.",
+  10: "There is no structure under it. The frame goes down first.",
+  11: "There is already something in that tile on that layer.",
+  12: "There is not the money left for those goods.",
+  13: "Nowhere aboard to put them — the ship needs more storage.",
+  14: "There is not that much aboard to sell.",
+  15: "Sell what is in it first.",
+  16: "There are not the materials aboard to build that.",
 };
 
 /** What is wrong with the design. Indexed by `IssueCode` in
@@ -95,17 +136,40 @@ const ISSUE_LINES = {
   21: "Nothing pushes on every axis: it cannot stop or cannot steer.",
   22: "No hydroponic bay. The food aboard is all the food there will be.",
   23: "No broom locker, so nothing to sweep the deck with.",
+  24: "The outside can see in. The crew will be irradiated here.",
+  25: "Nothing to eat aboard.",
+  26: "No helm, so nobody can fly it.",
 };
 
+/** The one issue that is not just another row.
+ *
+ * Radiation is the only fault on the list that kills people, it is always
+ * first, and it is styled louder than the errors — which is a deliberate
+ * exception to "an error blocks Accept and a warning does not". It does not
+ * block; it shouts. */
+const ISSUE_GRAVE = 24;
+
 /** What the lobby hands over when nobody chose anything. Opening ship.html
- * with no query is a solo game on a standard ship. */
-const DEFAULTS = { area: 40, stock: 1, players: 1, slot: 0 };
+ * with no query is a solo game on a standard ship, with the standard purse —
+ * which, one player being one player, is that plus the solo bonus once wasm
+ * has worked the pool out. */
+const DEFAULTS = { area: 40, money: 100000, players: 1, slot: 0 };
 
 /** Sane bounds on what the query string may say. A hand-typed `?area=9000`
- * is a build area with a million tiles in it. */
+ * is a build area with a million tiles in it, and a hand-typed `?money=1e30`
+ * is a pool that would not survive the trip into a 64-bit integer. */
 const AREA_MIN = 8;
 const AREA_MAX = 120;
 const PLAYERS_MAX = 4;
+const MONEY_MAX = 1000000000;
+
+/** A number of euros, as words. The **only** place either the sign or the
+ * grouping exists — the same rule, and the same function, as web/builder.js:
+ * what crosses the boundary is a bare count of euros. */
+function euros(value) {
+  const grouped = String(value).replace(/\B(?=(\d{3})+(?!\d))/g, "\u00a0");
+  return `€${grouped}`;
+}
 
 /** How long a refusal stays on screen. */
 const SAID_SECONDS = 4;
@@ -174,11 +238,11 @@ async function boot() {
     const players = whole(number("players", DEFAULTS.players), 1, PLAYERS_MAX);
     return {
       area: whole(number("area", DEFAULTS.area), AREA_MIN, AREA_MAX),
-      // The factor arrives as the lobby wrote it — 0.5, 1, 2 — and crosses
-      // into wasm as thousandths, because two players have to end up with the
-      // same stockpile down to the unit and float rounding is a promise
-      // nobody made.
-      stock: Math.round(clampNumber(number("stock", DEFAULTS.stock), 0, 100) * 1000),
+      // A whole number of euros, exactly as the lobby wrote it. Rounded
+      // rather than trusted: two players have to end up with the same pool
+      // down to the last euro, and a fraction is a promise about rounding
+      // that nobody made.
+      money: whole(number("money", DEFAULTS.money), 0, MONEY_MAX),
       players,
       slot: whole(number("slot", DEFAULTS.slot), 0, players - 1),
     };
@@ -207,6 +271,11 @@ async function boot() {
   const partCount = wasm.ship_part_count();
   const resourceCount = wasm.ship_resource_count();
 
+  /** A money figure, out of the two `u32` halves the boundary carries it in.
+   * Every amount on this page comes back through here; a JS number holds a
+   * whole euro exactly well past anything a pool will ever be. */
+  const amount = (hi, lo) => hi * 2 ** 32 + lo;
+
   let canvasSize = { w: 0, h: 0 };
   let dpr = 1;
 
@@ -223,7 +292,10 @@ async function boot() {
   resize();
   wasm.ship_init(
     chosen.area,
-    chosen.stock,
+    // The same two halves, the other way about. wasm adds the solo bonus and
+    // multiplies by the crew: what goes in is what one Bim brings.
+    Math.floor(chosen.money / 2 ** 32),
+    chosen.money >>> 0,
     chosen.players,
     chosen.slot,
     canvasSize.w,
@@ -271,6 +343,18 @@ async function boot() {
       return net.send({ remove: partId });
     },
 
+    /** Take goods aboard, or put them back. Edits like any other: stamped
+     * with the design they were made against, applied by the host end, and
+     * they clear everybody's Accept because the ship they accepted is now
+     * carrying something else. */
+    buy(resource, units) {
+      return net.send({ trade: { resource, units, buying: true } });
+    },
+
+    sell(resource, units) {
+      return net.send({ trade: { resource, units, buying: false } });
+    },
+
     /** Accept, or take an Accept back. */
     accept(on) {
       return net.send({ accept: on === true });
@@ -305,6 +389,12 @@ async function boot() {
           took = why === 0;
         } else if (message.remove !== undefined) {
           why = wasm.ship_remove(message.remove);
+          took = why === 0;
+        } else if (message.trade) {
+          const deal = message.trade;
+          why = deal.buying
+            ? wasm.ship_buy(deal.resource, deal.units)
+            : wasm.ship_sell(deal.resource, deal.units);
           took = why === 0;
         } else if (message.accept !== undefined) {
           if (message.accept) {
@@ -393,6 +483,10 @@ async function boot() {
     button.addEventListener("click", () => {
       wasm.ship_set_tool(kind);
       paintPalette();
+      // The money readout marks a pool the *current tool* would overdraw, so
+      // it follows the tool as well as the ship. Nothing was edited, so the
+      // rest of afterChange has nothing to do.
+      paintMoney();
     });
     partButtons.set(kind, button);
     return button;
@@ -413,44 +507,157 @@ async function boot() {
     }
   }
 
-  // --- the stockpile -----------------------------------------------------
+  // --- the money ---------------------------------------------------------
+  //
+  // One pool, and there is no per-player purse anywhere: everybody's money is
+  // in it, a lone player's bonus is in it, and every part anybody places
+  // comes out of it.
 
-  const storeCells = [];
+  let moneyLeft = null;
 
-  function buildStores() {
-    const rows = [];
+  function buildMoney() {
+    const row = document.createElement("div");
+    row.className = "money";
+    row.dataset.money = "pool";
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = "Money";
+    const left = document.createElement("span");
+    left.className = "left";
+    // What is left, beside what there was. The pool is fixed for the whole
+    // phase, so it is written once here rather than repainted.
+    const all = document.createElement("span");
+    all.className = "of";
+    all.textContent = `/ ${euros(pool())}`;
+    row.append(name, left, all);
+    moneyLeft = { row, left };
+    byId("money").replaceChildren(row);
+  }
+
+  function pool() {
+    return amount(wasm.ship_pool_hi(), wasm.ship_pool_lo());
+  }
+
+  function remaining() {
+    return amount(wasm.ship_remaining_hi(), wasm.ship_remaining_lo());
+  }
+
+  function partPrice(kind) {
+    return amount(wasm.ship_part_price_hi(kind), wasm.ship_part_price_lo(kind));
+  }
+
+  /** What is left, and whether the tool under the ghost still fits in it. A
+   * pool the current tool would overdraw is marked, which is the only warning
+   * a player gets before a click is simply refused. */
+  function paintMoney() {
+    const left = remaining();
+    moneyLeft.left.textContent = euros(left);
+    moneyLeft.row.className = partPrice(wasm.ship_tool()) > left ? "money short" : "money";
+  }
+
+  // --- the station's goods -----------------------------------------------
+  //
+  // One row per resource: what it costs, how much is aboard, and the buttons
+  // that move it. Everything goes through `net` like every other edit, so a
+  // purchase is applied and reported the same way a wall is.
+
+  const goodRows = [];
+  const holdRows = [];
+
+  function tradePrice(resource) {
+    return amount(wasm.ship_trade_price_hi(resource), wasm.ship_trade_price_lo(resource));
+  }
+
+  function buildTrade() {
+    const goods = [];
     for (let id = 0; id < resourceCount; id++) {
       const row = document.createElement("div");
-      row.className = "store";
+      row.className = "good";
       row.dataset.resource = String(id);
+
       const name = document.createElement("span");
       name.className = "name";
       name.textContent = RESOURCE_NAMES[id] ?? `Resource ${id}`;
-      const left = document.createElement("span");
-      left.className = "left";
-      // What there was to start with, beside what is left of it. Fixed for
-      // the whole phase — the lobby's factor decided it — so it is written
-      // once here rather than repainted.
-      const all = document.createElement("span");
-      all.className = "of";
-      all.textContent = `/ ${wasm.ship_stock(id)}`;
-      row.append(name, left, all);
-      rows.push(row);
-      storeCells.push({ row, left, id });
+      const price = document.createElement("span");
+      price.className = "price";
+      // Fixed for the whole phase — one price list, every station — so it is
+      // written once here rather than repainted.
+      price.textContent = euros(tradePrice(id));
+      const units = document.createElement("span");
+      units.className = "units";
+
+      const deal = document.createElement("span");
+      deal.className = "deal";
+      for (const step of TRADE_STEPS) {
+        deal.appendChild(dealButton(id, step, true));
+      }
+      for (const step of TRADE_STEPS) {
+        deal.appendChild(dealButton(id, step, false));
+      }
+
+      row.append(name, price, units, deal);
+      goods.push(row);
+      goodRows.push({ row, units, id });
     }
-    byId("stores").replaceChildren(...rows);
+    byId("goods").replaceChildren(...goods);
+
+    const holds = [];
+    for (let class_ = 0; class_ < wasm.ship_storage_count(); class_++) {
+      const row = document.createElement("div");
+      row.className = "hold";
+      row.dataset.storage = String(class_);
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = STORAGE_NAMES[class_] ?? `Storage ${class_}`;
+      const used = document.createElement("span");
+      used.className = "used";
+      row.append(name, used);
+      holds.push(row);
+      holdRows.push({ row, used, class: class_ });
+    }
+    byId("holds").replaceChildren(...holds);
   }
 
-  /** What is left, and whether the part under the ghost would still fit in
-   * it. A resource the current tool would overdraw is marked, which is the
-   * only warning a player gets before a click is simply refused. */
-  function paintStores() {
-    const tool = wasm.ship_tool();
-    for (const cell of storeCells) {
-      const left = wasm.ship_remaining(cell.id);
-      const want = wasm.ship_part_cost(tool, cell.id);
-      cell.left.textContent = String(left);
-      cell.row.className = want > left ? "store short" : "store";
+  function dealButton(resource, step, buying) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = buying ? "deal-on buy" : "deal-on sell";
+    button.dataset[buying ? "buy" : "sell"] = String(step);
+    button.textContent = buying ? `+${step}` : `\u2212${step}`;
+    button.addEventListener("click", () => {
+      if (button.disabled) return;
+      const done = buying ? net.buy(resource, step) : net.sell(resource, step);
+      remark(done.ok ? "" : (EDIT_LINES[done.why] ?? "That could not be done."));
+      afterChange();
+    });
+    return button;
+  }
+
+  /** What is aboard, what it would cost to take more, and how full each hold
+   * is. A hold over its capacity cannot happen — `apply` refuses — so the
+   * mark is for the one that is *full*, which is the thing a player is about
+   * to be refused for. */
+  function paintTrade() {
+    const editable = stillDesigning();
+    const left = remaining();
+    for (const cell of goodRows) {
+      const aboard = wasm.ship_cargo(cell.id);
+      cell.units.textContent = String(aboard);
+      const class_ = wasm.ship_storage_of(cell.id);
+      const room = wasm.ship_storage_capacity(class_) - wasm.ship_storage_used(class_);
+      const price = tradePrice(cell.id);
+      for (const button of cell.row.querySelectorAll("button")) {
+        const buy = button.dataset.buy;
+        const step = Number(buy ?? button.dataset.sell);
+        button.disabled = !editable || (buy ? step * price > left || step > room : step > aboard);
+      }
+      cell.row.className = aboard > 0 ? "good carried" : "good";
+    }
+    for (const cell of holdRows) {
+      const total = wasm.ship_storage_capacity(cell.class);
+      const used = wasm.ship_storage_used(cell.class);
+      cell.used.textContent = `${used} / ${total}`;
+      cell.row.className = total > 0 && used >= total ? "hold full" : "hold";
     }
   }
 
@@ -473,7 +680,10 @@ async function boot() {
       if (!line) continue;
       const error = wasm.ship_issue_severity(i) === 0;
       const row = document.createElement("li");
-      row.className = error ? "error" : "warning";
+      // Radiation outranks the error styling on purpose: it is the one thing
+      // on this list that kills the crew, and it does not block Accept, so
+      // the only way it can be heard is by being louder.
+      row.className = code === ISSUE_GRAVE ? "grave" : error ? "error" : "warning";
       row.dataset.issue = String(code);
       const text = document.createElement("span");
       text.textContent = line;
@@ -568,9 +778,19 @@ async function boot() {
    * numbers are shown instead — a mass and an acceleration nobody has looked
    * at is a mass and an acceleration that is quietly wrong. */
   function paintHandoff() {
+    const carried = [];
+    for (let id = 0; id < resourceCount; id++) {
+      const units = wasm.ship_cargo(id);
+      if (units > 0) carried.push(`${units} ${RESOURCE_NAMES[id] ?? id}`);
+    }
     const rows = [
       ["Parts", String(wasm.ship_part_total())],
       ["Crew aboard", String(net.players)],
+      ["Money left", euros(remaining())],
+      // What was bought is what the crew have to live on, so it is listed
+      // rather than summed: "260 units" tells nobody whether there is food.
+      ["Cargo", carried.length ? carried.join(" · ") : "Nothing aboard"],
+      ["Exposed tiles", String(wasm.ship_exposed_count())],
       ["Ship mass", wasm.ship_mass().toFixed(1)],
     ];
     const axes = ["Forward", "Backward", "Left", "Right"];
@@ -715,7 +935,14 @@ async function boot() {
     wasm.ship_drag_cancel();
 
     let skipped = 0;
-    let last = 0;
+    // The **first** refusal, not the last. A removing drag goes from the top
+    // of the stack down, so the first thing to refuse is the thing the
+    // player was pointing at; everything under it then refuses as well,
+    // because it is holding that up. Reporting the last one would answer a
+    // question nobody asked — "take what is standing on it off first" about
+    // the frame, when what actually said no was the shelf with a hundred
+    // units of ore in it.
+    let why = 0;
     for (const edit of edits) {
       const done =
         edit.remove !== undefined
@@ -723,16 +950,16 @@ async function boot() {
           : net.place(edit.kind, edit.x, edit.y, edit.rotation);
       if (!done.ok) {
         skipped++;
-        last = done.why;
+        if (why === 0) why = done.why;
       }
     }
 
     if (skipped === 0) {
       remark("");
     } else if (edits.length === 1) {
-      remark(EDIT_LINES[last] ?? "That could not be done.");
+      remark(EDIT_LINES[why] ?? "That could not be done.");
     } else {
-      remark(`${skipped} of ${edits.length} skipped — ${EDIT_LINES[last] ?? "refused"}`);
+      remark(`${skipped} of ${edits.length} skipped — ${EDIT_LINES[why] ?? "refused"}`);
     }
     afterChange();
   }
@@ -797,12 +1024,7 @@ async function boot() {
       ? (PART_NAMES[wasm.ship_part_kind(hovered)] ?? "Something")
       : (PART_NAMES[tool] ?? "Something");
 
-    const price = [];
-    for (let id = 0; id < resourceCount; id++) {
-      const units = wasm.ship_part_cost(tool, id);
-      if (units > 0) price.push(`${units} ${RESOURCE_NAMES[id] ?? id}`);
-    }
-    readoutPrice.textContent = price.join(" · ");
+    readoutPrice.textContent = euros(partPrice(tool));
     readoutTile.textContent =
       wasm.ship_hover_inside() !== 0 ? `${wasm.ship_hover_x()}, ${wasm.ship_hover_y()}` : "";
 
@@ -886,7 +1108,8 @@ async function boot() {
    * whole grid and is not something to do sixty times a second. */
   function afterChange() {
     paintPalette();
-    paintStores();
+    paintMoney();
+    paintTrade();
     paintIssues();
     paintCrew();
     paintAccept();
@@ -904,7 +1127,8 @@ async function boot() {
 
   byId("area").textContent = `${chosen.area} × ${chosen.area} tiles`;
   buildPalette();
-  buildStores();
+  buildMoney();
+  buildTrade();
   show("design");
   afterChange();
 

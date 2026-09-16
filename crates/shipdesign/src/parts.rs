@@ -2,7 +2,7 @@
 //!
 //! One table, [`PARTS`], with one entry per [`PartKind`] in discriminant
 //! order. Every number in it is a **placeholder** — nothing here has been
-//! balanced against anything, and the masses and costs exist so that the
+//! balanced against anything, and the recipes and prices exist so that the
 //! rules in [`crate::design`] and [`crate::validate`] have something real to
 //! be exercised against.
 //!
@@ -10,7 +10,46 @@
 //! cross the wasm boundary as numbers and will one day be in a save file, so
 //! they are written out and **never renumbered**: a new part is appended, a
 //! retired one leaves a hole.
+//!
+//! # A part is made of something, and weighs what it is made of
+//!
+//! [`PartDef::recipe`] is the materials one is built from — metal and
+//! components, never ore and never food — and [`part_mass`] is that recipe
+//! added up. There is deliberately **no mass column**: a part that weighed
+//! something other than its materials would gain or lose mass every time one
+//! was built, and the whole of [`crate::materials`] is the promise that it
+//! does not.
+//!
+//! [`PartDef::price`] is the other half and it is **independent**. It is what
+//! a finished part costs in euros at a station, where money and materials can
+//! be swapped for each other; away from one there is no price, only the
+//! recipe. Nothing works one out from the other, and nothing should — an
+//! instant part bought at the dock and a part welded up out of the hold are
+//! two different transactions that happen to end in the same wall.
+//!
+//! # Four layers, and what holds what up
+//!
+//! A tile holds at most one part per [`Layer`], and a part can say what has
+//! to be there already through [`PartDef::requires`]:
+//!
+//! - **Structure** is the frame the ship is built on. It needs nothing under
+//!   it and everything else is over it, directly or through the deck.
+//! - **Floor** is the deck plating you walk on. It needs structure.
+//! - **Object** is the one thing standing in the tile — a wall, a bunk, an
+//!   engine. Most need deck; a wall, an outside wall and a sensor array are
+//!   hull and stand straight on structure.
+//! - **Utility** is what runs *through* a tile without filling it: conduit.
+//!   It needs structure and nothing stands on it.
+//!
+//! # Shielding
+//!
+//! [`PartDef::shields`] is what keeps the radiation out — see
+//! [`crate::validate::exposure`]. It is a property of the **part**, not of
+//! the hull: an outside wall shields, a plain internal wall does not, and a
+//! door does not, so a ship walled in ordinary walls is a ship the crew are
+//! being cooked in.
 
+use economy::{Money, Storage};
 use physics::ResourceId;
 
 /// World units to a tile side. Fixed, and the one place it is written down.
@@ -19,12 +58,14 @@ use physics::ResourceId;
 /// navigation grid over hand-placed furniture. A ship is tiles.
 pub const TILE: u32 = 52;
 
-/// Which of a tile's two slots a part sits in.
+/// Which of a tile's four slots a part sits in.
 ///
-/// A tile holds at most one of each: the deck plating under your boots, and
-/// the one thing standing on it. Walls are `Object` rather than a third
-/// layer, because a wall and a bunk are equally "the thing in this tile" and
-/// two of them in one tile is equally nonsense.
+/// A tile holds at most one of each. Walls are `Object` rather than a layer
+/// of their own, because a wall and a bunk are equally "the thing standing in
+/// this tile" and two of them in one tile is equally nonsense.
+///
+/// The discriminants cross the wasm boundary and **0 and 1 are fixed** — they
+/// were the whole of the enum before there was structure under the deck.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u32)]
 pub enum Layer {
@@ -32,6 +73,32 @@ pub enum Layer {
     Floor = 0,
     /// Everything that stands on it, walls included.
     Object = 1,
+    /// The frame the whole ship is built on. Under everything, holds nothing
+    /// up on its own, and the layer [`crate::validate`] asks about when it
+    /// wants to know whether a ship is in one piece.
+    Structure = 2,
+    /// What runs *through* a tile rather than filling it: conduit. Something
+    /// can stand on the same tile, and a body can walk over it.
+    Utility = 3,
+}
+
+impl Layer {
+    /// Every layer, in discriminant order. `ALL[l as usize] == l`, which the
+    /// occupancy grid relies on.
+    pub const ALL: [Layer; 4] = [
+        Layer::Floor,
+        Layer::Object,
+        Layer::Structure,
+        Layer::Utility,
+    ];
+
+    pub fn code(self) -> u32 {
+        self as u32
+    }
+
+    pub fn from_code(code: u32) -> Option<Layer> {
+        Layer::ALL.get(code as usize).copied()
+    }
 }
 
 /// Everything that can be placed.
@@ -56,12 +123,26 @@ pub enum PartKind {
     Basin = 12,
     HydroBay = 13,
     BroomLocker = 14,
+    /// The frame. Everything else is built on top of it.
+    Structure = 15,
+    /// Hull plating. A wall that keeps the radiation out.
+    OutsideWall = 16,
+    Helm = 17,
+    Reactor = 18,
+    PowerConduit = 19,
+    Battery = 20,
+    FuelTank = 21,
+    LifeSupport = 22,
+    Airlock = 23,
+    SensorArray = 24,
+    Shelf = 25,
+    Shower = 26,
 }
 
 impl PartKind {
     /// Every kind, in discriminant order. `ALL[k as usize] == k`, which
     /// [`PartKind::def`] relies on and [`defs_are_sound`] checks.
-    pub const ALL: [PartKind; 15] = [
+    pub const ALL: [PartKind; 27] = [
         PartKind::Floor,
         PartKind::Wall,
         PartKind::Door,
@@ -77,6 +158,18 @@ impl PartKind {
         PartKind::Basin,
         PartKind::HydroBay,
         PartKind::BroomLocker,
+        PartKind::Structure,
+        PartKind::OutsideWall,
+        PartKind::Helm,
+        PartKind::Reactor,
+        PartKind::PowerConduit,
+        PartKind::Battery,
+        PartKind::FuelTank,
+        PartKind::LifeSupport,
+        PartKind::Airlock,
+        PartKind::SensorArray,
+        PartKind::Shelf,
+        PartKind::Shower,
     ];
 
     /// The number that crosses the wasm boundary. No strings do.
@@ -154,19 +247,42 @@ pub struct PartDef {
     pub layer: Layer,
     /// Whether a body may pass through the tile. A door does not block; nor
     /// does a chair, which is a seat rather than an obstacle and has to be
-    /// stood on to be used.
+    /// stood on to be used; nor does an airlock, which is a door with a
+    /// hull rating.
     pub blocks_movement: bool,
-    /// Whether every tile of the footprint needs deck plating under it.
-    /// Everything on the object layer except a wall: a wall is hull.
-    pub requires_floor: bool,
+    /// What every tile of the footprint has to hold already, if anything.
+    /// Deck for most things, structure for the frame's own plating and for
+    /// the hull parts that stand straight on it, and `None` for structure
+    /// itself, which is what everything else is built on.
+    pub requires: Option<Layer>,
     /// Tile offsets from the origin, **unrotated**, where a Bim stands to use
     /// the part. They rotate with it. Offsets are signed because most of them
     /// are outside the footprint — you stand *beside* a cold store.
     pub use_spots: &'static [(i32, i32)],
-    pub cost: &'static [(ResourceId, u32)],
-    /// Strictly greater than zero. A part that weighs nothing is a part that
-    /// makes the ship accelerate for free.
-    pub mass: f64,
+    /// What one costs, in whole euros out of the crew's shared pool.
+    /// Strictly greater than zero: a part that is free is a part the pool has
+    /// no opinion about, and the whole of the design phase is the pool having
+    /// an opinion.
+    pub price: Money,
+    /// Whether the part keeps radiation out — see
+    /// [`crate::validate::exposure`]. Hull, essentially: the outside wall,
+    /// the airlock, the sensor array and the engine block. A plain internal
+    /// wall does not, and neither does a door.
+    pub shields: bool,
+    /// What this part holds, if it holds anything: a class of storage and how
+    /// many units of it. `None` for everything that is not a container.
+    pub capacity: Option<(Storage, u32)>,
+    /// What the part is **made of**: units of each material, and nothing
+    /// else. Never empty, and only [`ResourceId::Metal`] and
+    /// [`ResourceId::Components`] — ore is what metal is refined from, fuel
+    /// is burnt and the food is eaten, so none of the four belongs in a
+    /// wall.
+    ///
+    /// There is no separate mass. [`part_mass`] adds the recipe up, so a
+    /// part weighs exactly what went into it and building one moves mass
+    /// from the hold into the hull without changing the total — see the
+    /// contract in [`crate::materials`].
+    pub recipe: &'static [(ResourceId, u32)],
     /// Greater than zero for [`PartKind::Engine`] and nothing else.
     pub thrust: f64,
 }
@@ -177,16 +293,18 @@ pub struct PartDef {
 /// told about how a part is approached — [`crate::validate`] already insists
 /// every one of them is floor a body can stand on and that they can all reach
 /// each other, so a design that passes here is one the crew can work.
-pub static PARTS: [PartDef; 15] = [
+pub static PARTS: [PartDef; 27] = [
     PartDef {
         kind: PartKind::Floor,
         footprint: (1, 1),
         layer: Layer::Floor,
         blocks_movement: false,
-        requires_floor: false,
+        requires: Some(Layer::Structure),
         use_spots: &[],
-        cost: &[(ResourceId::Metal, 1)],
-        mass: 5.0,
+        price: 50,
+        shields: false,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 1)],
         thrust: 0.0,
     },
     PartDef {
@@ -197,10 +315,12 @@ pub static PARTS: [PartDef; 15] = [
         // A wall is hull. It is the one thing on the object layer that can
         // stand where there is no deck, which is what lets a ship be walled
         // before it is floored.
-        requires_floor: false,
+        requires: Some(Layer::Structure),
         use_spots: &[],
-        cost: &[(ResourceId::Metal, 2)],
-        mass: 8.0,
+        price: 100,
+        shields: false,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 2)],
         thrust: 0.0,
     },
     PartDef {
@@ -208,12 +328,14 @@ pub static PARTS: [PartDef; 15] = [
         footprint: (1, 1),
         layer: Layer::Object,
         blocks_movement: false,
-        requires_floor: true,
+        requires: Some(Layer::Floor),
         // Nobody *uses* a door; they walk through it. It earns its keep in
         // the reachability check, which lets a route pass through one.
         use_spots: &[],
-        cost: &[(ResourceId::Metal, 2), (ResourceId::Components, 1)],
-        mass: 6.0,
+        price: 400,
+        shields: false,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 2), (ResourceId::Components, 2)],
         thrust: 0.0,
     },
     PartDef {
@@ -221,16 +343,14 @@ pub static PARTS: [PartDef; 15] = [
         footprint: (2, 3),
         layer: Layer::Object,
         blocks_movement: true,
-        requires_floor: true,
+        requires: Some(Layer::Floor),
         // Beside the middle of the left-hand side. Asymmetric on purpose:
         // it is the part the rotation test pins by hand.
         use_spots: &[(-1, 1)],
-        cost: &[
-            (ResourceId::Metal, 40),
-            (ResourceId::Fuel, 10),
-            (ResourceId::Components, 20),
-        ],
-        mass: 400.0,
+        price: 20_000,
+        shields: true,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 40), (ResourceId::Components, 40)],
         thrust: 500.0,
     },
     PartDef {
@@ -238,10 +358,12 @@ pub static PARTS: [PartDef; 15] = [
         footprint: (1, 2),
         layer: Layer::Object,
         blocks_movement: true,
-        requires_floor: true,
+        requires: Some(Layer::Floor),
         use_spots: &[(-1, 0)],
-        cost: &[(ResourceId::Metal, 6), (ResourceId::Components, 2)],
-        mass: 30.0,
+        price: 800,
+        shields: false,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 3), (ResourceId::Components, 2)],
         thrust: 0.0,
     },
     PartDef {
@@ -249,10 +371,12 @@ pub static PARTS: [PartDef; 15] = [
         footprint: (1, 1),
         layer: Layer::Object,
         blocks_movement: true,
-        requires_floor: true,
+        requires: Some(Layer::Floor),
         use_spots: &[(0, 1)],
-        cost: &[(ResourceId::Metal, 8), (ResourceId::Components, 6)],
-        mass: 60.0,
+        price: 1_500,
+        shields: false,
+        capacity: Some((Storage::ColdStore, 100)),
+        recipe: &[(ResourceId::Metal, 6), (ResourceId::Components, 6)],
         thrust: 0.0,
     },
     PartDef {
@@ -260,10 +384,12 @@ pub static PARTS: [PartDef; 15] = [
         footprint: (2, 1),
         layer: Layer::Object,
         blocks_movement: true,
-        requires_floor: true,
+        requires: Some(Layer::Floor),
         use_spots: &[(0, 1), (1, 1)],
-        cost: &[(ResourceId::Metal, 6)],
-        mass: 25.0,
+        price: 600,
+        shields: false,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 3)],
         thrust: 0.0,
     },
     PartDef {
@@ -271,10 +397,12 @@ pub static PARTS: [PartDef; 15] = [
         footprint: (1, 1),
         layer: Layer::Object,
         blocks_movement: true,
-        requires_floor: true,
+        requires: Some(Layer::Floor),
         use_spots: &[(0, 1)],
-        cost: &[(ResourceId::Metal, 5), (ResourceId::Components, 4)],
-        mass: 30.0,
+        price: 1_200,
+        shields: false,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 3), (ResourceId::Components, 3)],
         thrust: 0.0,
     },
     PartDef {
@@ -282,10 +410,12 @@ pub static PARTS: [PartDef; 15] = [
         footprint: (1, 1),
         layer: Layer::Object,
         blocks_movement: true,
-        requires_floor: true,
+        requires: Some(Layer::Floor),
         use_spots: &[(0, 1)],
-        cost: &[(ResourceId::Metal, 6), (ResourceId::Components, 6)],
-        mass: 45.0,
+        price: 900,
+        shields: false,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 5), (ResourceId::Components, 3)],
         thrust: 0.0,
     },
     PartDef {
@@ -293,13 +423,15 @@ pub static PARTS: [PartDef; 15] = [
         footprint: (2, 1),
         layer: Layer::Object,
         blocks_movement: true,
-        requires_floor: true,
+        requires: Some(Layer::Floor),
         // One side, not both. A table with four use spots makes every
         // fixture design need a gangway round it, which is a rule nobody
         // asked for.
         use_spots: &[(0, 1), (1, 1)],
-        cost: &[(ResourceId::Metal, 5)],
-        mass: 20.0,
+        price: 400,
+        shields: false,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 2)],
         thrust: 0.0,
     },
     PartDef {
@@ -310,10 +442,12 @@ pub static PARTS: [PartDef; 15] = [
         // spot, and a blocking part whose use spot is itself could never
         // validate.
         blocks_movement: false,
-        requires_floor: true,
+        requires: Some(Layer::Floor),
         use_spots: &[(0, 0)],
-        cost: &[(ResourceId::Metal, 2)],
-        mass: 8.0,
+        price: 150,
+        shields: false,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 1)],
         thrust: 0.0,
     },
     PartDef {
@@ -321,10 +455,12 @@ pub static PARTS: [PartDef; 15] = [
         footprint: (1, 1),
         layer: Layer::Object,
         blocks_movement: true,
-        requires_floor: true,
+        requires: Some(Layer::Floor),
         use_spots: &[(0, 1)],
-        cost: &[(ResourceId::Metal, 5), (ResourceId::Components, 3)],
-        mass: 25.0,
+        price: 1_000,
+        shields: false,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 3), (ResourceId::Components, 1)],
         thrust: 0.0,
     },
     PartDef {
@@ -332,10 +468,12 @@ pub static PARTS: [PartDef; 15] = [
         footprint: (1, 1),
         layer: Layer::Object,
         blocks_movement: true,
-        requires_floor: true,
+        requires: Some(Layer::Floor),
         use_spots: &[(0, 1)],
-        cost: &[(ResourceId::Metal, 4), (ResourceId::Components, 2)],
-        mass: 15.0,
+        price: 500,
+        shields: false,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 2)],
         thrust: 0.0,
     },
     PartDef {
@@ -343,10 +481,12 @@ pub static PARTS: [PartDef; 15] = [
         footprint: (2, 2),
         layer: Layer::Object,
         blocks_movement: true,
-        requires_floor: true,
+        requires: Some(Layer::Floor),
         use_spots: &[(0, 2)],
-        cost: &[(ResourceId::Metal, 12), (ResourceId::Components, 10)],
-        mass: 80.0,
+        price: 4_000,
+        shields: false,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 8), (ResourceId::Components, 8)],
         thrust: 0.0,
     },
     PartDef {
@@ -354,13 +494,207 @@ pub static PARTS: [PartDef; 15] = [
         footprint: (1, 1),
         layer: Layer::Object,
         blocks_movement: true,
-        requires_floor: true,
+        requires: Some(Layer::Floor),
         use_spots: &[(0, 1)],
-        cost: &[(ResourceId::Metal, 3)],
-        mass: 10.0,
+        price: 150,
+        shields: false,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 1), (ResourceId::Components, 1)],
+        thrust: 0.0,
+    },
+    // --- the frame, and the hull on it ------------------------------------
+    PartDef {
+        kind: PartKind::Structure,
+        footprint: (1, 1),
+        layer: Layer::Structure,
+        // Nothing stands on structure: it is under everything, and a body
+        // walks over the deck laid on it rather than over the frame.
+        blocks_movement: false,
+        // The only part that needs nothing. Everything else is over it.
+        requires: None,
+        use_spots: &[],
+        price: 50,
+        shields: false,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 2)],
+        thrust: 0.0,
+    },
+    PartDef {
+        kind: PartKind::OutsideWall,
+        footprint: (1, 1),
+        layer: Layer::Object,
+        blocks_movement: true,
+        // Hull, like a plain wall: it stands on the frame with no deck
+        // needed, which is what lets a ship be skinned before it is floored.
+        requires: Some(Layer::Structure),
+        use_spots: &[],
+        price: 200,
+        shields: true,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 4), (ResourceId::Components, 1)],
+        thrust: 0.0,
+    },
+    // --- systems -----------------------------------------------------------
+    PartDef {
+        kind: PartKind::Helm,
+        footprint: (2, 1),
+        layer: Layer::Object,
+        blocks_movement: true,
+        requires: Some(Layer::Floor),
+        // One seat at it. A second would mean two Bims flying one ship,
+        // which is a decision the play phase has not taken.
+        use_spots: &[(0, 1)],
+        price: 5_000,
+        shields: false,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 4), (ResourceId::Components, 20)],
+        thrust: 0.0,
+    },
+    PartDef {
+        kind: PartKind::Reactor,
+        footprint: (2, 2),
+        layer: Layer::Object,
+        blocks_movement: true,
+        requires: Some(Layer::Floor),
+        // Nobody works a reactor by hand. There is no power simulation yet
+        // and no chain walks to one, so it has nowhere to stand and wants
+        // none.
+        use_spots: &[],
+        price: 12_000,
+        shields: false,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 30), (ResourceId::Components, 30)],
+        thrust: 0.0,
+    },
+    PartDef {
+        kind: PartKind::PowerConduit,
+        footprint: (1, 1),
+        layer: Layer::Utility,
+        blocks_movement: false,
+        requires: Some(Layer::Structure),
+        use_spots: &[],
+        price: 20,
+        shields: false,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 1)],
+        thrust: 0.0,
+    },
+    PartDef {
+        kind: PartKind::Battery,
+        footprint: (1, 1),
+        layer: Layer::Object,
+        blocks_movement: true,
+        requires: Some(Layer::Floor),
+        use_spots: &[],
+        price: 3_000,
+        shields: false,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 4), (ResourceId::Components, 10)],
+        thrust: 0.0,
+    },
+    PartDef {
+        kind: PartKind::FuelTank,
+        footprint: (2, 2),
+        layer: Layer::Object,
+        blocks_movement: true,
+        requires: Some(Layer::Floor),
+        // Somewhere to stand to fill it, below the left-hand column, the
+        // same way the bay is approached.
+        use_spots: &[(0, 2)],
+        price: 4_000,
+        shields: false,
+        capacity: Some((Storage::FuelTank, 200)),
+        recipe: &[(ResourceId::Metal, 10)],
+        thrust: 0.0,
+    },
+    PartDef {
+        kind: PartKind::LifeSupport,
+        footprint: (2, 2),
+        layer: Layer::Object,
+        blocks_movement: true,
+        requires: Some(Layer::Floor),
+        use_spots: &[],
+        price: 6_000,
+        shields: false,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 8), (ResourceId::Components, 12)],
+        thrust: 0.0,
+    },
+    PartDef {
+        kind: PartKind::Airlock,
+        footprint: (1, 2),
+        layer: Layer::Object,
+        // A way out, so a way through: it is a door with a hull rating, and
+        // the reachability check walks it like one.
+        blocks_movement: false,
+        requires: Some(Layer::Floor),
+        use_spots: &[],
+        price: 3_000,
+        shields: true,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 8), (ResourceId::Components, 6)],
+        thrust: 0.0,
+    },
+    PartDef {
+        kind: PartKind::SensorArray,
+        footprint: (1, 1),
+        layer: Layer::Object,
+        blocks_movement: true,
+        // Bolted to the frame on the outside, like the hull it sits in.
+        requires: Some(Layer::Structure),
+        use_spots: &[],
+        price: 4_000,
+        shields: true,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 3), (ResourceId::Components, 12)],
+        thrust: 0.0,
+    },
+    // --- crew ---------------------------------------------------------------
+    PartDef {
+        kind: PartKind::Shelf,
+        footprint: (1, 1),
+        layer: Layer::Object,
+        blocks_movement: true,
+        requires: Some(Layer::Floor),
+        use_spots: &[(0, 1)],
+        price: 300,
+        shields: false,
+        capacity: Some((Storage::Shelf, 100)),
+        recipe: &[(ResourceId::Metal, 2)],
+        thrust: 0.0,
+    },
+    PartDef {
+        kind: PartKind::Shower,
+        footprint: (1, 1),
+        layer: Layer::Object,
+        blocks_movement: true,
+        requires: Some(Layer::Floor),
+        use_spots: &[(0, 1)],
+        price: 1_200,
+        shields: false,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 3), (ResourceId::Components, 2)],
         thrust: 0.0,
     },
 ];
+
+/// What a part weighs: its recipe, added up.
+///
+/// **There is no other answer.** A part does not carry a mass of its own
+/// beside the materials it is made of, because the two could then disagree —
+/// and a part that weighs more than what went into it is mass appearing out
+/// of nothing every time one is built. See [`crate::materials`] for what
+/// that buys.
+///
+/// Strictly positive, which [`defs_are_sound`] checks: every recipe has
+/// something in it and every material weighs something.
+pub fn part_mass(kind: PartKind) -> f64 {
+    kind.def()
+        .recipe
+        .iter()
+        .map(|&(id, units)| units as f64 * id.mass_per_unit())
+        .sum()
+}
 
 /// The footprint a part covers once it is turned: tiles across and down.
 ///
@@ -419,9 +753,23 @@ pub fn use_spots(kind: PartKind, rotation: Rotation) -> Vec<(i32, i32)> {
         .collect()
 }
 
+/// Whether one recipe holds together: something in it, only materials, a
+/// real number of each, and no resource named twice — two entries for metal
+/// would be a part whose weight depends on which one a reader stopped at.
+fn recipe_is_sound(recipe: &'static [(ResourceId, u32)]) -> bool {
+    !recipe.is_empty()
+        && recipe.iter().enumerate().all(|(i, &(id, units))| {
+            let material = id == ResourceId::Metal || id == ResourceId::Components;
+            let once = !recipe[..i].iter().any(|&(seen, _)| seen == id);
+            material && units > 0 && once
+        })
+}
+
 /// Whether the table above holds together: one entry per kind, in order, each
-/// weighing something, thrust on engines and nowhere else, a footprint with
-/// area in it, and nothing on the floor layer that is not the floor.
+/// made of something and costing something, thrust on engines and nowhere
+/// else, a footprint with area in it, exactly one part on the floor layer and
+/// exactly one on the structure layer, nothing requiring its own layer, and
+/// no container that holds nothing.
 pub fn defs_are_sound() -> bool {
     if PARTS.len() != PartKind::ALL.len() {
         return false;
@@ -430,14 +778,23 @@ pub fn defs_are_sound() -> bool {
         let def = &PARTS[i];
         let engine = kind == PartKind::Engine;
         def.kind == kind
-            && def.mass > 0.0
-            && def.mass.is_finite()
+            && recipe_is_sound(def.recipe)
+            && part_mass(kind) > 0.0
+            && part_mass(kind).is_finite()
             && def.thrust.is_finite()
             && def.thrust >= 0.0
             && (def.thrust > 0.0) == engine
             && def.footprint.0 > 0
             && def.footprint.1 > 0
             && (def.layer == Layer::Floor) == (kind == PartKind::Floor)
-            && def.cost.iter().all(|&(_, units)| units > 0)
+            && (def.layer == Layer::Structure) == (kind == PartKind::Structure)
+            // A part standing on its own layer could never be placed: the
+            // tile it needs is the tile it would fill.
+            && def.requires != Some(def.layer)
+            // Structure is the bottom of the stack, and the only thing that
+            // may need nothing under it.
+            && (def.requires.is_none() == (kind == PartKind::Structure))
+            && def.price > 0
+            && def.capacity.is_none_or(|(_, units)| units > 0)
     })
 }

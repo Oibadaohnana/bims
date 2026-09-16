@@ -1,0 +1,20 @@
+# One body's health: what is wrong with it, what that costs it, and when it
+# dies of it.
+#
+# Pure. No rendering, no wasm exports, no Bim — the play phase will hold one
+# of these per crew member and hand it an exposure reading every frame, and a
+# native server has to work out the same damage from the same readings. Two
+# implementations of that would be two different games.
+#
+# It depends on `time` for how long a day is and on nothing else.
+# `crates/game/src/health.rs` is a different thing entirely: the behaviour
+# test room's hunger-and-sleep bar, which nothing here imports and which is
+# not being ported.
+[package]
+name = "health"
+version = "0.1.0"
+edition = "2024"
+description = "Health points, conditions and death — radiation dose, sickness and cancer"
+
+[dependencies]
+time = { path = "../time" }

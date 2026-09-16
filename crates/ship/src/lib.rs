@@ -1,8 +1,8 @@
 //! The ship designer, as the browser sees it.
 //!
 //! The design phase runs here: `web/ship.html` hands this module a canvas
-//! size and the four numbers the lobby chose, then each frame asks it to
-//! rebuild a shape buffer and reads that buffer straight out of wasm memory.
+//! size and the numbers the lobby chose, then each frame asks it to rebuild a
+//! shape buffer and reads that buffer straight out of wasm memory.
 //! The format is the room's twelve floats a shape, so one replay loop paints
 //! either page — but this is a **separate cdylib** and imports nothing from
 //! `crates/game`.
@@ -13,11 +13,17 @@
 //!
 //! # The boundary
 //!
-//! **No strings cross it.** The parts, the resources, the reasons an edit was
+//! **No strings cross it.** The parts, the prices, the reasons an edit was
 //! refused and the faults in a design are all numbers, and `PART_NAMES`,
-//! `RESOURCE_NAMES`, `EDIT_LINES` and `ISSUE_LINES` in `web/ship.js` are
-//! where the words live. Adding a part is an enum variant, a name in that
-//! file, and the range check in the tests.
+//! `EDIT_LINES` and `ISSUE_LINES` in `web/ship.js` are where the words live.
+//! Adding a part is an enum variant, a name in that file, and the range check
+//! in the tests.
+//!
+//! **Money crosses in two halves.** A [`shipdesign::Money`] is a `u64` and
+//! the boundary carries `u32`, so every money export is a `_hi` and a `_lo`
+//! — the same arrangement `ship_hash_hi`/`ship_hash_lo` has been using for
+//! the design hash. The host puts the two back together; the euro sign and
+//! the digit grouping are its business and are never made in here.
 
 mod draw;
 mod editor;
@@ -28,7 +34,7 @@ use editor::Editor;
 use physics::{Facing, ResourceId};
 use shipdesign::parts::{PartKind, footprint};
 use shipdesign::validate::Severity;
-use shipdesign::{RESOURCE_COUNT, TILE};
+use shipdesign::{Money, Storage, TILE, storage, trade_price};
 
 /// wasm is single-threaded and the host drives every call, so one global is
 /// both sufficient and safe in practice. Same arrangement as the room's.
@@ -71,14 +77,20 @@ pub extern "C" fn ship_tile() -> u32 {
 
 /// Open a design phase.
 ///
-/// `build_area` is tiles a side and `stock_permille` is the lobby's stockpile
-/// factor in thousandths — ×0.5 arrives as 500. Both, with `players` and
-/// `local_slot`, come off the query string `web/builder.js` navigated with,
-/// and all four are numbers because nothing else crosses this boundary.
+/// `build_area` is tiles a side and `money_per_bim` is what each of the crew
+/// brings, in whole euros and in the two halves money always crosses in. Both,
+/// with `players` and `local_slot`, come off the query string
+/// `web/builder.js` navigated with, and every one of them is a number because
+/// nothing else crosses this boundary.
+///
+/// The pool is `economy::starting_pool` of those two, worked out in
+/// [`editor::Editor::new`] so that the wasm and a native server arrive at it
+/// the same way.
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_init(
     build_area: u32,
-    stock_permille: u32,
+    money_per_bim_hi: u32,
+    money_per_bim_lo: u32,
     players: u32,
     local_slot: u32,
     width: f32,
@@ -87,13 +99,28 @@ pub extern "C" fn ship_init(
     unsafe {
         EDITOR = Some(Editor::new(
             build_area,
-            stock_permille,
+            money(money_per_bim_hi, money_per_bim_lo),
             players,
             local_slot,
             width,
             height,
         ))
     }
+}
+
+/// Two `u32` halves back into one [`Money`]. The other direction is
+/// [`hi`] and [`lo`] below.
+fn money(hi: u32, lo: u32) -> Money {
+    ((hi as Money) << 32) | lo as Money
+}
+
+/// The top half of a money figure, for an export that hands one out.
+fn hi(amount: Money) -> u32 {
+    (amount >> 32) as u32
+}
+
+fn lo(amount: Money) -> u32 {
+    amount as u32
 }
 
 #[unsafe(no_mangle)]
@@ -173,17 +200,18 @@ pub extern "C" fn ship_part_h(kind: u32) -> u32 {
     with_kind(kind, |k| footprint(k, editor().ghost).1)
 }
 
-/// What one of them costs in `resource`. Zero for a resource it does not use.
+/// What one of them costs, in whole euros. In two halves, like every other
+/// money export.
+///
+/// The palette shows it, and so does the readout by the pointer.
 #[unsafe(no_mangle)]
-pub extern "C" fn ship_part_cost(kind: u32, resource: u32) -> u32 {
-    with_kind(kind, |k| {
-        k.def()
-            .cost
-            .iter()
-            .find(|&&(id, _)| id as u32 == resource)
-            .map(|&(_, units)| units)
-            .unwrap_or(0)
-    })
+pub extern "C" fn ship_part_price_hi(kind: u32) -> u32 {
+    hi(with_kind(kind, |k| k.def().price))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_part_price_lo(kind: u32) -> u32 {
+    lo(with_kind(kind, |k| k.def().price))
 }
 
 /// The colour the part is drawn in, as a byte. The palette swatches are
@@ -361,34 +389,112 @@ pub extern "C" fn ship_remove(part_id: u32) -> u32 {
     editor().remove(part_id)
 }
 
-// --- the stockpile --------------------------------------------------------
+// --- the money ------------------------------------------------------------
+
+/// What the crew have between them: everybody's money, plus the lone
+/// player's bonus. Fixed for the whole phase.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_pool_hi() -> u32 {
+    hi(editor().budget.pool)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_pool_lo() -> u32 {
+    lo(editor().budget.pool)
+}
+
+/// What is left of it. Never negative; `apply` refuses anything that would
+/// take it there, and it is **derived from the design** every time rather
+/// than decremented as parts go down.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_remaining_hi() -> u32 {
+    let editor = editor();
+    hi(editor.budget.remaining(&editor.design))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_remaining_lo() -> u32 {
+    let editor = editor();
+    lo(editor.budget.remaining(&editor.design))
+}
+
+// --- the station's goods, and the hold ------------------------------------
+//
+// Supply is unlimited and every station charges the same; what bounds a
+// purchase is the pool and the ship. All three of those are `economy` and
+// `shipdesign` — nothing here decides anything, it only asks.
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_resource_count() -> u32 {
-    RESOURCE_COUNT as u32
+    ResourceId::ALL.len() as u32
+}
+
+/// What a unit of it costs at the station.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_trade_price_hi(resource: u32) -> u32 {
+    hi(with_resource(resource, trade_price))
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn ship_stock(resource: u32) -> u32 {
-    editor()
-        .budget
-        .stockpile
-        .get(resource as usize)
-        .copied()
-        .unwrap_or(0)
+pub extern "C" fn ship_trade_price_lo(resource: u32) -> u32 {
+    lo(with_resource(resource, trade_price))
 }
 
-/// What is left of the stockpile. Never negative; `apply` refuses anything
-/// that would take it there.
+/// Units of it aboard.
 #[unsafe(no_mangle)]
-pub extern "C" fn ship_remaining(resource: u32) -> u32 {
+pub extern "C" fn ship_cargo(resource: u32) -> u32 {
     let editor = editor();
-    editor
-        .budget
-        .remaining(&editor.design)
+    with_resource(resource, |id| editor.design.carrying(id))
+}
+
+/// Which class of storage it is stowed in — a `Storage` code, which indexes
+/// `STORAGE_NAMES` in `web/ship.js`.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_storage_of(resource: u32) -> u32 {
+    with_resource(resource, |id| storage(id).code())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_storage_count() -> u32 {
+    Storage::ALL.len() as u32
+}
+
+/// How much of that class the ship has, over every part that provides it.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_storage_capacity(class: u32) -> u32 {
+    let editor = editor();
+    with_storage(class, |c| editor.design.capacity(c))
+}
+
+/// How much of it is taken up by what is aboard.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_storage_used(class: u32) -> u32 {
+    let editor = editor();
+    with_storage(class, |c| editor.design.stored(c))
+}
+
+/// Take goods aboard. `0` means it took; anything else is an `EditError`
+/// code and indexes `EDIT_LINES`, the same as a placement.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_buy(resource: u32, units: u32) -> u32 {
+    editor().buy(resource, units)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_sell(resource: u32, units: u32) -> u32 {
+    editor().sell(resource, units)
+}
+
+fn with_resource<T: Default>(resource: u32, f: impl FnOnce(ResourceId) -> T) -> T {
+    ResourceId::ALL
         .get(resource as usize)
         .copied()
-        .unwrap_or(0)
+        .map(f)
+        .unwrap_or_default()
+}
+
+fn with_storage<T: Default>(class: u32, f: impl FnOnce(Storage) -> T) -> T {
+    Storage::from_code(class).map(f).unwrap_or_default()
 }
 
 // --- what is wrong with it ------------------------------------------------
@@ -434,6 +540,17 @@ pub extern "C" fn ship_issue_tile_count(i: u32) -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_has_errors() -> u32 {
     editor().has_errors() as u32
+}
+
+/// How many tiles the outside can see into.
+///
+/// The tint itself is painted in here — it is on whenever the map is not
+/// empty, whatever the issue list is doing — so this is for the page's own
+/// readout and for the harness. `ship_issue_tile_count` says the same thing
+/// about the warning row; this says it without going through the list.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_exposed_count() -> u32 {
+    editor().exposed().len() as u32
 }
 
 /// Ring one issue's tiles brighter than the rest, while the pointer rests on
@@ -548,7 +665,7 @@ pub extern "C" fn ship_acceleration(axis: u32) -> f64 {
 // --- the self check -------------------------------------------------------
 
 /// Every bit set means the wasm build agrees with the native one.
-pub const SELF_CHECK_ALL: u32 = 0b11111;
+pub const SELF_CHECK_ALL: u32 = 0b111111;
 
 /// What a native `cargo test` cannot answer: does *this target* get the same
 /// answers?
@@ -581,8 +698,25 @@ pub extern "C" fn ship_self_check() -> u32 {
     if !shipdesign::has_errors(&shipdesign::validate(&reference(4), 4)) {
         bits |= 1 << 3;
     }
-    if draw::STRIDE == 12 && RESOURCE_COUNT == ResourceId::ALL.len() {
+    // The draw format, and the money arithmetic: a lone player's pool is
+    // their own money plus the bonus, and a crew's is nothing but their own.
+    // It is the one sum two machines have to agree on down to the euro.
+    let solo = economy::starting_pool(100_000, 1) == Ok(120_000);
+    let crew = economy::starting_pool(100_000, 4) == Ok(400_000);
+    let none = economy::starting_pool(100_000, 0).is_err();
+    if draw::STRIDE == 12 && solo && crew && none {
         bits |= 1 << 4;
+    }
+    // The reference is carrying what it is meant to carry, and the sealed
+    // hull is sealed. Both are in the hash now, and both are the kind of
+    // thing that could come out differently on a target with a different
+    // idea of what a `u32` sums to.
+    let design = reference(4);
+    let stowed = shipdesign::fixture::REFERENCE_CARGO
+        .iter()
+        .all(|&(id, units)| design.carrying(id) == units);
+    if stowed && shipdesign::exposure(&design).is_empty() {
+        bits |= 1 << 5;
     }
     bits
 }

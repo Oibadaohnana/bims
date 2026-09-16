@@ -53,6 +53,7 @@ const PART_NAMES = [
   "Sensor array",
   "Shelf",
   "Shower",
+  "Thruster",
 ];
 
 /** The palette, grouped the way a ship is thought about rather than the way
@@ -66,7 +67,7 @@ const PART_GROUPS = [
   // Hull first, in the order a ship is actually built: frame, deck, skin,
   // then the ways through it.
   { name: "Hull", kinds: [15, 0, 1, 16, 2, 23] },
-  { name: "Systems", kinds: [3, 17, 18, 19, 20, 21, 22, 24] },
+  { name: "Systems", kinds: [3, 27, 17, 18, 19, 20, 21, 22, 24] },
   { name: "Crew", kinds: [4, 9, 10, 26] },
   { name: "Galley", kinds: [5, 6, 7, 8] },
   { name: "Heads", kinds: [11, 12] },
@@ -133,13 +134,118 @@ const ISSUE_LINES = {
   11: "Somewhere a Bim has to stand is blocked.",
   12: "Parts nobody could walk between.",
   20: "No engine — the ship goes nowhere.",
-  21: "Nothing pushes on every axis: it cannot stop or cannot steer.",
+  21: "No engine pushes it forward, so it cannot set off.",
   22: "No hydroponic bay. The food aboard is all the food there will be.",
   23: "No broom locker, so nothing to sweep the deck with.",
   24: "The outside can see in. The crew will be irradiated here.",
   25: "Nothing to eat aboard.",
   26: "No helm, so nobody can fly it.",
+  27: "No thruster, so nothing turns the ship.",
+  28: "No airlock, so no way off it — a station can only be held beside.",
+  29: "No sensor array. Nothing will be seen beyond eyesight.",
+  30: "No fuel aboard, so no trip can be started.",
 };
+
+/** Why a trip could not be planned. Indexed by `flight::PlanError`; 0 never
+ * appears because 0 is "nothing went wrong". */
+const PLAN_ERRORS = {
+  1: "No engine pushes the ship forward.",
+  2: "Nothing to turn with — it cannot aim or stop.",
+  3: "No helm to fly it from.",
+  4: "Not enough fuel that is not already spoken for.",
+  5: "Nobody has found that yet.",
+  6: "The ship is already there.",
+  7: "No fuel aboard at all.",
+};
+
+/** Why an order did nothing. Indexed by `world::Refusal`. Separate from the
+ * list above on purpose: "you are not docked" and "you have no fuel" are
+ * different things to be told, and a player given the wrong one goes and
+ * solves the wrong problem. */
+const REFUSALS = {
+  1: "not while the ship is away from a station",
+  2: "there is not the money",
+  3: "there is nowhere aboard to put it",
+  4: "there is not that much aboard to sell",
+  5: "that is not your order to give",
+  6: "there is no trip to stop",
+  7: "the sum will not go",
+};
+
+/** Which part of a trip the ship is in. Indexed by `flight::Phase`. */
+const PHASE_NAMES = ["Aligning", "Burning", "Turning", "Braking", "Holding"];
+
+/** What happened. Indexed by the code `world::WorldEvent::code` gives, and
+ * each one is handed the one number the event carries.
+ *
+ * An event whose code has no line here is **dropped** rather than shown as a
+ * placeholder — the same rule the diary follows in web/bims.js — and the count
+ * check in scratchpad/ship-check.mjs is what catches a missing one. */
+const EVENT_LINES = {
+  1: () => "Under way.",
+  2: (id) => `Docked at station ${id}.`,
+  3: () => "Holding station.",
+  4: () => "Stopping.",
+  5: (why) => `Cannot fly there — ${PLAN_ERRORS[why] ?? "no reason given."}`,
+  6: () => "Something new on the scanner.",
+  7: (kind) => (kind === 0 ? "Out into open space." : "Alongside."),
+  8: (units) => `${units} aboard.`,
+  9: (units) => `${-units} sold.`,
+  10: (why) => `That could not be done — ${REFUSALS[why] ?? "no reason given"}.`,
+};
+
+/** What each kind of body is called. Indexed by `worldgen::BodyKind`. */
+const BODY_KIND_NAMES = [
+  "Rocky planet",
+  "Gas giant",
+  "Ice world",
+  "Asteroid belt",
+];
+
+/** And each kind of station, by `worldgen::StationKind`. */
+const STATION_KIND_NAMES = [
+  "Orbital",
+  "Refinery",
+  "Mining outpost",
+  "Derelict",
+  "Relay",
+];
+
+/** `physics::ResourceId::Fuel`. The one resource the trade panel has to treat
+ * differently: what is held against a trip under way is not the crew's to
+ * sell. */
+const FUEL = 2;
+
+/** The two views. Indexed by `ship::game::ViewMode`. */
+const VIEW_NAMES = ["Ship", "System map"];
+
+/** How near a click has to come to a map icon to count as picking it, in CSS
+ * pixels. Measured on screen rather than in world units: the thing being aimed
+ * at is an icon, and at a map scale where a whole system fits on a laptop a
+ * world-unit tolerance is either the entire screen or a thousandth of a pixel. */
+const MAP_PICK_SLOP = 14;
+
+/** `ship::game::ViewMode`, the host's half of the pair. */
+const VIEW_SHIP = 0;
+const VIEW_MAP = 1;
+
+/** Ceiling on world steps per frame.
+ *
+ * It has to be at least `TOP_SPEED * 60 / 30`, or the top of the speed range
+ * stops being reachable on a display that is keeping up at 30fps and the world
+ * quietly runs slower than the button says. 24x at 60Hz is 24 steps a frame
+ * and at 30Hz is 48, so this is that with a third of headroom — the same
+ * arrangement, and the same reasoning, as MAX_STEPS_PER_FRAME in web/bims.js. */
+const MAX_STEPS_PER_FRAME = 64;
+
+/** How many lines of what-just-happened stay on screen. */
+const LOG_LINES = 4;
+
+/** The default galaxy shape: `worldgen::GalaxyType::SpiralTwoArm`. The seed's
+ * default is not here — it is `world::data::DEFAULT_SEED` and the page asks
+ * wasm for it, because a constant written down in two places is a constant
+ * that will disagree with itself. */
+const DEFAULT_GALAXY = 0;
 
 /** The one issue that is not just another row.
  *
@@ -162,13 +268,23 @@ const AREA_MIN = 8;
 const AREA_MAX = 120;
 const PLAYERS_MAX = 4;
 const MONEY_MAX = 1000000000;
+/** A seed crosses in two halves, so each of them is a `u32`. */
+const U32_MAX = 4294967295;
+/** `worldgen::GalaxyType` has four shapes in it. */
+const GALAXY_MAX = 3;
 
 /** A number of euros, as words. The **only** place either the sign or the
  * grouping exists — the same rule, and the same function, as web/builder.js:
  * what crosses the boundary is a bare count of euros. */
 function euros(value) {
-  const grouped = String(value).replace(/\B(?=(\d{3})+(?!\d))/g, "\u00a0");
-  return `€${grouped}`;
+  return `€${grouped(value)}`;
+}
+
+/** A big number with its digits in threes. Split out of `euros` because
+ * distances want it too and a distance is not money — but the grouping itself
+ * is one rule, and one rule goes in one place. */
+function grouped(value) {
+  return String(value).replace(/\B(?=(\d{3})+(?!\d))/g, "\u00a0");
 }
 
 /** How long a refusal stays on screen. */
@@ -206,8 +322,15 @@ boot().catch((err) => {
 async function boot() {
   const byId = (id) => document.getElementById(id);
 
+  // Two canvases, one for each half of the page, and exactly one of them is
+  // ever being painted — a screen is hidden by the `hidden` attribute, and a
+  // hidden canvas has no size worth measuring. `stage` is whichever is up.
   const canvas = byId("stage");
   const ctx = canvas.getContext("2d");
+  const gameCanvas = byId("game-stage");
+  const gameCtx = gameCanvas.getContext("2d");
+  let stage = canvas;
+  let stageCtx = ctx;
   const said = byId("said");
 
   // --- what the lobby chose ---------------------------------------------
@@ -245,6 +368,13 @@ async function boot() {
       money: whole(number("money", DEFAULTS.money), 0, MONEY_MAX),
       players,
       slot: whole(number("slot", DEFAULTS.slot), 0, players - 1),
+      // Which world the game will open in. **Temporary**: the lobby's World
+      // tab will pick these, and then they come from there instead of off a
+      // query string. `null` rather than a number when nobody said, so the
+      // fallback can be the one in wasm rather than a second copy here.
+      seedHi: asked.has("seedHi") ? whole(number("seedHi", 0), 0, U32_MAX) : null,
+      seedLo: asked.has("seedLo") ? whole(number("seedLo", 0), 0, U32_MAX) : null,
+      galaxy: whole(number("galaxy", DEFAULT_GALAXY), 0, GALAXY_MAX),
     };
   }
 
@@ -281,10 +411,10 @@ async function boot() {
 
   function resize() {
     dpr = window.devicePixelRatio || 1;
-    const w = Math.max(64, canvas.clientWidth);
-    const h = Math.max(64, canvas.clientHeight);
-    canvas.width = Math.round(w * dpr);
-    canvas.height = Math.round(h * dpr);
+    const w = Math.max(64, stage.clientWidth);
+    const h = Math.max(64, stage.clientHeight);
+    stage.width = Math.round(w * dpr);
+    stage.height = Math.round(h * dpr);
     canvasSize = { w, h };
     return canvasSize;
   }
@@ -298,6 +428,11 @@ async function boot() {
     chosen.money >>> 0,
     chosen.players,
     chosen.slot,
+    // The world. Falling back to the wasm's own default rather than to a
+    // number written down here, so there is one copy of it.
+    chosen.seedHi ?? wasm.ship_default_seed_hi(),
+    chosen.seedLo ?? wasm.ship_default_seed_lo(),
+    chosen.galaxy,
     canvasSize.w,
     canvasSize.h,
   );
@@ -368,6 +503,50 @@ async function boot() {
       return net.host.receive({ from: net.slot, at: designHash(), ...message });
     },
 
+    /** An order to the ship, once the game has started.
+     *
+     * Stamped with the **step** it applies at rather than with a design hash.
+     * The two stamps are two different questions and both are the right one
+     * for what they are on: an Edit has to be judged against the ship it was
+     * made for, and an order has to be judged against *when* — the world moves
+     * on its own, so a message that arrived late is a message about a moment
+     * that has gone. A transport behind this is what makes either mean
+     * anything; locally both ends are here. */
+    order(what) {
+      return net.host.receive({
+        from: net.slot,
+        at: designHash(),
+        step: wasm.ship_world_steps() + 1,
+        // The world this player believes they are in. Nothing reads it yet —
+        // there is no other end to disagree with — and it is stamped on now
+        // because the thing a transport will need is a number to compare, and
+        // a loop that was not built to be comparable is a loop that has to be
+        // rebuilt to be.
+        world: { hi: wasm.ship_world_checksum_hi(), lo: wasm.ship_world_checksum_lo() },
+        order: what,
+      });
+    },
+
+    fly(target) {
+      return net.order({ fly: target });
+    },
+
+    stop() {
+      return net.order({ stop: true });
+    },
+
+    setSpeed(code) {
+      return net.order({ speed: code });
+    },
+
+    /** Take goods aboard, or put them back, at a station. The design phase's
+     * `buy` and `sell` above are the *other* transaction — instant, against a
+     * design, out of a budget — and they stop working the moment the ship is
+     * real. */
+    deal(resource, units, buying) {
+      return net.order({ deal: { resource, units, buying } });
+    },
+
     /** Somebody dropped out. A stub, deliberately: the crew count is frozen
      * at Start and stays frozen for this step, so a ship designed for four
      * still wants four bunks after one leaves. Sizing the ship down under the
@@ -404,6 +583,9 @@ async function boot() {
             wasm.ship_unaccept(message.from);
             took = true;
           }
+        } else if (message.order) {
+          applyOrder(message.from, message.order);
+          took = true;
         }
         const result = { to: message.from, ok: took, why, at: message.at };
         net.emit(took ? "applied" : "rejected", result);
@@ -415,6 +597,28 @@ async function boot() {
   /** The design's identity, in the two halves the boundary carries it in. */
   function designHash() {
     return { hi: wasm.ship_hash_hi(), lo: wasm.ship_hash_lo() };
+  }
+
+  /** Put an order on the world's queue.
+   *
+   * **Queued, never applied.** Every one of these lands at the step the
+   * message was stamped for, which is what makes the stamp mean something —
+   * a command carried out the instant a button was pressed would work
+   * perfectly and would have nowhere for a transport to fit. */
+  function applyOrder(slot, what) {
+    if (what.fly) {
+      const target = what.fly;
+      if (target.node) wasm.ship_cmd_confirm_node(slot, target.node.kind, target.node.id);
+      else wasm.ship_cmd_confirm_point(slot, target.x, target.y);
+    } else if (what.stop) {
+      wasm.ship_cmd_abort(slot);
+    } else if (what.speed !== undefined) {
+      wasm.ship_cmd_speed(slot, what.speed);
+    } else if (what.deal) {
+      const deal = what.deal;
+      if (deal.buying) wasm.ship_cmd_buy(slot, deal.resource, deal.units);
+      else wasm.ship_cmd_sell(slot, deal.resource, deal.units);
+    }
   }
 
   /** Whether the ship can still be changed. */
@@ -774,41 +978,460 @@ async function boot() {
     }
   }
 
-  /** What the play phase will be handed. Nothing consumes it yet, so the
-   * numbers are shown instead — a mass and an acceleration nobody has looked
-   * at is a mass and an acceleration that is quietly wrong. */
-  function paintHandoff() {
-    const carried = [];
-    for (let id = 0; id < resourceCount; id++) {
-      const units = wasm.ship_cargo(id);
-      if (units > 0) carried.push(`${units} ${RESOURCE_NAMES[id] ?? id}`);
-    }
-    const rows = [
-      ["Parts", String(wasm.ship_part_total())],
-      ["Crew aboard", String(net.players)],
-      ["Money left", euros(remaining())],
-      // What was bought is what the crew have to live on, so it is listed
-      // rather than summed: "260 units" tells nobody whether there is food.
-      ["Cargo", carried.length ? carried.join(" · ") : "Nothing aboard"],
-      ["Exposed tiles", String(wasm.ship_exposed_count())],
-      ["Ship mass", wasm.ship_mass().toFixed(1)],
-    ];
-    const axes = ["Forward", "Backward", "Left", "Right"];
-    for (let axis = 0; axis < axes.length; axis++) {
-      rows.push([`Acceleration ${axes[axis].toLowerCase()}`, wasm.ship_acceleration(axis).toFixed(4)]);
-    }
-    const made = [];
-    for (const [name, value] of rows) {
-      const line = document.createElement("div");
-      const label = document.createElement("b");
-      label.textContent = name;
-      const held = document.createElement("span");
-      held.textContent = value;
-      line.append(label, held);
-      made.push(line);
-    }
-    byId("handoff").replaceChildren(...made);
+  // --- the game ----------------------------------------------------------
+  //
+  // One world, one clock, and the page turning the crank on it. The design
+  // phase above is over by the time any of this runs: the ship is settled,
+  // it is docked at the spawn station, and what was left of the pool is in
+  // the crew's hands.
+
+  /** Whether the world is open. One question, one export — see `ship_phase`. */
+  function playing() {
+    return !stillDesigning() && wasm.ship_world_ready() !== 0;
   }
+
+  /** What the helm is aimed at, for the local player and nobody else. Either
+   * `{node: {kind, id}}` or `{x, y}`, which is exactly what `net.fly` takes. */
+  let aimed = null;
+
+  /** Whether the page has already moved over. */
+  let gameShown = false;
+
+  /** Move the page over to the game: swap the canvas, size it, and build the
+   * panels that only exist out here.
+   *
+   * Called from two places on purpose. The local player's own Accept comes
+   * through `afterChange`, which is instant; **anybody else's** arrives as a
+   * message and the page finds out on the next frame. Only one of those two
+   * routes exists today and the other one is the whole point of the seam, so
+   * both are wired up and the guard is what keeps it to once. */
+  function startGame() {
+    if (gameShown) return;
+    gameShown = true;
+    show("game");
+    stage = gameCanvas;
+    stageCtx = gameCtx;
+    resize();
+    wasm.ship_resize(canvasSize.w, canvasSize.h);
+    buildSpeeds();
+    buildGameTrade();
+    paintGame();
+  }
+
+  const speedButtons = [];
+
+  function buildSpeeds() {
+    if (speedButtons.length > 0) return;
+    const row = byId("speed-buttons");
+    const made = [];
+    for (let code = 0; code < wasm.ship_speed_count(); code++) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.speed = String(code);
+      // The label is the multiplier wasm gives, not a table here: a name list
+      // that could disagree with the thing it names is a name list that will.
+      const times = wasm.ship_speed_multiplier(code);
+      button.textContent = times === 0 ? "‖" : `${times}×`;
+      button.addEventListener("click", () => net.setSpeed(code));
+      made.push(button);
+      speedButtons.push({ button, code });
+    }
+    row.replaceChildren(...made);
+  }
+
+  const gameGoodRows = [];
+  const gameHoldRows = [];
+
+  function buildGameTrade() {
+    if (gameGoodRows.length > 0) return;
+    const goods = [];
+    for (let id = 0; id < resourceCount; id++) {
+      const row = document.createElement("div");
+      row.className = "good";
+      row.dataset.resource = String(id);
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = RESOURCE_NAMES[id] ?? `Resource ${id}`;
+      const price = document.createElement("span");
+      price.className = "price";
+      price.textContent = euros(tradePrice(id));
+      const units = document.createElement("span");
+      units.className = "units";
+      const deal = document.createElement("span");
+      deal.className = "deal";
+      for (const step of TRADE_STEPS) deal.appendChild(gameDealButton(id, step, true));
+      for (const step of TRADE_STEPS) deal.appendChild(gameDealButton(id, step, false));
+      row.append(name, price, units, deal);
+      goods.push(row);
+      gameGoodRows.push({ row, units, id });
+    }
+    byId("game-goods").replaceChildren(...goods);
+
+    const holds = [];
+    for (let class_ = 0; class_ < wasm.ship_storage_count(); class_++) {
+      const row = document.createElement("div");
+      row.className = "hold";
+      row.dataset.storage = String(class_);
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = STORAGE_NAMES[class_] ?? `Storage ${class_}`;
+      const used = document.createElement("span");
+      used.className = "used";
+      row.append(name, used);
+      holds.push(row);
+      gameHoldRows.push({ row, used, class: class_ });
+    }
+    byId("game-holds").replaceChildren(...holds);
+  }
+
+  function gameDealButton(resource, step, buying) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = buying ? "deal-on buy" : "deal-on sell";
+    button.dataset[buying ? "buy" : "sell"] = String(step);
+    button.textContent = buying ? `+${step}` : `−${step}`;
+    button.addEventListener("click", () => {
+      if (button.disabled) return;
+      net.deal(resource, step, buying);
+    });
+    return button;
+  }
+
+  /** Everything on the game screen. Repainted every frame, because almost all
+   * of it changes every frame: a clock, a velocity, a fuel gauge. */
+  function paintGame() {
+    paintClock();
+    paintHelm();
+    paintSpeeds();
+    paintGameTrade();
+    paintShipFacts();
+    paintGameReadout();
+  }
+
+  function paintClock() {
+    const minutes = wasm.ship_world_minutes();
+    const hour = Math.floor(minutes / 60);
+    const minute = Math.floor(minutes % 60);
+    byId("clock").textContent =
+      `Day ${wasm.ship_world_day()} · ` +
+      `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+    byId("purse").textContent = euros(remaining());
+
+    const docked = wasm.ship_docked_at();
+    const frame = wasm.ship_frame_kind() !== 0 ? nodeName(wasm.ship_frame_node_kind(), wasm.ship_frame_node_id()) : "";
+    byId("where").textContent = docked
+      ? `Docked · ${nodeName(1, docked - 1)}`
+      : frame
+        ? `Alongside ${frame}`
+        : "Open space";
+  }
+
+  /** What a thing on the map is called. A kind and a number, because a kind is
+   * a fixed table and an identity is a number — no strings cross the boundary,
+   * so this is the most the page can honestly say. */
+  function nodeName(kind, id) {
+    return kind === 1
+      ? `${STATION_KIND_NAMES[wasm.ship_map_type(mapIndexOf(kind, id))] ?? "Station"} ${id}`
+      : `${BODY_KIND_NAMES[wasm.ship_map_type(mapIndexOf(kind, id))] ?? "Body"} ${id}`;
+  }
+
+  function mapIndexOf(kind, id) {
+    for (let i = 0; i < wasm.ship_map_count(); i++) {
+      if (wasm.ship_map_kind(i) === kind && wasm.ship_map_id(i) === id) return i;
+    }
+    return 0;
+  }
+
+  /** The trip the local player is looking at, or the one being flown.
+   *
+   * The preview is worked out here and is **never** a command: two players
+   * hovering over different planets must not be an argument about where the
+   * ship is going. */
+  function paintHelm() {
+    // Re-quoted every frame while the player is aiming at something. A quote
+    // goes stale the moment the ship moves, and while a trip is already under
+    // way most of the bill is *stopping first* — which shrinks as the ship
+    // slows. A number that was right when it was worked out and is wrong now
+    // is worse than no number.
+    if (aimed === null) wasm.ship_preview_clear();
+    else if (aimed.node) wasm.ship_preview_node(mapIndexOf(aimed.node.kind, aimed.node.id));
+    else wasm.ship_preview_point(aimed.x, aimed.y);
+
+    const plan = byId("plan");
+    const state = wasm.ship_preview_state();
+    const rows = [];
+    if (state === 2) {
+      plan.className = "refused";
+      rows.push(["", PLAN_ERRORS[wasm.ship_preview_error()] ?? "That cannot be flown."]);
+    } else if (state === 1) {
+      plan.className = "";
+      rows.push(["Going to", describeAim()]);
+      const minutes = wasm.ship_preview_minutes();
+      rows.push(["Arrives in", spell(minutes)]);
+      const stopping = wasm.ship_preview_stopping();
+      // A redirect stops first, and that is usually most of the bill. Saying
+      // the total without saying that reads as the new trip being enormous.
+      if (stopping > 0) rows.push(["Stopping first", spell(stopping)]);
+      rows.push(["Fuel", `${Math.ceil(wasm.ship_preview_fuel())} of ${wasm.ship_fuel_aboard() - wasm.ship_fuel_reserved()} spare`]);
+      rows.push(["Ends", wasm.ship_preview_docks() !== 0 ? "Docked" : "Holding"]);
+    } else {
+      plan.className = "";
+      rows.push(["", "Open the map and click somewhere to plot a trip."]);
+    }
+    plan.replaceChildren(...rows.map(([label, value]) => {
+      const line = document.createElement("div");
+      if (label) {
+        const b = document.createElement("b");
+        b.textContent = label;
+        line.appendChild(b);
+      } else {
+        line.className = "empty";
+      }
+      const span = document.createElement("span");
+      span.textContent = value;
+      line.appendChild(span);
+      return line;
+    }));
+
+    byId("confirm").disabled = aimed === null || state !== 1;
+    byId("abort").disabled = wasm.ship_world_state() !== 2;
+  }
+
+  /** What the helm is pointed at, and how far off it is.
+   *
+   * The distance comes from the map list rather than from the plan: a plan is
+   * a route, and "how far away is it" is a question about the thing. */
+  function describeAim() {
+    if (aimed === null) return "Nowhere";
+    const here = { x: wasm.ship_world_x(), y: wasm.ship_world_y() };
+    if (aimed.node) {
+      const i = mapIndexOf(aimed.node.kind, aimed.node.id);
+      const away = Math.hypot(wasm.ship_map_x(i) - here.x, wasm.ship_map_y(i) - here.y);
+      return `${nodeName(aimed.node.kind, aimed.node.id)} · ${grouped(Math.round(away))} units`;
+    }
+    const away = Math.hypot(aimed.x - here.x, aimed.y - here.y);
+    return `A point in space · ${grouped(Math.round(away))} units`;
+  }
+
+  /** Game minutes as something a person can read. Days and hours, because a
+   * trip across a system is days and a trip across a dock is minutes. */
+  function spell(minutes) {
+    const whole_ = Math.round(minutes);
+    const days = Math.floor(whole_ / 1440);
+    const hours = Math.floor((whole_ % 1440) / 60);
+    const mins = whole_ % 60;
+    if (days > 0) return `${days}d ${hours}h`;
+    if (hours > 0) return `${hours}h ${mins}m`;
+    return `${mins}m`;
+  }
+
+  function paintSpeeds() {
+    const mine = wasm.ship_speed_request(net.slot);
+    const effective = wasm.ship_effective_speed();
+    for (const { button, code } of speedButtons) {
+      // Two marks, and they mean different things: what *you* asked for, and
+      // what the world is running at. A player held at 1x by somebody else
+      // needs to be able to see that is what happened.
+      const marks = [];
+      if (code === mine) marks.push("on");
+      if (code === effective) marks.push("effective");
+      button.className = marks.join(" ");
+    }
+    const asks = [];
+    for (let slot = 0; slot < net.players; slot++) {
+      const line = document.createElement("div");
+      const who = document.createElement("b");
+      who.textContent = slot === net.slot ? `Player ${slot + 1} (you)` : `Player ${slot + 1}`;
+      const wants = document.createElement("span");
+      const times = wasm.ship_speed_multiplier(wasm.ship_speed_request(slot));
+      wants.textContent = times === 0 ? "paused" : `${times}×`;
+      line.append(who, wants);
+      asks.push(line);
+    }
+    byId("speed-asks").replaceChildren(...asks);
+  }
+
+  /** The station, which is only there while the ship is tied to one. Money
+   * works at a dock and nowhere else — see `shipdesign::materials`. */
+  function paintGameTrade() {
+    const docked = wasm.ship_world_state() === 0;
+    const panel = byId("game-trade");
+    if (docked) panel.removeAttribute("hidden");
+    else panel.setAttribute("hidden", "");
+    if (!docked) return;
+
+    const left = remaining();
+    for (const cell of gameGoodRows) {
+      const aboard = wasm.ship_cargo(cell.id);
+      cell.units.textContent = String(aboard);
+      const class_ = wasm.ship_storage_of(cell.id);
+      const room = wasm.ship_storage_capacity(class_) - wasm.ship_storage_used(class_);
+      const price = tradePrice(cell.id);
+      // Fuel held against a trip under way is not the crew's to sell.
+      const reserved = cell.id === FUEL ? wasm.ship_fuel_reserved() : 0;
+      for (const button of cell.row.querySelectorAll("button")) {
+        const buy = button.dataset.buy;
+        const step = Number(buy ?? button.dataset.sell);
+        button.disabled = buy
+          ? step * price > left || step > room
+          : step > aboard - reserved;
+      }
+      cell.row.className = aboard > 0 ? "good carried" : "good";
+    }
+    for (const cell of gameHoldRows) {
+      const total = wasm.ship_storage_capacity(cell.class);
+      const used = wasm.ship_storage_used(cell.class);
+      cell.used.textContent = `${used} / ${total}`;
+      cell.row.className = total > 0 && used >= total ? "hold full" : "hold";
+    }
+  }
+
+  function paintShipFacts() {
+    const by = wasm.ship_destination_by();
+    const rows = [
+      ["Fuel", `${wasm.ship_fuel_aboard()} aboard, ${wasm.ship_fuel_reserved()} held`],
+      ["Mass", wasm.ship_mass().toFixed(0)],
+      ["Acceleration", wasm.ship_acceleration(0).toFixed(4)],
+      ["Parts", String(wasm.ship_part_total())],
+      // Which tiles the outside can see into. A number rather than a warning:
+      // the design phase already shouted about it, and out here it is a fact
+      // about the ship the crew are living on.
+      ["Exposed tiles", String(wasm.ship_exposed_count())],
+      ["Position", `${grouped(Math.round(wasm.ship_world_x()))}, ${grouped(Math.round(wasm.ship_world_y()))}`],
+      ["Found", `${wasm.ship_map_count()} in this system`],
+      ["Scanner", `${grouped(Math.round(wasm.ship_detection_range()))} units`],
+      ["Route set by", by === 0 ? "Nobody" : `Player ${by}`],
+      ["Crew", String(net.players)],
+    ];
+    byId("ship-facts").replaceChildren(...rows.map(([label, value]) => {
+      const line = document.createElement("div");
+      const b = document.createElement("b");
+      b.textContent = label;
+      const span = document.createElement("span");
+      span.textContent = value;
+      line.append(b, span);
+      return line;
+    }));
+  }
+
+  function paintGameReadout() {
+    byId("view-name").textContent = VIEW_NAMES[wasm.ship_view_mode()] ?? "View";
+    byId("trip-phase").textContent =
+      wasm.ship_world_state() === 2
+        ? wasm.ship_trip_aborting() !== 0
+          ? "Stopping"
+          : (PHASE_NAMES[wasm.ship_trip_phase()] ?? "Under way")
+        : wasm.ship_world_state() === 0
+          ? "Docked"
+          : "Holding";
+    byId("velocity").textContent = `${wasm.ship_world_speed().toFixed(1)} u/min`;
+    // Degrees, because a heading in radians is a number nobody can steer by.
+    const degrees = ((wasm.ship_world_heading() * 180) / Math.PI + 360) % 360;
+    // Which tile the pointer is over, turned back through the heading. Only in
+    // the ship view, and only when it is actually over the hull — a pointer
+    // out in the black is out in the black rather than on the nearest edge.
+    const tile =
+      wasm.ship_view_mode() === VIEW_SHIP && wasm.ship_game_tile_inside() !== 0
+        ? ` · ${wasm.ship_game_tile_x()}, ${wasm.ship_game_tile_y()}`
+        : "";
+    byId("heading").textContent = `${degrees.toFixed(0)}°${tile}`;
+  }
+
+  // --- what just happened --------------------------------------------------
+
+  const logLines = [];
+
+  /** Read the events the last batch of steps threw up, and put them on the
+   * screen.
+   *
+   * An event whose code has no line in EVENT_LINES is **dropped** rather than
+   * shown blank — the same rule the diary follows — and the count check in
+   * scratchpad/ship-check.mjs is what catches a missing one. */
+  function drainEvents() {
+    const count = wasm.ship_event_count();
+    if (count === 0) return;
+    for (let i = 0; i < count; i++) {
+      const line = EVENT_LINES[wasm.ship_event_code(i)];
+      if (!line) continue;
+      logLines.push(line(wasm.ship_event_value(i)));
+    }
+    wasm.ship_events_clear();
+    while (logLines.length > LOG_LINES) logLines.shift();
+    byId("log").replaceChildren(...logLines.map((text) => {
+      const div = document.createElement("div");
+      div.textContent = text;
+      return div;
+    }));
+  }
+
+  // --- flying it ------------------------------------------------------------
+
+  function gameAt(event) {
+    const box = gameCanvas.getBoundingClientRect();
+    return { x: event.clientX - box.left, y: event.clientY - box.top };
+  }
+
+  /** Plot a trip to whatever a click on the map landed on — a thing, or the
+   * empty space beside it, which is a perfectly good place to go. */
+  function aimAt(x, y) {
+    const picked = wasm.ship_map_pick(x, y, MAP_PICK_SLOP);
+    if (picked !== 0) {
+      const i = picked - 1;
+      aimed = { node: { kind: wasm.ship_map_kind(i), id: wasm.ship_map_id(i) } };
+      wasm.ship_preview_node(i);
+      return;
+    }
+    const at = { x: wasm.ship_map_point_x(x, y), y: wasm.ship_map_point_y(x, y) };
+    aimed = at;
+    wasm.ship_preview_point(at.x, at.y);
+  }
+
+  gameCanvas.addEventListener("pointerdown", (event) => {
+    const p = gameAt(event);
+    if (event.button === 1) {
+      panning = true;
+      panFrom = p;
+      gameCanvas.setPointerCapture?.(event.pointerId);
+      event.preventDefault?.();
+      return;
+    }
+    if (wasm.ship_view_mode() === VIEW_MAP) aimAt(p.x, p.y);
+  });
+
+  gameCanvas.addEventListener("pointermove", (event) => {
+    const p = gameAt(event);
+    if (panning) {
+      wasm.ship_pan(p.x - panFrom.x, p.y - panFrom.y);
+      panFrom = p;
+      return;
+    }
+    if (wasm.ship_view_mode() === VIEW_SHIP) wasm.ship_game_hover(p.x, p.y);
+  });
+
+  gameCanvas.addEventListener("pointerup", (event) => {
+    if (!panning) return;
+    panning = false;
+    gameCanvas.releasePointerCapture?.(event.pointerId);
+  });
+
+  gameCanvas.addEventListener("pointerleave", () => {
+    if (!panning) wasm.ship_game_leave();
+  });
+
+  gameCanvas.addEventListener("wheel", (event) => {
+    event.preventDefault?.();
+    const p = gameAt(event);
+    wasm.ship_zoom(p.x, p.y, Math.exp(-event.deltaY * ZOOM_PER_PIXEL));
+  });
+
+  byId("confirm").addEventListener("click", () => {
+    if (aimed === null) return;
+    net.fly(aimed);
+  });
+
+  byId("abort").addEventListener("click", () => {
+    net.stop();
+  });
 
   // --- saying something --------------------------------------------------
 
@@ -970,6 +1593,10 @@ async function boot() {
 
   window.addEventListener("keydown", (event) => {
     const key = String(event.key ?? "").toLowerCase();
+    if (key === "m" && playing()) {
+      wasm.ship_set_view_mode(wasm.ship_view_mode() === VIEW_MAP ? VIEW_SHIP : VIEW_MAP);
+      return;
+    }
     if (key === "r") {
       wasm.ship_rotate_ghost();
       paintPalette();
@@ -977,6 +1604,10 @@ async function boot() {
     }
     if (key === "escape") {
       wasm.ship_drag_cancel();
+      // Stop aiming. The quote goes with the aim rather than outliving it:
+      // `paintHelm` puts one back the moment there is something to quote.
+      aimed = null;
+      wasm.ship_preview_clear();
       return;
     }
     if ("wasd".includes(key)) held.add(key);
@@ -1044,6 +1675,10 @@ async function boot() {
       wasm.ship_draw_len(),
     );
 
+    // Whichever canvas is up. One replay loop for both halves of the page,
+    // because the draw format is the same and so is the transform — what
+    // differs is what the origin is, and that is worked out in wasm.
+    const ctx = stageCtx;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, canvasSize.w, canvasSize.h);
 
@@ -1113,10 +1748,9 @@ async function boot() {
     paintIssues();
     paintCrew();
     paintAccept();
-    if (!stillDesigning()) {
-      paintHandoff();
-      show("done");
-    }
+    // The last Accept settles the ship *and* opens the world — one event, and
+    // `ship_accept` is where both halves of it happen.
+    if (!stillDesigning()) startGame();
   }
 
   net.on("rejected", (result) => {
@@ -1133,16 +1767,51 @@ async function boot() {
   afterChange();
 
   let last = performance.now();
+  /** Steps owed to the world, carried between frames.
+   *
+   * The world advances in fixed steps and never in stretched ones, exactly as
+   * the room does: a 24x step would move the ship several times its own length
+   * and a trip would skip straight past its own braking phase. Speed is more
+   * steps, never bigger ones. */
+  let backlog = 0;
 
   function frame(now) {
     const dt = Math.min((now - last) / 1000, MAX_FRAME_DT);
     last = now;
-    pumpKeys(dt);
-    ageRemark(now);
+
+    if (playing()) {
+      startGame();
+      runWorld(dt);
+    } else {
+      pumpKeys(dt);
+      ageRemark(now);
+    }
+
     wasm.ship_render();
     paint();
-    paintReadout();
+    if (playing()) paintGame();
+    else paintReadout();
     requestAnimationFrame(frame);
+  }
+
+  /** Turn `dt` seconds of real time into world steps, and take them.
+   *
+   * Capped, because a tab that was backgrounded for a minute would otherwise
+   * try to catch up in one frame and lock the page. The cap has to be at least
+   * `TOP_SPEED * 60 / 30` or the top of the range stops being reachable — see
+   * MAX_STEPS_PER_FRAME above. */
+  function runWorld(dt) {
+    pumpKeys(dt);
+    const times = wasm.ship_speed_multiplier(wasm.ship_effective_speed());
+    backlog += dt * wasm.ship_steps_per_second() * times;
+    let steps = 0;
+    while (backlog >= 1 && steps < MAX_STEPS_PER_FRAME) {
+      wasm.ship_world_step();
+      backlog -= 1;
+      steps += 1;
+    }
+    if (backlog > MAX_STEPS_PER_FRAME) backlog = 0; // gave up catching up
+    drainEvents();
   }
 
   requestAnimationFrame(frame);

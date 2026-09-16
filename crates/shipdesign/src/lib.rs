@@ -19,16 +19,39 @@
 //! [`validate`], and finished when every player has accepted the same
 //! [`design_hash`]. No Bims exist.
 //!
-//! **Play** — stage 5, not written. Bims spawn, and every later change has to
-//! be constructed or deconstructed by one of them.
+//! **Play** — `crates/world`. The design phase ends at the last Accept and
+//! the world opens with that ship docked at the spawn station; from then on
+//! there is one clock and everything aboard runs on it. Bims, construction and
+//! health are not wired into it yet, and when they are, every later change has
+//! to be constructed or deconstructed by a Bim.
 //!
 //! They are two phases of **one ship**. The data model here is the one play
-//! uses; it is not a separate editor format that gets converted.
+//! uses; it is not a separate editor format that gets converted — `world`
+//! holds a [`ShipDesign`] and changes it through [`apply`] like anything else.
 //!
-//! # The contract for stage 5
+//! # Which way round a ship is
 //!
-//! Four promises this crate makes, or asks for, and that the play phase has
-//! to keep. None of them is implemented here.
+//! The flight step settled this, and it is a fact about the **design** rather
+//! than about the renderer, so it is written down here:
+//!
+//! - **Forward is the design grid's up.** A [`PartKind::Engine`] at
+//!   [`Rotation::R0`] pushes the ship along its own nose, and that is what
+//!   [`parts::Rotation::facing`] means. At a heading of 0 the game draws the
+//!   design exactly as it was laid out; at a heading of π/2 the top of the
+//!   grid is pointing east.
+//! - **Only a [`PartKind::Thruster`] turns it.** Main engines push through the
+//!   centre of mass and produce no torque wherever they are bolted — see
+//!   `flight::dynamics` for why. A thruster's `torque_thrust` becomes a torque
+//!   through its distance from the centre of mass, so where one is placed is
+//!   the whole of what it is worth.
+//! - **The game view rotates the drawn design by the heading**, and rotates
+//!   nothing else. The camera is north-up and never turns.
+//!
+//! # The contract for the play phase
+//!
+//! Promises this crate makes, or asks for, and that the play phase has to
+//! keep. The last three are kept by `crates/world` now; the rest are still
+//! waiting on the crew, the construction step and health.
 //!
 //! - **Every walkable tile must actually be walkable.** [`validate`] passes a
 //!   design whose use spots are all reachable over floor tiles whose object
@@ -77,11 +100,11 @@
 //!
 //! # What is deliberately absent
 //!
-//! Power, oxygen and airtightness, engine exhaust clearance, ship rotation,
-//! construction labour, hauling, construction sites, scrap, undo, and the
-//! final art. A part has a recipe, a price, a footprint and somewhere to
-//! stand — and nothing else, because every field that exists is a field
-//! something has to keep true.
+//! Power, oxygen and airtightness, engine exhaust clearance, construction
+//! labour, hauling, construction sites, scrap, undo, and the final art. A part
+//! has a recipe, a price, a footprint, somewhere to stand and — since the
+//! flight step — a thrust or a turning force, and nothing else, because every
+//! field that exists is a field something has to keep true.
 
 pub mod budget;
 pub mod design;

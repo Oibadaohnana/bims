@@ -79,9 +79,15 @@ pub enum IssueCode {
 
     /// Nothing to push the ship anywhere.
     NoEngine = 20,
-    /// Engines, but not on every axis — a ship that cannot stop, or cannot
-    /// steer.
-    NoEngineOnAxis = 21,
+    /// Engines, but none of them pushing the ship **forward**.
+    ///
+    /// It was `NoEngineOnAxis`, and it wanted an engine on all four. The
+    /// flight step is what changed it: the autopilot flies the start–arrival
+    /// line, so what a trip needs is a forward engine and nothing else — a
+    /// backward one only makes the braking half quicker, and a sideways one
+    /// is dead weight. The code is unchanged because these cross the wasm
+    /// boundary; the meaning and the sentence in `ISSUE_LINES` are not.
+    NoForwardEngine = 21,
     /// No hydroponic bay. The food aboard is all the food there will be.
     NoHydroBay = 22,
     NoBroomLocker = 23,
@@ -95,6 +101,18 @@ pub enum IssueCode {
     NoFoodAboard = 25,
     /// Nowhere to fly the ship from.
     NoHelm = 26,
+    /// No thruster, so nothing turns the ship. It can only ever fly the
+    /// heading it was left on, which in practice means it cannot fly at all.
+    NoThruster = 27,
+    /// No airlock, so no way off the ship. A trip to a station ends
+    /// *alongside* it rather than docked.
+    NoAirlock = 28,
+    /// No sensor array. Nothing is seen beyond eyesight, which out here is
+    /// nothing at all.
+    NoSensorArray = 29,
+    /// No fuel aboard. The engines have nothing to burn, so no trip can be
+    /// confirmed — however many engines there are.
+    NoFuelAboard = 30,
 }
 
 impl IssueCode {
@@ -523,9 +541,17 @@ fn reachability(design: &ShipDesign, grid: &Grid, issues: &mut Vec<Issue>) {
     issues.push(Issue::error(IssueCode::UseSpotsCutOff, parts, tiles));
 }
 
-/// Engines are a warning, never an error: a ship that cannot fly is still a
-/// ship you can live on, and telling a player they may not accept one would
-/// be the design phase having an opinion about how to play.
+/// Everything about flying the ship is a warning, never an error: a ship that
+/// cannot fly is still a ship you can live on, and telling a player they may
+/// not accept one would be the design phase having an opinion about how to
+/// play.
+///
+/// The five here are exactly what a trip asks for, in the order it asks:
+/// something to push with **forward** (the autopilot flies the start–arrival
+/// line and burns along it), something to turn with, something to burn,
+/// somewhere to fly from, and a way off at the far end. A ship missing any of
+/// them still docks at the spawn station and still feeds its crew; it simply
+/// never leaves.
 fn engines(design: &ShipDesign, issues: &mut Vec<Issue>) {
     let engines: Vec<&crate::design::PlacedPart> = design
         .parts
@@ -534,13 +560,25 @@ fn engines(design: &ShipDesign, issues: &mut Vec<Issue>) {
         .collect();
     if engines.is_empty() {
         issues.push(Issue::warning(IssueCode::NoEngine));
-        return;
-    }
-    let missing = Facing::ALL
+    } else if !engines
         .iter()
-        .any(|&axis| !engines.iter().any(|p| p.rotation.facing() == axis));
-    if missing {
-        issues.push(Issue::warning(IssueCode::NoEngineOnAxis));
+        .any(|p| p.rotation.facing() == Facing::Forward)
+    {
+        issues.push(Issue::warning(IssueCode::NoForwardEngine));
+    }
+    if design.count(PartKind::Thruster) == 0 {
+        issues.push(Issue::warning(IssueCode::NoThruster));
+    }
+    // Fuel is what is *aboard*, not what the ship could hold, for the same
+    // reason food is: a tank with nothing in it burns nothing.
+    if design.carrying(ResourceId::Fuel) == 0 {
+        issues.push(Issue::warning(IssueCode::NoFuelAboard));
+    }
+    if design.count(PartKind::Airlock) == 0 {
+        issues.push(Issue::warning(IssueCode::NoAirlock));
+    }
+    if design.count(PartKind::SensorArray) == 0 {
+        issues.push(Issue::warning(IssueCode::NoSensorArray));
     }
 }
 

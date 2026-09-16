@@ -26,15 +26,25 @@
 //! # What is not here
 //!
 //! **Rotation.** [`Facing`] is the ship's own frame — forward, backward,
-//! left, right — and how those map onto a heading through space depends on
-//! whether ships turn, which is not decided. Nothing in this crate assumes an
-//! answer, and nothing in it should be made to until there is one.
+//! left, right — and turning that into a heading through space is
+//! `crates/flight`'s business, not this crate's. It was undecided when this
+//! was written and it is decided now: a heading is 0 at north and grows
+//! clockwise, and the ship's Forward is the design grid's up. Nothing here
+//! needed changing for that, which is the point of the split.
 //!
 //! **Anything that changes over time.** Mass is constant for the length of a
 //! trip; it is recalculated on discrete events only — a build, a
 //! deconstruction, a load, an unload, a crew member joining or leaving — and
-//! never continuously. There is no fuel burn, so a ship does not get lighter
-//! on the way.
+//! never continuously.
+//!
+//! **Fuel.** There is a burn now, and it is deliberately not here. The rule is
+//! `crates/flight`'s and it is worth stating because it is what keeps this
+//! crate's "mass is constant for a trip" true: fuel is **reserved** when a
+//! trip is confirmed, **burnt** over the engine phases, and **taken out of the
+//! hold at the end of the plan** — not continuously. So a ship does not get
+//! lighter on the way, a plan's mass is fixed for its whole duration, and the
+//! arrival time quoted at departure is the arrival time. Making the burn
+//! continuous would make every one of those three false at once.
 
 pub mod data;
 

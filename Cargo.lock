@@ -17,6 +17,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "flight"
+version = "0.1.0"
+dependencies = [
+ "physics",
+ "shipdesign",
+ "time",
+ "worldgen",
+]
+
+[[package]]
 name = "health"
 version = "0.1.0"
 dependencies = [
@@ -35,8 +45,12 @@ name = "ship"
 version = "0.1.0"
 dependencies = [
  "economy",
+ "flight",
  "physics",
  "shipdesign",
+ "time",
+ "world",
+ "worldgen",
 ]
 
 [[package]]
@@ -50,6 +64,18 @@ dependencies = [
 [[package]]
 name = "time"
 version = "0.1.0"
+
+[[package]]
+name = "world"
+version = "0.1.0"
+dependencies = [
+ "economy",
+ "flight",
+ "physics",
+ "shipdesign",
+ "time",
+ "worldgen",
+]
 
 [[package]]
 name = "worldgen"

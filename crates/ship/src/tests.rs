@@ -1,0 +1,241 @@
+//! The geometry of the game view.
+//!
+//! **An exception to "the cdylibs' tests are the probes and the harnesses",
+//! and a narrow one.** Almost everything in this crate is browser-shaped —
+//! a pointer, a ghost, a shape buffer — and is checked by
+//! `scratchpad/ship-check.mjs` running the real page against the real wasm.
+//! What is below is not: it is the arithmetic that turns a design tile into a
+//! place on screen and back, it is pure, and getting it wrong looks like a
+//! ship you cannot click on rather than like an error. That is worth a unit
+//! test, so the crate is an `rlib` as well as a `cdylib` and
+//! `nix flake check` runs this with the rest.
+
+use flight::angle;
+use shipdesign::fixture::flyer;
+use shipdesign::parts::TILE;
+use worldgen::GalaxyType;
+use worldgen::math::dvec2;
+
+use crate::game::{Game, ViewMode};
+use crate::world_paint;
+
+const CANVAS: (f32, f32) = (960.0, 640.0);
+
+fn game() -> Game {
+    Game::start(
+        flyer(2),
+        40_000,
+        2,
+        0,
+        world::data::DEFAULT_SEED,
+        GalaxyType::SpiralTwoArm,
+        CANVAS.0,
+        CANVAS.1,
+    )
+    .expect("the fixture should open a world")
+}
+
+/// Where a design tile's middle lands on the canvas, the way the painter puts
+/// it there. Written out here rather than called, so the test is comparing the
+/// painter's arithmetic against a statement of it rather than against itself.
+fn on_canvas(game: &Game, tile: (u32, u32)) -> (f32, f32) {
+    let centre = game.world.ship.dynamics.centre_of_mass;
+    let middle = dvec2(
+        (tile.0 as f64 + 0.5) * TILE as f64,
+        (tile.1 as f64 + 0.5) * TILE as f64,
+    );
+    let d = middle.sub(centre);
+    let h = game.world.ship.heading;
+    let (s, c) = (h.sin(), h.cos());
+    let (vx, vy) = ((d.x * c - d.y * s) as f32, (d.x * s + d.y * c) as f32);
+    let camera = &game.ship_view;
+    (
+        camera.offset_x() + vx * camera.scale(),
+        camera.offset_y() + vy * camera.scale(),
+    )
+}
+
+/// At rest the ship is drawn exactly as it was laid out: the grid's up is up,
+/// and its right is right.
+#[test]
+fn at_a_heading_of_nothing_the_design_is_the_way_it_was_built() {
+    let game = game();
+    assert_eq!(game.world.ship.heading, 0.0);
+
+    let middle = game.world.ship.design.build_area / 2;
+    let here = on_canvas(&game, (middle, middle));
+    let above = on_canvas(&game, (middle, middle - 1));
+    let right = on_canvas(&game, (middle + 1, middle));
+
+    assert!(above.1 < here.1, "the grid's up should be up the screen");
+    assert!((above.0 - here.0).abs() < 1e-3, "and straight up");
+    assert!(right.0 > here.0, "the grid's right should be right");
+    assert!((right.1 - here.1).abs() < 1e-3, "and straight across");
+}
+
+/// Turned a quarter, the nose points at the right-hand edge. That is the whole
+/// of what "Forward is the grid's up" means once the ship is moving.
+#[test]
+fn at_a_quarter_turn_the_nose_points_to_the_right() {
+    let mut game = game();
+    game.world.ship.heading = std::f64::consts::FRAC_PI_2;
+
+    let middle = game.world.ship.design.build_area / 2;
+    let here = on_canvas(&game, (middle, middle));
+    let forward = on_canvas(&game, (middle, middle - 1));
+
+    assert!(forward.0 > here.0, "Forward should be to the right");
+    assert!(
+        (forward.1 - here.1).abs() < 1e-3,
+        "and level with where it started",
+    );
+
+    // And the other three quarters, so the sense of the turn is pinned as
+    // clockwise rather than merely as "a turn". `here` is recomputed each
+    // time: the tile being measured from is not the centre of mass, so it
+    // swings round with everything else.
+    game.world.ship.heading = std::f64::consts::PI;
+    let here = on_canvas(&game, (middle, middle));
+    let forward = on_canvas(&game, (middle, middle - 1));
+    assert!(
+        forward.1 > here.1,
+        "half a turn puts the nose down the screen"
+    );
+
+    game.world.ship.heading = 3.0 * std::f64::consts::FRAC_PI_2;
+    let here = on_canvas(&game, (middle, middle));
+    let forward = on_canvas(&game, (middle, middle - 1));
+    assert!(forward.0 < here.0, "three quarters puts it to the left");
+}
+
+/// A point on the canvas over a known tile has to come back as that tile, at
+/// every heading. This is the one that a wrong sign in the inverse turn breaks
+/// — and it breaks it silently, as a ship you cannot click on once it has
+/// turned.
+#[test]
+fn a_screen_point_maps_back_to_the_tile_it_is_over() {
+    let mut game = game();
+    let quarter = std::f64::consts::FRAC_PI_2;
+    for &heading in &[0.0, quarter, std::f64::consts::PI, 3.0 * quarter] {
+        game.world.ship.heading = heading;
+        for tile in [(2u32, 2u32), (9, 3), (17, 17), (10, 10)] {
+            let (x, y) = on_canvas(&game, tile);
+            let back = game.tile_at(x, y);
+            assert_eq!(
+                back,
+                (tile.0 as i32, tile.1 as i32),
+                "heading {heading}, tile {tile:?} came back as {back:?}",
+            );
+        }
+    }
+}
+
+/// The inverse is the forward turn read backwards and nothing else, which is
+/// what stops the two drifting apart.
+#[test]
+fn the_pointer_arithmetic_is_the_painters_arithmetic_backwards() {
+    for &heading in &[0.3, 1.9, -2.6] {
+        let offset = dvec2(120.0, -75.0);
+        let there = angle::rotate_design(offset, heading);
+        let back = angle::unrotate_design(there, heading);
+        assert!((back.x - offset.x).abs() < 1e-9);
+        assert!((back.y - offset.y).abs() < 1e-9);
+    }
+}
+
+/// The starfield and anything drawn because it is out there are **never**
+/// turned. Nothing in the shape buffer for them carries a rotation, however
+/// the ship is pointing.
+#[test]
+fn the_sky_and_what_is_alongside_do_not_turn_with_the_ship() {
+    let mut game = game();
+    let mut list = crate::draw::DrawList::new();
+
+    // Every shape is either square to the window or turned to the heading.
+    // There is no third thing: the ship is turned, and the sky, the station
+    // alongside and the void behind them are not.
+    game.world.ship.heading = 1.1;
+    world_paint::paint(&game, &mut list);
+    let angles = shape_rotations(&list);
+    for angle in &angles {
+        assert!(
+            angle.abs() < 1e-6 || (angle - 1.1).abs() < 1e-6,
+            "a shape was drawn at {angle}, which is neither square nor the heading",
+        );
+    }
+    assert!(
+        angles.iter().any(|a| a.abs() < 1e-6),
+        "the starfield should be square to the window",
+    );
+    assert!(
+        angles.iter().any(|a| (a - 1.1).abs() < 1e-6),
+        "the ship should be turned to its heading",
+    );
+}
+
+/// The `rot` field of every shape in the buffer.
+fn shape_rotations(list: &crate::draw::DrawList) -> Vec<f32> {
+    let slice = unsafe { std::slice::from_raw_parts(list.as_ptr(), list.len()) };
+    slice
+        .chunks(crate::draw::STRIDE)
+        .map(|shape| shape[5])
+        .collect()
+}
+
+/// The map never turns at all: north is up on it whatever the ship is doing,
+/// and the only thing on it that carries a rotation is the marker saying which
+/// way the ship is pointing.
+#[test]
+fn the_map_is_north_up_whatever_the_ship_is_doing() {
+    let mut game = game();
+    game.set_mode(ViewMode::Map);
+    game.world.ship.heading = 2.4;
+
+    let mut list = crate::draw::DrawList::new();
+    world_paint::paint(&game, &mut list);
+    let turned: Vec<f32> = shape_rotations(&list)
+        .into_iter()
+        .filter(|a| a.abs() > 1e-6)
+        .collect();
+    assert!(
+        turned.iter().all(|a| (a - 2.4).abs() < 1e-6),
+        "something on the map was turned to something other than the heading: {turned:?}",
+    );
+    assert_eq!(turned.len(), 1, "only the ship marker should be turned");
+}
+
+/// The camera is centred on the ship, in both views, with or without a pan.
+#[test]
+fn the_ship_is_in_the_middle_of_both_views() {
+    let mut game = game();
+    for mode in [ViewMode::Ship, ViewMode::Map] {
+        game.set_mode(mode);
+        assert!((game.camera().offset_x() - CANVAS.0 / 2.0).abs() < 1e-3);
+        assert!((game.camera().offset_y() - CANVAS.1 / 2.0).abs() < 1e-3);
+    }
+
+    // And a pan cannot shove it off the edge, however hard it is shoved.
+    game.set_mode(ViewMode::Ship);
+    game.camera_mut().pan(100_000.0, -100_000.0);
+    assert!(game.camera().offset_x() < CANVAS.0);
+    assert!(game.camera().offset_y() > 0.0);
+}
+
+/// A map click on empty space is a place to fly to; a map click on something
+/// is that thing. Both, because the panel offers both and they are different
+/// commands.
+#[test]
+fn a_click_on_the_map_is_a_place_or_a_thing() {
+    let mut game = game();
+    game.set_mode(ViewMode::Map);
+
+    // The dock the ship is tied to is at the ship's own position, which is the
+    // middle of the canvas.
+    let picked = game.pick(CANVAS.0 / 2.0, CANVAS.1 / 2.0, 20.0);
+    assert!(picked.is_some(), "the station under the ship should pick");
+
+    // Somewhere out in the corner is nothing, and is still somewhere.
+    assert!(game.pick(4.0, 4.0, 20.0).is_none());
+    let point = game.point_at(4.0, 4.0);
+    assert!(point.distance(game.world.ship.position()) > 0.0);
+}

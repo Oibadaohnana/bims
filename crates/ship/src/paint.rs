@@ -38,7 +38,7 @@ const SPOT: Color = Color::rgba(0.98, 0.82, 0.35, 0.85);
 /// Index 0 is the deck and index 15 is the frame; both are drawn as tiles
 /// rather than as objects, and both are in the table anyway so the palette
 /// buttons for them have swatches.
-pub static PART_COLORS: [Color; 27] = [
+pub static PART_COLORS: [Color; 28] = [
     Color::rgb(0.13, 0.15, 0.18), // Floor
     Color::rgb(0.30, 0.34, 0.40), // Wall
     Color::rgb(0.38, 0.86, 0.95), // Door
@@ -66,6 +66,7 @@ pub static PART_COLORS: [Color; 27] = [
     Color::rgb(0.70, 0.74, 0.80), // SensorArray
     Color::rgb(0.48, 0.44, 0.36), // Shelf
     Color::rgb(0.60, 0.70, 0.76), // Shower
+    Color::rgb(0.82, 0.52, 0.30), // Thruster — the engine's orange, paler
 ];
 
 /// The frame, drawn as the tile under everything. Dimmer than the deck and

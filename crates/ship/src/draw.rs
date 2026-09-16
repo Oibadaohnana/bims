@@ -120,6 +120,31 @@ impl DrawList {
         );
     }
 
+    /// A line between two points, as a thin rectangle turned to lie along it.
+    ///
+    /// The format has rectangles and ellipses and nothing else — see the
+    /// module note — so a line is a rectangle with the `rot` field doing the
+    /// work. The map's route line is the only thing that wants one, and it
+    /// wants one badly enough to be worth the four lines of trigonometry.
+    pub fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, c: Color) {
+        let (dx, dy) = (x1 - x0, y1 - y0);
+        let length = (dx * dx + dy * dy).sqrt();
+        if length <= 0.0 {
+            return;
+        }
+        self.push(
+            KIND_RECT,
+            (x0 + x1) / 2.0,
+            (y0 + y1) / 2.0,
+            length,
+            width,
+            dy.atan2(dx),
+            0.0,
+            FILLED,
+            c,
+        );
+    }
+
     pub fn stroke_between(
         &mut self,
         x0: f32,

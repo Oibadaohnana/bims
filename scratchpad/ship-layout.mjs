@@ -12,6 +12,14 @@
 //   node scratchpad/ship-layout.mjs ghost    > /tmp/ship.svg
 //   node scratchpad/ship-layout.mjs spots    > /tmp/ship.svg
 //   node scratchpad/ship-layout.mjs exposure > /tmp/ship.svg
+//   node scratchpad/ship-layout.mjs game     > /tmp/ship.svg
+//   node scratchpad/ship-layout.mjs map      > /tmp/ship.svg
+//
+// The last two are the game, and they are the ones worth the thirty seconds:
+// the ship is drawn **turned** and the sky behind it is not, and there is no
+// assertion anywhere that can tell you a hull has come out mirrored or a
+// starfield has come out rotating with it. `game` catches the ship at a
+// heading of about a fifth of a turn for exactly that reason.
 //
 // It writes the SVG to stdout and a line about what it caught to stderr, so a
 // redirect gives a clean file.
@@ -38,15 +46,26 @@ const STRUCTURE = 15;
 const OUTSIDE_WALL = 16;
 const HELM = 17;
 const POWER_CONDUIT = 19;
+const FUEL_TANK = 21;
+const AIRLOCK = 23;
+const SENSOR_ARRAY = 24;
+const THRUSTER = 27;
+
+/** `physics::ResourceId::Fuel`. */
+const FUEL = 2;
 
 const page = await bootWasmPage({
   html: "web/ship.html",
   host: "web/ship.js",
   wasm: "web/ship.wasm",
-  search: "?money=100000&area=20&players=1&slot=0",
+  // The game needs a ship a trip can be planned for, and one of those costs a
+  // good deal more than a ship you can merely live on.
+  search: "?money=200000&area=20&players=1&slot=0",
 });
 const { byId, root, wasm } = page;
-const canvas = byId.get("stage");
+const designCanvas = byId.get("stage");
+const gameCanvas = byId.get("game-stage");
+let canvas = designCanvas;
 const tile = wasm.ship_tile();
 
 function at(tx, ty) {
@@ -154,6 +173,50 @@ if (WHEN === "empty") {
   caught =
     "a hull with a hole in it — every tile the outside can see into, tinted, " +
     "including through the internal wall";
+} else if (WHEN === "game" || WHEN === "map") {
+  // A ship a trip can actually be planned for: everything `buildShip` puts
+  // down, plus what flying wants — thrusters, an airlock, an array, a tank
+  // and something to burn.
+  buildShip();
+  for (const [x, y, kind] of [
+    [9, 1, THRUSTER],
+    [9, 18, THRUSTER],
+    [1, 9, THRUSTER],
+    [18, 9, THRUSTER],
+    [5, 1, SENSOR_ARRAY],
+  ]) {
+    drag(x, y, x, y, 2);
+    put(STRUCTURE, x, y);
+    put(kind, x, y);
+  }
+  put(AIRLOCK, 16, 8);
+  put(FUEL_TANK, 2, 12);
+  for (const step of [100, 100]) {
+    root
+      .querySelector(`[data-resource="${FUEL}"] [data-buy="${step}"]`)
+      .dispatch("click");
+  }
+  byId.get("accept").dispatch("click");
+  page.step(1);
+  canvas = gameCanvas;
+
+  if (WHEN === "map") {
+    wasm.ship_set_view_mode(1);
+    caught =
+      "the system map — the star, what has been found, the ring the scanner " +
+      "reaches to, and the ship pointing where it is pointing";
+  } else {
+    // Turned, on purpose. A hull drawn mirrored, or a starfield that turns
+    // with the ship, is obvious here and invisible in every assertion.
+    wasm.ship_cmd_confirm_point(0, wasm.ship_world_x() + 400000, wasm.ship_world_y() + 90000);
+    // At the top speed, because a ship turning at a tenth of a degree a
+    // second would need ten real minutes to reach an interesting attitude.
+    wasm.ship_cmd_speed(0, 4);
+    for (let i = 0; i < 700; i++) page.step(1);
+    caught =
+      `the ship under way at a heading of ${((wasm.ship_world_heading() * 180) / Math.PI).toFixed(0)}°, ` +
+      "with the sky behind it square to the window";
+  }
 } else {
   buildShip();
   canvas.dispatch("pointermove", at(3, 3));
@@ -174,7 +237,7 @@ const H = canvas.clientHeight;
 const out = [
   `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`,
   `<rect width="${W}" height="${H}" fill="#0c1210"/>`,
-  `<g transform="translate(${ox.toFixed(3)} ${oy.toFixed(3)}) scale(${scale.toFixed(5)})">`,
+  `<g transform="translate(${ox.toFixed(3)} ${oy.toFixed(3)}) scale(${scale.toPrecision(9)})">`,
 ];
 
 for (let i = 0; i < shapes.length; i += stride) {
@@ -206,5 +269,5 @@ process.stdout.write(out.join("\n") + "\n");
 process.stderr.write(
   `${WHEN}: ${caught}\n` +
     `  ${shapes.length / stride} shapes, ${wasm.ship_part_total()} parts, ` +
-    `${wasm.ship_exposed_count()} exposed, scale ${scale.toFixed(3)}\n`,
+    `${wasm.ship_exposed_count()} exposed, scale ${scale.toPrecision(4)}\n`,
 );

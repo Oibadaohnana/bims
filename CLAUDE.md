@@ -64,21 +64,21 @@ The page loads `bims.js` and `bims.wasm` under a per-load query string and the
 server sends `no-store`, so a stale *browser* cache is not usually the culprit —
 a stale *server* is.
 
-## It is a workspace now, and the room is one crate of eight
+## It is a workspace now, and the room is one crate of ten
 
 Everything is under `crates/`. There are **two cdylibs**: `game` is the room —
-the simulation and its wasm exports, what used to be `src/` — and `ship` is the
-design phase, the camera and pointer and draw buffer behind `web/ship.html`.
-Beside them are six libraries that have to give the same answer in more than
-one place: `worldgen` (the galaxy, systems and station blueprints, which a
-native server will one day generate identically), `physics` (ship mass, thrust
-and travel time, wanted by `worldgen` now and by the designer and the flight
-step later), `shipdesign` (what a ship is made of and the rules for putting one
-together, wanted by the designer now and by the play phase later), `economy`
-(money: whole euros, the crew's shared pool, and sums that must not wrap),
-`health` (one body's health points, what is wrong with it and what that costs
-— radiation dose, sickness and cancer, wanted by the play phase) and `time`
-(how long a day is).
+the simulation and its wasm exports, what used to be `src/` — and `ship` is
+`web/ship.html`, which is now **two things**: the design phase, and the game
+the last Accept starts. Beside them are eight libraries that have to give the
+same answer in more than one place: `worldgen` (the galaxy, systems and station
+blueprints, which a native server will one day generate identically), `physics`
+(ship mass, thrust and travel time), `shipdesign` (what a ship is made of and
+the rules for putting one together), `flight` (what a design does when you push
+it, and the closed-form plan that flies a trip), `world` (one star system, the
+ship in it, and the one clock they both run on), `economy` (money: whole euros,
+the crew's shared pool, and sums that must not wrap), `health` (one body's
+health points, what is wrong with it and what that costs — radiation dose,
+sickness and cancer, wanted by the play phase) and `time` (how long a day is).
 
 Five things about that are easy to get wrong:
 
@@ -89,20 +89,40 @@ Five things about that are easy to get wrong:
 - **`cargo build` at the root builds every member.** `nix flake check` passes
   `--workspace` on purpose: without it only `bims` is built and `worldgen`
   breaking for wasm would go unnoticed until something imported it.
-- **The libraries' tests are `cargo test`, the cdylibs' are the probes and the
+- **The libraries' tests are `cargo test`, the room's are the probes and the
   harnesses.** Running them wants a target: `.cargo/config.toml` pins
   `wasm32-unknown-unknown`, so it is `cargo test --target
   x86_64-unknown-linux-gnu -p physics -p worldgen -p shipdesign -p economy
-  -p health`. `nix flake check` runs exactly that as `checks.tests`.
-- **The rules go in `shipdesign`, never in `ship`.** `ship` may ask whether a
-  part can be placed; it may not decide. A native server has to give the same
-  answer, and `design_hash` — which is what an Accept is recorded against — has
-  to come out **identical on native and on wasm32**. That is why nothing in
-  `shipdesign`'s data or its hash is a `usize` or a float and why no `HashMap`
-  is iterated in it. Both ends of that are pinned: the native half is
-  `crates/shipdesign/src/tests.rs`, the wasm half is `ship_self_check`, and
-  both compare against the same written-down constants in
-  `shipdesign::fixture`. A target that drifted fails exactly one of the two.
+  -p health -p flight -p world -p ship`. `nix flake check` runs exactly that
+  as `checks.tests`.
+
+  **`ship` is on that list and is a cdylib**, which is the one exception. It
+  is also an `rlib`, and what its `tests.rs` covers is the arithmetic that
+  turns a design tile into a place on screen and back — pure, and wrong in a
+  way no harness can see. Everything else in that crate is still
+  `scratchpad/ship-check.mjs` against the real page. `game` is not on the list
+  and should not be.
+- **The rules go in `shipdesign` and `world`, never in `ship`.** `ship` may ask
+  whether a part can be placed or a trip can be flown; it may not decide. A
+  native server has to give the same answer, and two numbers — `design_hash`,
+  which is what an Accept is recorded against, and `world_checksum`, which is
+  what a client will one day be verified against — have to come out
+  **identical on native and on wasm32**. That is why nothing in `shipdesign`'s
+  data or its hash is a `usize` or a float and why no `HashMap` is iterated in
+  it. Both ends of both are pinned: the native halves are
+  `crates/shipdesign/src/tests.rs` and `crates/world/src/tests.rs`, the wasm
+  half of each is a bit in `ship_self_check`, and all of them compare against
+  written-down constants in `shipdesign::fixture` and `world::fixture`. A
+  target that drifted fails exactly one of each pair.
+
+  `world_checksum` **rounds its floats onto a grid on the way in**, and that
+  is not sloppiness — it is the only way it can work. Everything in `flight`
+  that is not arithmetic is `sin`, `cos`, `atan2` and `sqrt`, and the first
+  three come out of the platform's libm natively and Rust's own on wasm32;
+  those two may differ in the last bit. A checksum that noticed a last-bit
+  difference would fire constantly and say nothing. Positions go in at a
+  thousandth of a unit and angles at a millionth, which is orders of magnitude
+  finer than any real divergence and orders coarser than a rounding one.
 - **`crate::time`, never `time::`.** `clock.rs` reaches the `time` crate
   through the crate root, because the probes link nothing and stand a plain
   `mod time;` over the same file — see `scratchpad/modules.rs`. Spelled
@@ -933,16 +953,18 @@ upper one's body — `./layout talk` shows it immediately and nothing else does.
 apart, and that gap is set by the *names* rather than by the bodies: a body is
 `BODY_MARGIN` across the radius, but two labels need a good deal more.
 
-## A new part needs five edits, and the compiler catches two
+## A new part needs five edits, and the compiler catches three
 
 `PartKind` for the variant, `PARTS` in `crates/shipdesign/src/parts.rs` for
 the row, `PART_COLORS` in `crates/ship/src/paint.rs` for the colour,
 `PART_NAMES` in `web/ship.js` for the word, and `PART_GROUPS` beside it for
-which heading it lives under. Same shape as `memory.rs`'s `What` and
+which heading it lives under. The three arrays are fixed-length, so those
+three are compile errors; the two tables in the host are not, and
+`scratchpad/ship-check.mjs` is what catches them. Same shape as `memory.rs`'s `What` and
 `work.rs`'s `Job`, and for the same reason: no strings cross the boundary, so
 the ship knows `PartKind::Hob` and only the host knows "Hob".
 
-The row itself is five decisions, and three of them are easy to get wrong by
+The row itself is six decisions, and four of them are easy to get wrong by
 leaving them at the default:
 
 - **`layer` and `requires`.** What the part *is* and what has to be there
@@ -956,6 +978,11 @@ leaving them at the default:
   every exposure check that will never be noticed.
 - **`capacity`.** A class of storage and how much, or `None`. A container
   with no capacity holds nothing and refuses every purchase.
+- **`thrust` and `torque_thrust`.** What it pushes with and what it turns
+  with, and `defs_are_sound` insists they are **exclusive**: thrust on
+  `Engine` and nowhere else, turning force on `Thruster` and nowhere else. A
+  part that did both would make "which engines are burning" — and therefore
+  the fuel bill — a different question for every design.
 
 The first three are fixed-size arrays, so leaving one out is a compile error.
 The last two are not, and both fail quietly — which is what
@@ -969,6 +996,11 @@ An `IssueCode` is the same trap with worse consequences: an issue whose code
 has no line in `ISSUE_LINES` is **dropped from the page**, exactly as a diary
 entry with no `MEMORY_LINES` is. What catches it is the row count against
 `ship_issue_count()`, and nothing else would.
+
+The game half has four more tables with the same rule: `PLAN_ERRORS`,
+`REFUSALS`, `PHASE_NAMES` and `EVENT_LINES`, plus `BODY_KIND_NAMES` and
+`STATION_KIND_NAMES` for what is on the map. A `WorldEvent` whose code has no
+line in `EVENT_LINES` is dropped from the log the same way.
 
 ## A part weighs its recipe, and there is no mass column
 
@@ -1141,6 +1173,146 @@ Three things this depends on and that are easy to undo:
 - **The build area is in the hash.** The same parts in a bigger square are a
   different ship, and an Accept must not carry across a resize.
 
+## The design phase, then the game, and one clock in it
+
+`web/ship.html` is two screens and one wasm. The last Accept settles the ship
+**and** opens the world — one event, in `ship_accept`, because two exports for
+it would be two things that could disagree about which ship got handed over.
+`ship_phase()` is still the only way to ask which half you are in.
+
+After that there is exactly one loop: `World::step`, which advances
+`STEP_MINUTES` and nothing else. Its order is the contract and it is written
+out in the function:
+
+1. the commands stamped for this step, in arrival order;
+2. the clock;
+3. flight;
+4. discovery and the local frame;
+5. **crew** — empty;
+6. **construction** — empty;
+7. **health and radiation** — empty.
+
+The last three are extension points, not oversights. Whatever goes in them
+goes in *there*, on *that* clock. A second clock or a second loop is two
+simulations that will disagree, and the failure reads as a ship in two places.
+
+`web/ship.js` turns real time into steps with an accumulator — `dt *
+ship_steps_per_second() * multiplier` — and never into bigger steps. Same rule
+as the room, same reason: a 24x step would move the ship several times its own
+length and skip straight past its own braking phase. `MAX_STEPS_PER_FRAME` has
+to stay at or above `TOP_SPEED * 60 / 30` or the top of the range quietly stops
+being reachable.
+
+## A plan is read, never integrated
+
+`flight::plan_trip` works a trip out **once** and `state_at(plan, minutes)`
+evaluates it. Nothing accumulates: calling it with 0, then 3, then 3.5 gives
+the same answers as calling it with 3.5. That is the only reason a browser at
+24x, a browser at 1x and a server catching up on an hour of somebody's
+disconnection can agree about where the ship is.
+
+So: **do not add anything to a plan that has to be stepped.** A plan is a list
+of segments with fixed durations, and inside a segment nothing changes rate.
+If something new needs a rate change, it is a new segment.
+
+Two things fall out of that and are easy to undo:
+
+- **A trip keeps the `Dynamics` it was planned with.** Welding a wall on
+  halfway does not move an arrival that has already been promised; it changes
+  what the *next* plan will be like. `World::on_ship_changed` recomputes the
+  live dynamics and deliberately leaves the active plan alone.
+- **Fuel is reserved at Confirm, burnt over the engine phases, and taken out
+  of the hold at plan end.** Not continuously — a continuously lightening ship
+  is a plan whose arithmetic was wrong from the moment it was quoted.
+
+## The anchor is stored and the position is derived
+
+`Ship::anchor` is where design tile (0, 0) sits in the system;
+`Ship::position()` is the **centre of mass**, worked out from the anchor and
+the heading through `flight::angle::rotate_design`.
+
+That way round on purpose. `on_ship_changed` has to promise that welding a
+shelf to the stern does not move the *hull*: if the position were stored and
+the anchor derived, every wall anybody built would shove the whole ship
+sideways through space. Docking is the one place the ship is *put* somewhere
+rather than flown there, and it is `set_position` doing it.
+
+`rotate_design` is **its own inverse** — it is a rotation composed with the
+flip between the grid's y-down and the system's y-up, and a rotation composed
+with a reflection is a reflection. `unrotate_design` exists so call sites read
+the way they mean and calls straight through. Do not write a second one.
+
+## A speed request is the one command that does not wait for a step
+
+Everything a player asks for is queued and applied at the top of the next step
+— which is what makes the stamp `web/ship.js` puts on it mean anything.
+**Except the speed.** At a pause no steps are taken at all, so a queued speed
+change would never be applied and the pause could never be lifted.
+`World::request_speed` is the door, `Command::SetSpeed` goes through the same
+door, and it is safe to be the exception because it changes nothing a step
+would have changed — only how fast the caller is expected to turn the crank.
+
+## A redirect is a stop and then a trip, and it needs no mechanism of its own
+
+A Confirm while the ship is under way aborts the current plan to rest, and the
+moment that abort *ends* the pending target is picked up and a fresh plan is
+made from where the ship stopped. Two plans, one after the other, and the ship
+is genuinely at rest in between. Only the **latest** confirmed target is kept.
+
+The consequence that surprised a test: a redirect one step after departure has
+no speed and no spin to take out, so the stop is of no length and the second
+trip is already under way in the same step. That is the redirect working, not
+a shortcut round it.
+
+## What a trip needs is five warnings, not an error
+
+`validate` now warns about a missing thruster, airlock, sensor array, fuel and
+forward engine. All five are warnings, like the engine warnings before them: a
+ship that cannot fly is still a ship you can live on, and refusing to let a
+player accept one would be the design phase having an opinion about how to
+play. `NoEngineOnAxis` **became** `NoForwardEngine` and kept its code — the
+codes cross the wasm boundary — because the autopilot flies the start–arrival
+line and a sideways engine is dead weight.
+
+`shipdesign::fixture` therefore has **two** ships. `reference` is one you can
+live on and deliberately cannot fly, which is what those warnings are tested
+against; `flyer` is `reference` plus four thrusters, an airlock, an array, a
+tank and a full load of fuel, and it is what `flight` and `world` measure
+their scenarios against. Only `reference`'s hash is pinned, because only that
+one is about two targets agreeing.
+
+## Two placeholder numbers are pinned to scenarios, not to taste
+
+`FUEL_PER_ENGINE_MINUTE` in `flight::data` and `torque_thrust` on the thruster
+in `shipdesign::parts` are both chosen against `flyer` and a stated outcome:
+one full tank crosses the world generator's longest reference hop, and four
+thrusters turn the ship through half a circle inside two game hours. The tests
+that pin them are `one_full_tank_crosses_the_longest_reference_hop` and
+`four_thrusters_flip_the_reference_inside_two_hours`, and
+`what_the_fixture_actually_flies_like` beside them prints the numbers for
+whoever has to move one next. Changing either without rerunning those is how
+a flip becomes a worse deal than a backward engine in every case and the
+choice between them stops being a choice.
+
+## The camera never rotates; the ship does
+
+North is up in every view, always. A camera that followed the heading would
+make a flip legible and every other moment unreadable — you could not tell
+which way you were going, because "which way" would always look the same.
+
+So the design is drawn turned by the heading (each tile emitted with `rot` set,
+which the host's `ctx.rotate` applies), and the starfield, anything drawn
+because it is *out there*, and the whole map are not. The pointer goes back the
+same way: `Game::tile_at` is the painter's arithmetic read backwards, and
+`a_screen_point_maps_back_to_the_tile_it_is_over` in `crates/ship/src/tests.rs`
+checks it at four headings. A wrong sign there is a ship you cannot click on
+once it has turned, and nothing else would say so.
+
+`node scratchpad/ship-layout.mjs game` and `... map` are the two views as SVG.
+After anything in `world_paint.rs` they are worth thirty seconds: a hull drawn
+mirrored, or a starfield turning with the ship, is obvious there and invisible
+in every assertion.
+
 ## "Is it finished" is one export, not three
 
 `ship_phase()` and nothing else. "Is it finished", "may I still edit" and
@@ -1176,6 +1348,22 @@ Two things in that order matter:
 
 A failing Edit inside a drag is **skipped and counted, never fatal**: a
 rectangle of deck over a half-floored room is meant to fill the gaps.
+
+## The world is bounded by the ship, and money by the dock
+
+Two rules carried straight over from the design phase into the game, and both
+are easy to lose:
+
+- **Money only works while docked.** `Buy` and `Sell` are refused anywhere
+  else, with `Refusal::NotDocked` — and *holding station beside* a station is
+  not docked either, which wants an airlock. The trade panel is hidden rather
+  than disabled, because a panel full of dead buttons is a panel nobody can
+  tell is dead on purpose.
+- **Reserved fuel is not the crew's to sell.** It has been promised to a trip
+  already under way and there is nowhere out there to buy more.
+  `World::can_modify_part` says the same thing about the tank it is sitting
+  in, and about engines and thrusters while a trip is in the air: those three
+  would change a trip that has already been quoted.
 
 ## The play phase cannot assume the room's navigation
 

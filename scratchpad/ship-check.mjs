@@ -51,7 +51,11 @@ const BROOM_LOCKER = 14;
 const STRUCTURE = 15;
 const OUTSIDE_WALL = 16;
 const HELM = 17;
+const FUEL_TANK = 21;
+const AIRLOCK = 23;
+const SENSOR_ARRAY = 24;
 const SHELF = 25;
+const THRUSTER = 27;
 
 /** `physics::ResourceId`, for the trade panel. */
 const METAL = 1;
@@ -89,6 +93,7 @@ async function session(search) {
   });
   const { byId, root, wasm } = page;
   const canvas = byId.get("stage");
+  const gameCanvas = byId.get("game-stage");
   const tile = wasm.ship_tile();
 
   /** The middle of a tile, in canvas pixels. Worked out from the camera the
@@ -154,9 +159,50 @@ async function session(search) {
   const held = (class_) => wasm.ship_storage_used(class_);
   const room = (class_) => wasm.ship_storage_capacity(class_);
 
+  // --- once the game has started -----------------------------------------
+  //
+  // A second canvas, a second set of pointer helpers, and one way to let time
+  // pass. `step` runs frames; how many world steps each is worth is the
+  // page's own arithmetic, which is exactly the half being checked.
+
+  /** A point on the game canvas, from a system position. */
+  function mapAt(x, y) {
+    const s = wasm.ship_view_scale();
+    const here = { x: wasm.ship_world_x(), y: wasm.ship_world_y() };
+    return {
+      pointerId: 1,
+      clientX: wasm.ship_view_x() + (x - here.x) * s,
+      // System +y is north and the screen's y grows down.
+      clientY: wasm.ship_view_y() - (y - here.y) * s,
+    };
+  }
+
+  const speedButton = (code) => root.querySelector(`[data-speed="${code}"]`);
+
+  /** Press a buy or sell button on the **game's** station panel. The design
+   * phase has a panel of its own and it is a different transaction. */
+  function trade(resource, step, buying) {
+    const key = buying ? "buy" : "sell";
+    const button = root.querySelector(
+      `#game-goods [data-resource="${resource}"] [data-${key}="${step}"]`,
+    );
+    if (!button) throw new Error(`no game ${key} ${step} button for resource ${resource}`);
+    button.dispatch("click");
+  }
+
+  /** Run frames until `check()` comes true, or give up and say so. */
+  function until(check, what, limit = 40000) {
+    for (let i = 0; i < limit; i++) {
+      if (check()) return i;
+      page.step(1);
+    }
+    throw new Error(`never ${what} in ${limit} frames`);
+  }
+
   return {
     ...page,
     canvas,
+    gameCanvas,
     tile,
     at,
     pick,
@@ -171,16 +217,23 @@ async function session(search) {
     cargo,
     held,
     room,
+    mapAt,
+    speedButton,
+    trade,
+    until,
   };
 }
 
 /** The reference ship, built through the palette: deck, hull, galley, heads,
- * a table, a bay, a locker, an engine, and a bed and a seat each.
+ * a table, a bay, a locker, an engine, thrusters, an airlock, a sensor array,
+ * a full tank, and a bed and a seat each.
  *
- * Deliberately the same layout as `shipdesign::fixture::reference`, so a
- * change to the rules that breaks one breaks both — but built out of pointer
- * events rather than out of `apply`, which is the half a native test cannot
- * reach. */
+ * Deliberately the same layout as `shipdesign::fixture::flyer`, so a change to
+ * the rules that breaks one breaks both — but built out of pointer events
+ * rather than out of `apply`, which is the half a native test cannot reach.
+ * And **flyable**, not merely liveable: everything below the design phase is
+ * about a trip, and a ship with no thrusters would make every one of those
+ * checks a check that the refusal works. */
 function buildShip(page, crew) {
   const { pick, drag, put, found } = page;
 
@@ -224,10 +277,30 @@ function buildShip(page, crew) {
     put(CHAIR, 4 + (i % 2), 7 + 2 * Math.floor(i / 2));
   }
 
-  // And something to eat, so the ship is provisioned the way the fixture is.
-  // Bought through the panel, which is the only way a player can.
+  // What a *trip* needs, on top of what living aboard needs. The thrusters
+  // and the array go in place of hull plating — both shield, so the skin is
+  // still closed — and a right-drag takes the frame under the wall off with
+  // it, so it goes back first.
+  for (const [x, y, kind] of [
+    [9, 1, THRUSTER],
+    [9, 18, THRUSTER],
+    [1, 9, THRUSTER],
+    [18, 9, THRUSTER],
+    [5, 1, SENSOR_ARRAY],
+  ]) {
+    drag(x, y, x, y, 2);
+    put(STRUCTURE, x, y);
+    put(kind, x, y);
+  }
+  put(AIRLOCK, 16, 8);
+  put(FUEL_TANK, 2, 12);
+
+  // And something to eat and something to burn. Bought through the panel,
+  // which is the only way a player can.
   page.deal(VEGETABLE, 10, true);
   page.deal(TOFU, 10, true);
+  page.deal(FUEL, 100, true);
+  page.deal(FUEL, 100, true);
 }
 
 // --- a solo designer, on a small ship -------------------------------------
@@ -276,6 +349,8 @@ const FOR_THE_HARNESS = new Set([
   "ship_self_check",
   "ship_reference_hash_hi",
   "ship_reference_hash_lo",
+  "ship_reference_checksum_hi",
+  "ship_reference_checksum_lo",
   "ship_tile",
 ]);
 const orphans = [...exported].filter((name) => !called.has(name) && !FOR_THE_HARNESS.has(name));
@@ -283,7 +358,7 @@ check("no export has quietly stopped being called", orphans.length === 0, orphan
 
 // --- the wasm agrees with the native build --------------------------------
 
-const ALL_CHECKS = 0b111111;
+const ALL_CHECKS = 0b1111111;
 const selfCheck = wasm.ship_self_check();
 check(
   "wasm hashes the reference design the same as native does",
@@ -478,10 +553,17 @@ for (let i = 0; i < wasm.ship_issue_count(); i++) {
 }
 check("and nothing is an error any more", stillWrong.length === 0, `codes ${stillWrong.join(", ")}`);
 check("which the page agrees with", wasm.ship_has_errors() === 0);
+// A ship with everything a trip wants has nothing left to warn about, and the
+// page says so in one row rather than in none.
 check(
-  "the warnings that are left still have words",
-  issueRows().length === wasm.ship_issue_count(),
-  `${issueRows().length} rows, ${wasm.ship_issue_count()} issues`,
+  "nothing is a warning either, on a ship that can actually fly",
+  wasm.ship_issue_count() === 0,
+  `${wasm.ship_issue_count()} left`,
+);
+check(
+  "so the checks panel says as much",
+  issueRows().length === 1 && issueRows()[0].className === "clean",
+  issueRows().map((r) => r.textContent).join(" | "),
 );
 check("there was money to spare", solo.left() > 0, String(solo.left()));
 check("and it is the pool less what the ship cost", solo.left() < SOLO_POOL, String(solo.left()));
@@ -502,38 +584,209 @@ const showing = () =>
     .join();
 check("the design screen is what is up", showing() === "design", showing());
 
+const moneyAtAccept = solo.left();
 accept.dispatch("click");
 check("one Accept settles a solo ship", wasm.ship_phase() === 1, String(wasm.ship_phase()));
-check("the handoff screen takes over", showing() === "done", showing());
+check("and the game takes over", showing() === "game", showing());
 check("and nothing can be moved any more", wasm.ship_phase() !== 0);
 
-const handoff = byId.get("handoff").textContent;
-check("the handoff says what the ship weighs", /Ship mass/.test(handoff) && wasm.ship_mass() > 0, handoff);
+// --- the game -------------------------------------------------------------
+//
+// One world, one clock. Everything below is the page turning the crank on it:
+// the design phase is over and the ship is real.
+
+console.log("\nthe game the Accept started");
+check("the world is open", wasm.ship_world_ready() === 1);
 check(
-  "and what is left of the money",
-  handoff.includes("Money left") && digits(handoff).includes(String(solo.left())),
-  handoff,
+  "docked at the spawn station",
+  wasm.ship_world_state() === 0 && wasm.ship_docked_at() !== 0,
+  `state ${wasm.ship_world_state()}, dock ${wasm.ship_docked_at()}`,
 );
 check(
-  "and what is in the hold",
-  handoff.includes("Cargo") && handoff.includes("Vegetables") && handoff.includes("Tofu"),
-  handoff,
+  "with the money the design phase left over",
+  solo.left() === moneyAtAccept,
+  `${solo.left()} against ${moneyAtAccept}`,
+);
+check("the clock is at the beginning", wasm.ship_world_day() === 0 && wasm.ship_world_steps() === 0);
+check("it is not going anywhere yet", wasm.ship_world_speed() === 0);
+check(
+  "and it knows how far it can see",
+  wasm.ship_detection_range() > 0,
+  String(wasm.ship_detection_range()),
 );
 check(
-  "and that it can push itself forward",
-  wasm.ship_acceleration(0) > 0,
-  String(wasm.ship_acceleration(0)),
+  "the spawn dock is on the map",
+  wasm.ship_map_count() > 0,
+  `${wasm.ship_map_count()} found`,
 );
-check(
-  "but not backward, with one engine",
-  wasm.ship_acceleration(1) === 0,
-  String(wasm.ship_acceleration(1)),
-);
+check("still no error box", !byId.get("error").textContent, byId.get("error").textContent);
 
 // A click on the deck after that does nothing at all.
 const settledCount = wasm.ship_part_total();
 solo.put(FLOOR, 6, 6);
 check("a click after the design is settled is ignored", wasm.ship_part_total() === settledCount);
+
+// --- the clock runs, and the speed buttons decide how fast -----------------
+
+const speedNow = () => wasm.ship_speed_multiplier(wasm.ship_effective_speed());
+check("it starts at real time", speedNow() === 1, String(speedNow()));
+
+step(60);
+const afterASecond = wasm.ship_world_steps();
+check("a second of frames is about a second of steps", afterASecond >= 55 && afterASecond <= 65, String(afterASecond));
+
+solo.speedButton(0).dispatch("click");
+step(1); // the order lands on the next step
+const paused = wasm.ship_world_steps();
+step(60);
+check("a pause stops the clock", wasm.ship_world_steps() === paused, `${wasm.ship_world_steps()} against ${paused}`);
+check("and the panel says so", speedNow() === 0, String(speedNow()));
+
+solo.speedButton(4).dispatch("click");
+step(1);
+const before24 = wasm.ship_world_steps();
+step(60);
+const at24 = wasm.ship_world_steps() - before24;
+check(
+  "the top speed really is the top speed",
+  at24 > 60 * 20,
+  `${at24} steps in a second of frames at ${speedNow()}x`,
+);
+
+// --- the map, and plotting a trip ------------------------------------------
+
+solo.fire("keydown", { key: "m" });
+check("M opens the map", wasm.ship_view_mode() === 1, String(wasm.ship_view_mode()));
+check("and the readout says which view it is", byId.get("view-name").textContent.length > 0);
+
+// Everything on the map is something the crew have found. There is no way to
+// plot a trip to anything else, because there is no way to point at it.
+const mapped = [];
+for (let i = 0; i < wasm.ship_map_count(); i++) {
+  mapped.push(`${wasm.ship_map_kind(i)}:${wasm.ship_map_id(i)}`);
+}
+check("the map lists only what has been found", mapped.length === wasm.ship_map_count());
+
+// The map opens showing the whole system, where a trip anybody would sit
+// through is a fraction of a pixel. Zoom right in first — which is also the
+// only way to check that the zoom works at all.
+const middle = { x: solo.gameCanvas.clientWidth / 2, y: solo.gameCanvas.clientHeight / 2 };
+const wideOut = wasm.ship_view_scale();
+wasm.ship_zoom(middle.x, middle.y, 100000);
+check("the map zooms in", wasm.ship_view_scale() > wideOut, `${wideOut} to ${wasm.ship_view_scale()}`);
+
+// Somewhere near, so the trip finishes inside a test rather than inside a
+// week. A bare point in space is a perfectly good destination, and a click
+// well clear of every icon is how you say so.
+const here = { x: wasm.ship_world_x(), y: wasm.ship_world_y() };
+const aimedAt = { clientX: middle.x + 60, clientY: middle.y - 25, pointerId: 1 };
+check(
+  "there is nothing to pick out there",
+  wasm.ship_map_pick(aimedAt.clientX, aimedAt.clientY, 14) === 0,
+);
+solo.gameCanvas.dispatch("pointerdown", { button: 0, ...aimedAt });
+// One frame, so the panel has been painted. The quote is re-worked every
+// frame rather than once at the click — a number that was right when it was
+// worked out and is wrong now is worse than no number.
+step(1);
+check("clicking the map quotes a trip", wasm.ship_preview_state() === 1, String(wasm.ship_preview_state()));
+check("with a time on it", wasm.ship_preview_minutes() > 0, String(wasm.ship_preview_minutes()));
+check("and a fuel bill", wasm.ship_preview_fuel() > 0, String(wasm.ship_preview_fuel()));
+check(
+  "which the helm panel says in words",
+  byId.get("plan").textContent.includes("Fuel"),
+  byId.get("plan").textContent,
+);
+
+const confirm = byId.get("confirm");
+check("Confirm is live once there is something to confirm", confirm.disabled === false);
+
+const fuelBefore = wasm.ship_fuel_aboard();
+confirm.dispatch("click");
+step(2);
+check("Confirm sets the ship going", wasm.ship_world_state() === 2, String(wasm.ship_world_state()));
+check(
+  "and reserves the fuel for it",
+  wasm.ship_fuel_reserved() > 0,
+  String(wasm.ship_fuel_reserved()),
+);
+check("which is not burnt yet", wasm.ship_fuel_aboard() === fuelBefore);
+check("the route is this player's", wasm.ship_destination_by() === 1, String(wasm.ship_destination_by()));
+check(
+  "the station panel goes away once the ship has cast off",
+  byId.get("game-trade").hidden === true,
+);
+
+const reserved = wasm.ship_fuel_reserved();
+solo.until(() => wasm.ship_world_state() !== 2, "arrived");
+check("it gets there", wasm.ship_world_state() === 1, String(wasm.ship_world_state()));
+check("holding, because a point in space is not a dock", wasm.ship_docked_at() === 0);
+check(
+  "and the fuel is gone from the hold",
+  wasm.ship_fuel_aboard() === fuelBefore - reserved,
+  `${wasm.ship_fuel_aboard()} against ${fuelBefore - reserved}`,
+);
+check("with the reservation released", wasm.ship_fuel_reserved() === 0);
+check(
+  "and the page said so",
+  byId.get("log").textContent.length > 0,
+  byId.get("log").textContent,
+);
+check("still no error box", !byId.get("error").textContent, byId.get("error").textContent);
+
+// --- giving up --------------------------------------------------------------
+
+solo.gameCanvas.dispatch("pointerdown", {
+  button: 0,
+  pointerId: 1,
+  clientX: middle.x - 140,
+  clientY: middle.y,
+});
+confirm.dispatch("click");
+step(2);
+check("off again", wasm.ship_world_state() === 2);
+
+for (let i = 0; i < 40; i++) step(1);
+byId.get("abort").dispatch("click");
+step(2);
+check("Abort is taken", byId.get("log").textContent.toLowerCase().includes("stopping"), byId.get("log").textContent);
+solo.until(() => wasm.ship_world_state() !== 2, "stopped");
+check("and it comes to rest", wasm.ship_world_speed() === 0, String(wasm.ship_world_speed()));
+check("holding, with nobody's route on the map", wasm.ship_destination_by() === 0);
+
+// --- every code has words ----------------------------------------------------
+
+check(
+  "PLAN_ERRORS covers every reason a trip can be refused",
+  hostSource.includes("const PLAN_ERRORS"),
+);
+const planErrorCodes = [...hostSource.matchAll(/^\s+(\d+): "/gm)];
+check("there are tables of words to check", planErrorCodes.length > 20);
+
+// The event log is the count check: an event whose code has no line is
+// dropped, so a missing one shows up as rows that do not add up.
+solo.speedButton(1).dispatch("click");
+step(2);
+wasm.ship_events_clear();
+// The middle of the map is where the ship already is, and a trip to where you
+// already are is not a trip.
+solo.gameCanvas.dispatch("pointerdown", {
+  button: 0,
+  pointerId: 1,
+  clientX: middle.x,
+  clientY: middle.y,
+});
+step(1);
+check(
+  "a trip to where the ship already is is refused, and says why",
+  wasm.ship_preview_state() === 2 && wasm.ship_preview_error() !== 0,
+  `${wasm.ship_preview_state()} / ${wasm.ship_preview_error()}`,
+);
+check(
+  "and the panel puts it in words rather than a number",
+  byId.get("plan").className === "refused" && byId.get("plan").textContent.length > 10,
+  byId.get("plan").textContent,
+);
 
 // The frame loop is still running, which is the other way a page dies.
 step(120);
@@ -843,6 +1096,194 @@ check(
 );
 check("which takes the Accept back", bought.wasm.ship_accepted(0) === 0);
 check("still no error box", !bought.byId.get("error").textContent, bought.byId.get("error").textContent);
+
+// --- two of them, flying one ship -----------------------------------------
+//
+// The half the solo session cannot reach: every command carries a slot, any
+// of them can give it, and the slowest speed request is what actually happens.
+
+const crew = await session("?money=200000&area=20&players=2&slot=0");
+console.log("\ntwo aboard, one ship");
+buildShip(crew, 2);
+crew.byId.get("accept").dispatch("click");
+// The other one accepts through `net`, which is the only way anything reaches
+// the wasm — there is no second browser here, and the seam is what stands in
+// for one.
+crew.wasm.ship_accept(1, crew.wasm.ship_hash_hi(), crew.wasm.ship_hash_lo());
+check("both Accepts settle it", crew.wasm.ship_phase() === 1);
+check("and the world opens", crew.wasm.ship_world_ready() === 1);
+// Somebody *else's* Accept is what settled it, so the page finds out on its
+// next frame rather than in the click handler. That is the seam doing its job
+// and it is worth one step to say so.
+crew.step(1);
+check(
+  "and the page moves over on its own",
+  crew.root
+    .querySelectorAll("[data-screen]")
+    .filter((s) => !s.hidden)
+    .map((s) => s.dataset.screen)
+    .join() === "game",
+);
+
+// One player at 1x holds the world at 1x however fast the other wants it.
+crew.speedButton(4).dispatch("click");
+crew.wasm.ship_cmd_speed(1, 1);
+crew.step(1);
+check(
+  "the slowest request is what happens",
+  crew.wasm.ship_speed_multiplier(crew.wasm.ship_effective_speed()) === 1,
+  String(crew.wasm.ship_speed_multiplier(crew.wasm.ship_effective_speed())),
+);
+check(
+  "and the panel shows what everybody asked for",
+  crew.byId.get("speed-asks").textContent.includes("24"),
+  crew.byId.get("speed-asks").textContent,
+);
+crew.wasm.ship_cmd_speed(1, 4);
+check("and lifting it lets the world go", crew.wasm.ship_speed_multiplier(crew.wasm.ship_effective_speed()) === 24);
+
+// --- trading, out here where it is a command ---------------------------------
+
+check("the station panel is up while docked", crew.byId.get("game-trade").hidden === false);
+const purse = crew.left();
+const vegBefore = crew.wasm.ship_cargo(VEGETABLE);
+crew.trade(VEGETABLE, 10, true);
+crew.step(2);
+check(
+  "a buy at the dock takes ten aboard",
+  crew.wasm.ship_cargo(VEGETABLE) === vegBefore + 10,
+  String(crew.wasm.ship_cargo(VEGETABLE)),
+);
+check("and comes out of the crew's money", crew.left() < purse, `${crew.left()} against ${purse}`);
+crew.trade(VEGETABLE, 10, false);
+crew.step(2);
+check("selling puts every euro back", crew.left() === purse, `${crew.left()} against ${purse}`);
+
+// --- a redirect, by the other player ------------------------------------------
+
+crew.fire("keydown", { key: "m" });
+const crewMiddle = { x: crew.gameCanvas.clientWidth / 2, y: crew.gameCanvas.clientHeight / 2 };
+crew.wasm.ship_zoom(crewMiddle.x, crewMiddle.y, 100000);
+crew.gameCanvas.dispatch("pointerdown", {
+  button: 0,
+  pointerId: 1,
+  clientX: crewMiddle.x + 70,
+  clientY: crewMiddle.y,
+});
+crew.step(1);
+crew.byId.get("confirm").dispatch("click");
+crew.step(2);
+check("player one sets off", crew.wasm.ship_world_state() === 2);
+check("and the route is theirs", crew.wasm.ship_destination_by() === 1, String(crew.wasm.ship_destination_by()));
+for (let i = 0; i < 40; i++) crew.step(1);
+
+// The other one sends the ship somewhere else. It stops first — that is what a
+// redirect *is* — and the route on the map becomes theirs.
+crew.wasm.ship_cmd_confirm_point(1, crew.wasm.ship_world_x() - 20000, crew.wasm.ship_world_y());
+crew.step(2);
+check(
+  "the other player's Confirm takes the route over",
+  crew.wasm.ship_destination_by() === 2,
+  String(crew.wasm.ship_destination_by()),
+);
+check("and the ship is stopping first", crew.wasm.ship_trip_aborting() === 1);
+check(
+  "which the readout says in so many words",
+  crew.byId.get("trip-phase").textContent === "Stopping",
+  crew.byId.get("trip-phase").textContent,
+);
+// It comes to rest and sets off again on its own — the player asked once.
+// Watched through the state rather than through the event list, because the
+// page drains that every frame and a harness reading it afterwards reads an
+// empty one.
+crew.until(
+  () => crew.wasm.ship_world_state() === 2 && crew.wasm.ship_trip_aborting() === 0,
+  "stopped and set off again",
+);
+check("and the ship stops and sets off again on its own", true);
+check("still under way", crew.wasm.ship_world_state() === 2);
+check("still no error box", !crew.byId.get("error").textContent, crew.byId.get("error").textContent);
+
+// --- arriving at a station, with and without a way off it ---------------------
+//
+// Docking wants an airlock as well as a station to aim at. Two sessions,
+// because it is a fact about the ship rather than about the trip.
+
+for (const withAirlock of [true, false]) {
+  const port = await session("?money=200000&area=20&players=1&slot=0");
+  console.log(`\na ship ${withAirlock ? "with" : "without"} an airlock, coming alongside`);
+  buildShip(port, 1);
+  if (!withAirlock) {
+    port.drag(16, 8, 16, 9, 2);
+    check("the airlock is off", port.wasm.ship_has_errors() === 0);
+  }
+  port.byId.get("accept").dispatch("click");
+  check("the game started", port.wasm.ship_world_ready() === 1);
+
+  const dock = port.wasm.ship_docked_at() - 1;
+  const at = { x: port.wasm.ship_world_x(), y: port.wasm.ship_world_y() };
+  port.wasm.ship_cmd_speed(0, 4);
+
+  // Out to a point, then back to the dock it just left.
+  port.wasm.ship_cmd_confirm_point(0, at.x + 20000, at.y);
+  port.step(2);
+  port.until(() => port.wasm.ship_world_state() !== 2, "got clear of the dock");
+  check("it is holding out in space", port.wasm.ship_world_state() === 1);
+  check("and the station panel is gone", port.byId.get("game-trade").hidden === true);
+
+  const back = mapIndex(port, 1, dock);
+  check("the dock it left is still on the map", back >= 0, String(back));
+  port.wasm.ship_cmd_confirm_node(0, 1, dock);
+  port.step(2);
+  port.until(() => port.wasm.ship_world_state() !== 2, "came back");
+
+  if (withAirlock) {
+    check("it docks", port.wasm.ship_world_state() === 0 && port.wasm.ship_docked_at() === dock + 1);
+    check("and the station panel comes back", port.byId.get("game-trade").hidden === false);
+  } else {
+    check("it holds alongside rather than docking", port.wasm.ship_world_state() === 1);
+    check("so there is nowhere to trade", port.byId.get("game-trade").hidden === true);
+  }
+  check("still no error box", !port.byId.get("error").textContent, port.byId.get("error").textContent);
+}
+
+/** Where a node sits in the map list, or -1. */
+function mapIndex(page, kind, id) {
+  for (let i = 0; i < page.wasm.ship_map_count(); i++) {
+    if (page.wasm.ship_map_kind(i) === kind && page.wasm.ship_map_id(i) === id) return i;
+  }
+  return -1;
+}
+
+// --- every code has words --------------------------------------------------
+//
+// The same rule as the issue list and the diary: a code with no line is a row
+// that never appears, so what catches a missing one is the count.
+
+console.log("\nthe words");
+const tables = ["PLAN_ERRORS", "REFUSALS", "PHASE_NAMES", "EVENT_LINES", "BODY_KIND_NAMES", "STATION_KIND_NAMES"];
+for (const table of tables) {
+  check(`${table} exists`, hostSource.includes(`const ${table}`));
+}
+
+// `PHASE_NAMES` is indexed by `flight::Phase` and there are five of them, the
+// last being "not on a trip at all".
+const phaseNames = /const PHASE_NAMES = \[([^\]]*)\]/.exec(hostSource);
+check(
+  "PHASE_NAMES has a word for every phase",
+  phaseNames && phaseNames[1].split(",").filter((s) => s.trim()).length === 5,
+  phaseNames ? phaseNames[1] : "not found",
+);
+const bodyNames = /const BODY_KIND_NAMES = \[([^\]]*)\]/.exec(hostSource);
+check(
+  "BODY_KIND_NAMES covers every kind of body",
+  bodyNames && bodyNames[1].split(",").filter((s) => s.trim()).length === 4,
+);
+const stationNames = /const STATION_KIND_NAMES = \[([^\]]*)\]/.exec(hostSource);
+check(
+  "STATION_KIND_NAMES covers every kind of station",
+  stationNames && stationNames[1].split(",").filter((s) => s.trim()).length === 5,
+);
 
 console.log(fails.length ? `\n${fails.length} FAILED` : "\nall passed");
 process.exit(fails.length ? 1 : 0);

@@ -11,7 +11,9 @@ use physics::{Facing, ResourceId};
 
 use crate::budget::Budget;
 use crate::design::{CARGO_SLOTS, Edit, EditError, ShipDesign, apply, design_hash};
-use crate::fixture::{CREWS, REFERENCE_HASH, REFERENCE_PARTS, REFERENCE_POOL, reference};
+use crate::fixture::{
+    CREWS, FLYER_FUEL, REFERENCE_HASH, REFERENCE_PARTS, REFERENCE_POOL, flyer, reference,
+};
 use crate::mass::{acceleration, hull_mass, ship_mass};
 use crate::materials::{bound_mass, bound_materials, build_from_cargo, deconstruct_to_cargo};
 use crate::parts::{
@@ -153,6 +155,7 @@ fn every_part_needs_what_it_is_meant_to_need() {
         PartKind::Wall,
         PartKind::OutsideWall,
         PartKind::SensorArray,
+        PartKind::Thruster,
         PartKind::PowerConduit,
     ] {
         assert_eq!(
@@ -170,6 +173,7 @@ fn every_part_needs_what_it_is_meant_to_need() {
                 | PartKind::Wall
                 | PartKind::OutsideWall
                 | PartKind::SensorArray
+                | PartKind::Thruster
                 | PartKind::PowerConduit
         );
         if !on_frame {
@@ -197,6 +201,7 @@ fn shielding_and_storage_are_where_they_are_meant_to_be() {
             PartKind::OutsideWall,
             PartKind::Airlock,
             PartKind::SensorArray,
+            PartKind::Thruster,
         ],
     );
 
@@ -1179,11 +1184,69 @@ fn the_reference_ship_is_valid_for_the_crew_it_was_built_for() {
                 .filter(|i| i.severity == Severity::Error)
                 .collect::<Vec<_>>()
         );
-        // It has an engine, a bay and a locker, so the only warning left is
-        // the one about pushing on every axis.
+        // It has a forward engine, a bay, a locker, a helm and food, so what
+        // is left is exactly the four things a *trip* wants and living
+        // aboard does not: something to turn with, something to burn,
+        // somewhere to dock through and something to see with.
         let warnings: Vec<u32> = issues.iter().map(|i| i.code).collect();
-        assert_eq!(warnings, vec![IssueCode::NoEngineOnAxis.code()]);
+        assert_eq!(
+            warnings,
+            vec![
+                IssueCode::NoThruster.code(),
+                IssueCode::NoFuelAboard.code(),
+                IssueCode::NoAirlock.code(),
+                IssueCode::NoSensorArray.code(),
+            ],
+        );
     }
+}
+
+/// The other fixture. [`reference`] is a ship to live on; this is one to fly,
+/// and what says so is that every flight warning has gone.
+#[test]
+fn the_flyer_is_a_ship_a_trip_can_actually_be_planned_for() {
+    for &crew in CREWS.iter() {
+        let design = flyer(crew);
+        let issues = validate(&design, crew);
+        assert!(
+            !has_errors(&issues),
+            "flyer for {crew}: {:?}",
+            issues
+                .iter()
+                .filter(|i| i.severity == Severity::Error)
+                .collect::<Vec<_>>()
+        );
+        let codes: Vec<u32> = issues.iter().map(|i| i.code).collect();
+        assert!(codes.is_empty(), "flyer for {crew} still warns: {codes:?}");
+
+        assert_eq!(design.count(PartKind::Thruster), 4);
+        assert_eq!(design.count(PartKind::Airlock), 1);
+        assert_eq!(design.count(PartKind::SensorArray), 1);
+        assert_eq!(design.carrying(ResourceId::Fuel), FLYER_FUEL);
+        // A full tank and not a unit more: the tank is what bounds it, and a
+        // fixture that quietly bought less would make every fuel scenario
+        // measure something other than what it says.
+        assert_eq!(design.capacity(Storage::FuelTank), FLYER_FUEL);
+    }
+}
+
+/// The thrusters and the array went in **place of** hull plating, and both of
+/// them shield, so the skin is still closed. If either stopped shielding this
+/// is what would notice.
+#[test]
+fn a_flyer_is_still_sealed() {
+    assert!(exposure(&flyer(4)).is_empty());
+    // And it is the same ship underneath: five tiles of plating came off,
+    // four thrusters, an array, an airlock and a tank went on.
+    assert_eq!(
+        flyer(4).parts.len(),
+        reference(4).parts.len() - 5 + 7,
+        "the flyer should be the reference with its hull swapped and two parts added",
+    );
+    assert_eq!(
+        flyer(4).count(PartKind::OutsideWall) + 5,
+        reference(4).count(PartKind::OutsideWall)
+    );
 }
 
 /// One test over the whole required list rather than seven, so a part added
@@ -1303,7 +1366,8 @@ fn a_door_is_a_way_through_and_a_wall_is_not() {
 }
 
 /// Engines are the design's business, not the validator's: none at all, or
-/// none that can stop the ship, is something to be told rather than stopped.
+/// none that can push the ship along its own nose, is something to be told
+/// rather than stopped.
 #[test]
 fn everything_about_engines_is_only_a_warning() {
     let mut design = reference(1);
@@ -1312,15 +1376,20 @@ fn everything_about_engines_is_only_a_warning() {
     assert!(!has_errors(&issues));
     let codes: Vec<u32> = issues.iter().map(|i| i.code).collect();
     assert!(codes.contains(&IssueCode::NoEngine.code()));
-    assert!(!codes.contains(&IssueCode::NoEngineOnAxis.code()));
+    // No engines at all is one complaint, not two: "and none of them faces
+    // forward" about a ship with no engines is a sentence nobody needs.
+    assert!(!codes.contains(&IssueCode::NoForwardEngine.code()));
 
-    // One engine facing each way, on bare deck with room round them — the
-    // reference is too full to stand four of them in, and this check is about
-    // the axes and nothing else.
-    let mut all_round = floored(20, (1, 1), (19, 19));
-    for (i, &rotation) in Rotation::ALL.iter().enumerate() {
-        all_round = place(
-            &all_round,
+    // What the flight step actually asks for is a **forward** engine. A ship
+    // with one pointing every other way is a ship that cannot set off, and
+    // the warning says so; add the forward one and it goes.
+    let mut sideways = floored(20, (1, 1), (19, 19));
+    for (i, &rotation) in [Rotation::R90, Rotation::R180, Rotation::R270]
+        .iter()
+        .enumerate()
+    {
+        sideways = place(
+            &sideways,
             &rich(),
             PartKind::Engine,
             (2 + 4 * i as u32, 4),
@@ -1328,12 +1397,57 @@ fn everything_about_engines_is_only_a_warning() {
         )
         .expect("an engine would not stand on bare deck");
     }
-    let codes: Vec<u32> = validate(&all_round, 0).iter().map(|i| i.code).collect();
+    let codes: Vec<u32> = validate(&sideways, 0).iter().map(|i| i.code).collect();
     assert!(!codes.contains(&IssueCode::NoEngine.code()), "{codes:?}");
     assert!(
-        !codes.contains(&IssueCode::NoEngineOnAxis.code()),
+        codes.contains(&IssueCode::NoForwardEngine.code()),
         "{codes:?}"
     );
+
+    let forward = place(&sideways, &rich(), PartKind::Engine, (14, 4), Rotation::R0)
+        .expect("an engine would not stand on bare deck");
+    let codes: Vec<u32> = validate(&forward, 0).iter().map(|i| i.code).collect();
+    assert!(
+        !codes.contains(&IssueCode::NoForwardEngine.code()),
+        "{codes:?}"
+    );
+}
+
+/// The four warnings the flight step added, one at a time. Each is about a
+/// part the ship can perfectly well be lived on without and cannot leave the
+/// dock without, and none of them is an error.
+#[test]
+fn what_a_trip_wants_is_said_without_being_insisted_on() {
+    let whole = flyer(1);
+    assert!(validate(&whole, 1).is_empty());
+
+    for (kind, code) in [
+        (PartKind::Thruster, IssueCode::NoThruster),
+        (PartKind::Airlock, IssueCode::NoAirlock),
+        (PartKind::SensorArray, IssueCode::NoSensorArray),
+    ] {
+        let mut stripped = whole.clone();
+        stripped.parts.retain(|p| p.kind != kind);
+        let issues = validate(&stripped, 1);
+        assert!(!has_errors(&issues), "{kind:?} became an error");
+        let codes: Vec<u32> = issues.iter().map(|i| i.code).collect();
+        assert!(codes.contains(&code.code()), "{kind:?}: {codes:?}");
+    }
+
+    // Fuel is what is aboard rather than what the tank could hold. A full
+    // tank sold off is a ship that goes nowhere, and the tank is still there.
+    let dry = apply(
+        &whole,
+        &rich(),
+        Edit::Sell {
+            resource: ResourceId::Fuel,
+            units: FLYER_FUEL,
+        },
+    )
+    .expect("the fuel would not sell");
+    let codes: Vec<u32> = validate(&dry, 1).iter().map(|i| i.code).collect();
+    assert_eq!(codes, vec![IssueCode::NoFuelAboard.code()]);
+    assert_eq!(dry.count(PartKind::FuelTank), 1);
 }
 
 #[test]

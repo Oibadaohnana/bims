@@ -1,0 +1,20 @@
+# The world: one star system, the ship in it, and everything aboard, all
+# advancing on one clock.
+#
+# Pure state and pure functions. It renders nothing and exports nothing to
+# wasm — `crates/ship` draws it and the page steps it — and it compiles for
+# native and for wasm32 so the server that will one day be authoritative runs
+# exactly this loop.
+[package]
+name = "world"
+version = "0.1.0"
+edition = "2024"
+description = "The one world clock: a system, a ship, and what happens on it"
+
+[dependencies]
+economy = { path = "../economy" }
+flight = { path = "../flight" }
+physics = { path = "../physics" }
+shipdesign = { path = "../shipdesign" }
+time = { path = "../time" }
+worldgen = { path = "../worldgen" }

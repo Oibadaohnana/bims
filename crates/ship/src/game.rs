@@ -1,0 +1,294 @@
+//! The game, as the browser sees it: a world, two cameras, and the pointer.
+//!
+//! Every rule is next door in `crates/world` and `crates/flight`, which render
+//! nothing and know nothing about a canvas. Nothing in here decides whether a
+//! trip can be flown or what a step does; it asks, it draws the answer, and it
+//! passes the player's orders along.
+//!
+//! # The page drives the clock, and that is deliberate
+//!
+//! [`Game::step`] advances the world by exactly one step and nothing else
+//! decides how many of those happen. `web/ship.js` keeps an accumulator, works
+//! out how many steps a frame is worth at the effective speed, and calls this
+//! that many times. Putting the accumulator in here would mean the wasm had an
+//! opinion about real time, which is the one thing it has no way to measure.
+//!
+//! # Commands are queued, not applied
+//!
+//! A command from the page is put on a list and handed to the **next** step.
+//! That is what makes the stamp `web/ship.js` puts on it mean something: a
+//! command applies at a step, the same step for everybody, and a transport
+//! that arrives late has something to compare against. Applying one the
+//! instant a button is pressed would work perfectly and would be impossible to
+//! wire a network into later.
+
+use flight::{PlanError, Target, angle};
+use shipdesign::parts::TILE;
+use shipdesign::{Money, ShipDesign};
+use world::world::Command;
+use world::{Preview, Speed, World, WorldEvent};
+use worldgen::GalaxyType;
+use worldgen::math::{DVec2, dvec2};
+
+use crate::camera::Camera;
+use crate::starfield::Starfield;
+
+/// Which picture is being drawn.
+///
+/// The discriminants cross the wasm boundary. Two of them, and there is no
+/// third: a "ship view that is also a map" is how you end up with a map you
+/// cannot read and a ship you cannot see.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum ViewMode {
+    /// The ship itself, at tile scale, turned to its heading.
+    Ship = 0,
+    /// The system: what the crew have found, and where the ship is in it.
+    Map = 1,
+}
+
+/// Furthest in and out the ship view will go. The same three-times-life-size
+/// ceiling the design phase has, so the two look like one game.
+const SHIP_MIN_SCALE: f32 = 0.02;
+const SHIP_MAX_SCALE: f32 = 3.0;
+
+/// And for the map, where the units are whole systems. A hundred million
+/// units across a canvas is about `1e-5`, so this brackets it either side by a
+/// couple of orders of magnitude.
+const MAP_MIN_SCALE: f32 = 1e-8;
+const MAP_MAX_SCALE: f32 = 1e-2;
+
+/// How much of the canvas the whole of the discovered system should fill when
+/// the map is first opened.
+const MAP_FIT: f32 = 0.8;
+
+pub struct Game {
+    pub world: World,
+    pub mode: ViewMode,
+    pub ship_view: Camera,
+    pub map_view: Camera,
+    /// Which player this browser is.
+    pub local: u32,
+    /// What the last batch of steps threw up, waiting for the page to read it.
+    /// Drained rather than kept: an event is a thing that happened once.
+    pub events: Vec<WorldEvent>,
+    /// Orders waiting for the next step — see the module note.
+    pub queued: Vec<Command>,
+    /// The last plan the local player asked about. Never a command, and never
+    /// shared: two players hovering over different planets is not an argument
+    /// about where the ship is going.
+    pub preview: Option<Result<Preview, PlanError>>,
+    /// The design tile under the pointer, in the ship view. Signed: a pointer
+    /// off the hull is off it rather than on the nearest edge.
+    pub hover: Option<(i32, i32)>,
+    pub stars: Starfield,
+}
+
+impl Game {
+    /// Open the game with the accepted design.
+    ///
+    /// Returns `None` when the world will not start, which in practice means
+    /// a galaxy with nowhere to spawn or a design that does not weigh enough
+    /// to be a ship. A cdylib that panicked here would abort, and an abort
+    /// tells the player nothing at all.
+    pub fn start(
+        design: ShipDesign,
+        money: Money,
+        players: u32,
+        local: u32,
+        seed: u64,
+        galaxy_type: GalaxyType,
+        width: f32,
+        height: f32,
+    ) -> Option<Game> {
+        let world = World::start(design, money, players, seed, galaxy_type).ok()?;
+        let mut game = Game {
+            world,
+            mode: ViewMode::Ship,
+            ship_view: Camera::new(width, height, 1.0, SHIP_MIN_SCALE, SHIP_MAX_SCALE),
+            map_view: Camera::new(width, height, 1e-5, MAP_MIN_SCALE, MAP_MAX_SCALE),
+            local: local.min(players.saturating_sub(1)),
+            events: Vec::new(),
+            queued: Vec::new(),
+            preview: None,
+            hover: None,
+            stars: Starfield::new(seed),
+        };
+        game.fit_ship();
+        game.fit_map();
+        Some(game)
+    }
+
+    pub fn resize(&mut self, width: f32, height: f32) {
+        self.ship_view.resize(width, height);
+        self.map_view.resize(width, height);
+    }
+
+    /// The camera the page should be painting through.
+    pub fn camera(&self) -> &Camera {
+        match self.mode {
+            ViewMode::Ship => &self.ship_view,
+            ViewMode::Map => &self.map_view,
+        }
+    }
+
+    pub fn camera_mut(&mut self) -> &mut Camera {
+        match self.mode {
+            ViewMode::Ship => &mut self.ship_view,
+            ViewMode::Map => &mut self.map_view,
+        }
+    }
+
+    pub fn set_mode(&mut self, mode: ViewMode) {
+        if self.mode == mode {
+            return;
+        }
+        self.mode = mode;
+        // A map opened after an hour of flying should show where the ship has
+        // got to, not where it was when the map was last looked at.
+        if mode == ViewMode::Map {
+            self.fit_map();
+        }
+    }
+
+    /// Start the ship view showing the whole hull.
+    fn fit_ship(&mut self) {
+        let span = self.world.ship.design.build_area as f32 * TILE as f32;
+        let fit = (self.ship_view.width / span).min(self.ship_view.height / span);
+        self.ship_view.set_scale(fit * 0.9);
+    }
+
+    /// Start the map showing everything the crew have found.
+    ///
+    /// Measured from the ship, because the ship is what the camera is centred
+    /// on — a fit worked out from the star would put the ship off the edge the
+    /// moment it flew anywhere.
+    fn fit_map(&mut self) {
+        let here = self.world.ship.position();
+        let mut furthest = self.world.detection_range();
+        // The star is always there to be seen, and it is the origin.
+        furthest = furthest.max(here.length());
+        for &node in &self.world.discovered {
+            if let Some(at) = self.world.system.absolute_position(node) {
+                furthest = furthest.max(at.distance(here));
+            }
+        }
+        let half = (self.map_view.width.min(self.map_view.height) / 2.0) as f64;
+        let scale = (half * MAP_FIT as f64 / furthest.max(1.0)) as f32;
+        self.map_view.set_scale(scale);
+    }
+
+    // --- the clock ----------------------------------------------------------
+
+    /// One step of the world, with whatever the page has queued.
+    ///
+    /// Events pile up across a frame's worth of steps and the page drains them
+    /// once; a step that produced nothing adds nothing.
+    pub fn step(&mut self) {
+        let commands = std::mem::take(&mut self.queued);
+        let events = self.world.step(&commands);
+        self.events.extend(events);
+    }
+
+    /// Queue an order for the next step.
+    ///
+    /// With one exception, and it is `world`'s rather than this module's: a
+    /// speed request is applied straight away, because at a pause there are no
+    /// steps for a queued one to land on and the pause could never be lifted.
+    /// See [`World::request_speed`].
+    pub fn send(&mut self, command: Command) {
+        if let Command::SetSpeed { slot, speed } = command {
+            self.world.request_speed(slot, speed);
+            return;
+        }
+        self.queued.push(command);
+    }
+
+    /// What step a command queued now will apply at. The stamp `web/ship.js`
+    /// puts on every message, and the thing a transport would compare.
+    pub fn next_step(&self) -> u64 {
+        self.world.steps + 1
+    }
+
+    // --- the pointer ---------------------------------------------------------
+
+    /// A point on the canvas, as a design tile.
+    ///
+    /// The ship is drawn turned, so this is the turn read backwards: screen
+    /// offset from the middle, back through the heading, back into the grid.
+    /// It is the same arithmetic `world_paint` uses forwards, which is what
+    /// makes a click land on the tile it looks like it landed on at every
+    /// heading rather than only at zero.
+    pub fn tile_at(&self, x: f32, y: f32) -> (i32, i32) {
+        let (vx, vy) = self.ship_view.to_view(x, y);
+        // Screen is y-down and the system is y-up, so the screen offset is
+        // turned back into system space before it is turned back into the
+        // grid.
+        let system = dvec2(vx as f64, -(vy as f64));
+        let design = angle::unrotate_design(system, self.world.ship.heading)
+            .add(self.world.ship.dynamics.centre_of_mass);
+        (
+            (design.x / TILE as f64).floor() as i32,
+            (design.y / TILE as f64).floor() as i32,
+        )
+    }
+
+    /// A point on the canvas, as a position in the system. What a click on the
+    /// map means.
+    pub fn point_at(&self, x: f32, y: f32) -> DVec2 {
+        let (vx, vy) = self.map_view.to_view(x, y);
+        self.world
+            .ship
+            .position()
+            .add(dvec2(vx as f64, -(vy as f64)))
+    }
+
+    /// The discovered node a click on the map is near enough to count as
+    /// picking, if any.
+    ///
+    /// Measured in **screen pixels** rather than in world units, because the
+    /// thing being aimed at is an icon: at a map scale where a system fits on
+    /// a laptop, a world-unit tolerance is either the whole screen or a
+    /// thousandth of a pixel.
+    pub fn pick(&self, x: f32, y: f32, slop: f32) -> Option<worldgen::Node> {
+        let here = self.world.ship.position();
+        let mut best: Option<(f32, worldgen::Node)> = None;
+        for &node in &self.world.discovered {
+            let Some(at) = self.world.system.absolute_position(node) else {
+                continue;
+            };
+            let offset = at.sub(here);
+            let sx = self.map_view.offset_x() + offset.x as f32 * self.map_view.scale();
+            let sy = self.map_view.offset_y() - offset.y as f32 * self.map_view.scale();
+            let away = ((sx - x).powi(2) + (sy - y).powi(2)).sqrt();
+            if away <= slop && best.is_none_or(|(near, _)| away < near) {
+                best = Some((away, node));
+            }
+        }
+        best.map(|(_, node)| node)
+    }
+
+    /// Work out what a trip would cost, for the local player's panel.
+    ///
+    /// Asked again every frame while the player is aiming at something, rather
+    /// than once when they click. A quote goes stale the instant the ship
+    /// moves — and while a trip is already under way most of the bill is
+    /// *stopping first*, which shrinks as the ship slows. A number that was
+    /// right when it was worked out and is wrong now is worse than no number.
+    pub fn preview(&mut self, target: Target) {
+        self.preview = Some(self.world.preview(target));
+    }
+
+    pub fn clear_preview(&mut self) {
+        self.preview = None;
+    }
+
+    /// The speed this player has asked for.
+    pub fn requested(&self, slot: u32) -> Speed {
+        self.world
+            .speed_requests
+            .get(slot as usize)
+            .copied()
+            .unwrap_or(Speed::Paused)
+    }
+}

@@ -25,21 +25,37 @@
 //! the design hash. The host puts the two back together; the euro sign and
 //! the digit grouping are its business and are never made in here.
 
-mod draw;
-mod editor;
-mod paint;
-mod view;
+pub mod camera;
+pub mod draw;
+pub mod editor;
+pub mod game;
+pub mod paint;
+pub mod starfield;
+pub mod view;
+pub mod world_paint;
 
 use editor::Editor;
+use flight::Target;
+use game::{Game, ViewMode};
 use physics::{Facing, ResourceId};
+use shipdesign::ShipDesign;
 use shipdesign::parts::{PartKind, footprint};
 use shipdesign::validate::Severity;
 use shipdesign::{Money, Storage, TILE, storage, trade_price};
+use world::world::Command;
+use world::{Speed, WorldEvent};
+use worldgen::{GalaxyType, Node};
 
 /// wasm is single-threaded and the host drives every call, so one global is
 /// both sufficient and safe in practice. Same arrangement as the room's.
 static mut EDITOR: Option<Editor> = None;
+static mut GAME: Option<Game> = None;
 static mut LIST: Option<draw::DrawList> = None;
+
+/// What the lobby asked for, kept from `ship_init` until Accept hands it to
+/// the world. Two numbers, because that is all a galaxy is.
+static mut SEED: u64 = world::data::DEFAULT_SEED;
+static mut GALAXY: u32 = 0;
 
 fn editor() -> &'static mut Editor {
     unsafe {
@@ -47,6 +63,52 @@ fn editor() -> &'static mut Editor {
             .as_mut()
             .expect("ship_init was not called")
     }
+}
+
+/// The game, once there is one. `None` for the whole of the design phase,
+/// which is why almost every export below has a two-armed match in it rather
+/// than a second set of exports: "how much fuel is aboard" is one question
+/// whichever half of the page is up.
+fn game() -> Option<&'static mut Game> {
+    unsafe { (*(&raw mut GAME)).as_mut() }
+}
+
+/// The live ship: the game's if there is one, the design being laid out if
+/// there is not.
+fn design() -> &'static ShipDesign {
+    match game() {
+        Some(game) => &game.world.ship.design,
+        None => &editor().design,
+    }
+}
+
+/// Open the world with the accepted design. Called the moment the last Accept
+/// lands and at no other time.
+fn start_game() {
+    if game().is_some() {
+        return;
+    }
+    let (seed, galaxy) = unsafe { (SEED, GALAXY) };
+    let galaxy_type = GalaxyType::ALL
+        .get(galaxy as usize)
+        .copied()
+        .unwrap_or(GalaxyType::SpiralTwoArm);
+    let editor = editor();
+    let Some(design) = editor.finish_design().cloned() else {
+        return;
+    };
+    let money = editor.budget.remaining(&editor.design);
+    let started = Game::start(
+        design,
+        money,
+        editor.players,
+        editor.local,
+        seed,
+        galaxy_type,
+        editor.view.width,
+        editor.view.height,
+    );
+    unsafe { GAME = started }
 }
 
 fn list() -> &'static mut draw::DrawList {
@@ -86,6 +148,12 @@ pub extern "C" fn ship_tile() -> u32 {
 /// The pool is `economy::starting_pool` of those two, worked out in
 /// [`editor::Editor::new`] so that the wasm and a native server arrive at it
 /// the same way.
+///
+/// `seed_hi`/`seed_lo` and `galaxy` are the world the game will open in, and
+/// they are **temporary in exactly one way**: today they come off the query
+/// string with a fixed default behind them, and when the lobby's World tab
+/// exists they will come off that instead. Nothing else about them changes —
+/// a galaxy has always been a seed and a type.
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_init(
     build_area: u32,
@@ -93,10 +161,16 @@ pub extern "C" fn ship_init(
     money_per_bim_lo: u32,
     players: u32,
     local_slot: u32,
+    seed_hi: u32,
+    seed_lo: u32,
+    galaxy: u32,
     width: f32,
     height: f32,
 ) {
     unsafe {
+        SEED = ((seed_hi as u64) << 32) | seed_lo as u64;
+        GALAXY = galaxy;
+        GAME = None;
         EDITOR = Some(Editor::new(
             build_area,
             money(money_per_bim_hi, money_per_bim_lo),
@@ -106,6 +180,23 @@ pub extern "C" fn ship_init(
             height,
         ))
     }
+}
+
+/// The seed a page opened with no lobby behind it gets, in the two halves
+/// everything 64-bit crosses in.
+///
+/// Exported rather than written down in `web/ship.js` so there is **one** copy
+/// of it: a default that exists in two places is a default that will disagree
+/// with itself, and two players in the same lobby would end up in two
+/// galaxies. It goes when the lobby's World tab arrives.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_default_seed_hi() -> u32 {
+    (world::data::DEFAULT_SEED >> 32) as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_default_seed_lo() -> u32 {
+    world::data::DEFAULT_SEED as u32
 }
 
 /// Two `u32` halves back into one [`Money`]. The other direction is
@@ -126,15 +217,23 @@ fn lo(amount: Money) -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_resize(width: f32, height: f32) {
     editor().view.resize(width, height);
+    if let Some(game) = game() {
+        game.resize(width, height);
+    }
 }
 
-/// Rebuild the shape buffer. Nothing moves on its own here — there is no
-/// simulation — so this is a redraw rather than a step, and it is called once
-/// a frame because the ghost follows the pointer.
+/// Rebuild the shape buffer.
+///
+/// A redraw and **never a step**: the world is advanced by `ship_world_step`,
+/// which the page calls however many times a frame is worth. Folding the two
+/// together would tie the simulation to the display's refresh rate, which is
+/// the one thing a fixed step exists to avoid.
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_render() {
-    let editor = editor();
-    paint::paint(editor, list());
+    match game() {
+        Some(game) => world_paint::paint(game, list()),
+        None => paint::paint(editor(), list()),
+    }
 }
 
 /// Pointer to the current frame's shapes. Only valid until the next
@@ -151,26 +250,43 @@ pub extern "C" fn ship_draw_len() -> usize {
 
 // --- the camera -----------------------------------------------------------
 
+// One transform for both halves of the page, so `web/ship.js` has one paint
+// loop rather than two. What changes is what the origin *is*: the corner of
+// the build area during the design phase, and the ship itself once the game
+// has started — see `crates/ship/src/camera.rs`.
+
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_view_scale() -> f32 {
-    editor().view.scale()
+    match game() {
+        Some(game) => game.camera().scale(),
+        None => editor().view.scale(),
+    }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_view_x() -> f32 {
-    editor().view.offset_x()
+    match game() {
+        Some(game) => game.camera().offset_x(),
+        None => editor().view.offset_x(),
+    }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_view_y() -> f32 {
-    editor().view.offset_y()
+    match game() {
+        Some(game) => game.camera().offset_y(),
+        None => editor().view.offset_y(),
+    }
 }
 
 /// Shove the view by a screen-pixel delta. Middle-drag and WASD both come
 /// through here.
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_pan(dx: f32, dy: f32) {
-    editor().view.pan(dx, dy);
+    match game() {
+        Some(game) => game.camera_mut().pan(dx, dy),
+        None => editor().view.pan(dx, dy),
+    }
 }
 
 /// Zoom about a point on the canvas. `factor` is a multiplier the host works
@@ -178,7 +294,10 @@ pub extern "C" fn ship_pan(dx: f32, dy: f32) {
 /// the sake of a scroll.
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_zoom(at_x: f32, at_y: f32, factor: f32) {
-    editor().view.zoom(at_x, at_y, factor);
+    match game() {
+        Some(game) => game.camera_mut().zoom(at_x, at_y, factor),
+        None => editor().view.zoom(at_x, at_y, factor),
+    }
 }
 
 // --- the palette ----------------------------------------------------------
@@ -403,19 +522,33 @@ pub extern "C" fn ship_pool_lo() -> u32 {
     lo(editor().budget.pool)
 }
 
-/// What is left of it. Never negative; `apply` refuses anything that would
-/// take it there, and it is **derived from the design** every time rather
+/// What is left of it.
+///
+/// Never negative; `apply` refuses anything that would take it there, and
+/// during the design phase it is **derived from the design** every time rather
 /// than decremented as parts go down.
+///
+/// Once the game has started it is the world's figure instead — the same
+/// money, carried across at Accept and not converted into anything, and now
+/// spent and earned at stations rather than derived from a ship.
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_remaining_hi() -> u32 {
-    let editor = editor();
-    hi(editor.budget.remaining(&editor.design))
+    hi(remaining())
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_remaining_lo() -> u32 {
-    let editor = editor();
-    lo(editor.budget.remaining(&editor.design))
+    lo(remaining())
+}
+
+fn remaining() -> Money {
+    match game() {
+        Some(game) => game.world.money,
+        None => {
+            let editor = editor();
+            editor.budget.remaining(&editor.design)
+        }
+    }
 }
 
 // --- the station's goods, and the hold ------------------------------------
@@ -440,11 +573,11 @@ pub extern "C" fn ship_trade_price_lo(resource: u32) -> u32 {
     lo(with_resource(resource, trade_price))
 }
 
-/// Units of it aboard.
+/// Units of it aboard the **live** ship: the design being laid out, or the one
+/// the game is flying. One question, one export.
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_cargo(resource: u32) -> u32 {
-    let editor = editor();
-    with_resource(resource, |id| editor.design.carrying(id))
+    with_resource(resource, |id| design().carrying(id))
 }
 
 /// Which class of storage it is stowed in — a `Storage` code, which indexes
@@ -462,15 +595,13 @@ pub extern "C" fn ship_storage_count() -> u32 {
 /// How much of that class the ship has, over every part that provides it.
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_storage_capacity(class: u32) -> u32 {
-    let editor = editor();
-    with_storage(class, |c| editor.design.capacity(c))
+    with_storage(class, |c| design().capacity(c))
 }
 
 /// How much of it is taken up by what is aboard.
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_storage_used(class: u32) -> u32 {
-    let editor = editor();
-    with_storage(class, |c| editor.design.stored(c))
+    with_storage(class, |c| design().stored(c))
 }
 
 /// Take goods aboard. `0` means it took; anything else is an `EditError`
@@ -596,10 +727,18 @@ pub extern "C" fn ship_hash_lo() -> u32 {
 /// Refused when the hash is not the design's — an Accept in flight when
 /// somebody else placed a wall is an Accept for a ship that no longer exists
 /// — and refused while there are errors.
+/// The last Accept is what opens the world. There is no separate "start"
+/// call: the design phase ending and the game beginning are one event, and two
+/// exports for it would be two things that can disagree about which ship got
+/// handed over.
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_accept(slot: u32, hash_hi: u32, hash_lo: u32) -> u32 {
     let hash = ((hash_hi as u64) << 32) | hash_lo as u64;
-    editor().accept(slot, hash) as u32
+    let took = editor().accept(slot, hash);
+    if editor().phase == editor::Phase::Game {
+        start_game();
+    }
+    took as u32
 }
 
 #[unsafe(no_mangle)]
@@ -613,7 +752,7 @@ pub extern "C" fn ship_accepted(slot: u32) -> u32 {
 }
 
 /// Which half of the page's life it is in: `Phase::Design` while the ship is
-/// being laid out, `Phase::Finished` once everybody has accepted it.
+/// being laid out, `Phase::Game` once everybody has accepted it.
 ///
 /// **One export, not three.** "Is it finished", "may I still edit" and "which
 /// phase is it" are the same question, and three ways of asking it is three
@@ -624,48 +763,622 @@ pub extern "C" fn ship_phase() -> u32 {
     editor().phase as u32
 }
 
-/// The handoff to the play phase.
-///
-/// Stage 5 takes [`editor::Editor::finish_design`] in Rust — the design does
-/// not cross the boundary, and this is only here to say whether there is one
-/// to take. `ship_phase` is how the page asks the same thing.
-pub fn finished_design() -> Option<&'static shipdesign::ShipDesign> {
-    editor().finish_design()
-}
-
-// --- the handoff ----------------------------------------------------------
+// --- what the ship is, in either phase ------------------------------------
 //
-// Nothing consumes these yet. They are what the placeholder screen shows so
-// that the numbers flight will one day want are computed and looked at now
-// rather than discovered to be wrong later.
+// The handoff screen showed these before there was a game to hand to. They
+// are now the game's own readouts and they read the **live** ship, which is
+// the whole reason they were computed and looked at early: the numbers flight
+// would one day want are the numbers flight now uses.
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_part_total() -> u32 {
-    editor().design.parts.len() as u32
+    design().parts.len() as u32
 }
 
-/// What the finished ship weighs, crew aboard and nothing in the hold. `0.0`
-/// for a design too light to be a ship — `physics` refuses one rather than
-/// quoting an infinite acceleration.
+/// What the ship weighs, crew and cargo included. `0.0` for a design too
+/// light to be a ship — `physics` refuses one rather than quoting an infinite
+/// acceleration.
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_mass() -> f64 {
-    let editor = editor();
-    paint::debug_mass(&editor.design, editor.players)
+    match game() {
+        Some(game) => game.world.ship.dynamics.mass.get(),
+        None => {
+            let editor = editor();
+            paint::debug_mass(&editor.design, editor.players)
+        }
+    }
 }
 
 /// Acceleration along one of the ship's own axes, in world units per game
 /// minute squared. `axis` is a `physics::Facing`.
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_acceleration(axis: u32) -> f64 {
-    let editor = editor();
     let axis = *Facing::ALL.get(axis as usize).unwrap_or(&Facing::Forward);
-    shipdesign::acceleration(&editor.design, editor.players, axis).unwrap_or(0.0)
+    let crew = match game() {
+        Some(game) => game.world.ship.crew_count,
+        None => editor().players,
+    };
+    shipdesign::acceleration(design(), crew, axis).unwrap_or(0.0)
+}
+
+// --- the game -------------------------------------------------------------
+//
+// Everything below is `None` until the last Accept lands, and every one of
+// them answers with a nought rather than reaching into an editor that is no
+// longer the point. A page that asks about a trip during the design phase is
+// asking a question with no answer, not making a mistake.
+
+/// Whether the world is open. The page shows the game view on this.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_world_ready() -> u32 {
+    game().is_some() as u32
+}
+
+/// Advance the world by exactly one step.
+///
+/// **The page decides how many.** It keeps an accumulator, works out what a
+/// frame is worth at the effective speed, and calls this that many times —
+/// see `MAX_STEPS_PER_FRAME` in `web/ship.js`. Putting the accumulator in here
+/// would give the wasm an opinion about real time, which it has no way to
+/// measure.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_world_step() {
+    if let Some(game) = game() {
+        game.step();
+    }
+}
+
+/// How many steps a second of real time is worth at 1x.
+///
+/// The page turns a frame into steps with it. It is a fact about the world
+/// rather than about the browser, so it comes from here: a 60 written down in
+/// `web/ship.js` would be a second copy of `world::data::STEP_MINUTES` waiting
+/// to disagree with the first.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_steps_per_second() -> f64 {
+    game()
+        .map(|g| g.world.steps_per_second())
+        .unwrap_or(time::MINUTES_PER_SECOND / world::data::STEP_MINUTES)
+}
+
+/// How many steps have been taken. The stamp a command carries.
+///
+/// `f64` rather than the `u64` it really is: the boundary carries `u32`, and a
+/// double holds a whole step count exactly for rather longer than anybody will
+/// be playing.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_world_steps() -> f64 {
+    game().map(|g| g.world.steps as f64).unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_world_day() -> u32 {
+    game().map(|g| g.world.day()).unwrap_or(0)
+}
+
+/// Minutes into the day. The host turns it into a clock face; no strings
+/// cross this boundary.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_world_minutes() -> f64 {
+    game().map(|g| g.world.minutes_into_day()).unwrap_or(0.0)
+}
+
+// --- how fast ---------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_speed_count() -> u32 {
+    Speed::ALL.len() as u32
+}
+
+/// What a speed is worth, as a plain multiplier. `0` is the pause.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_speed_multiplier(code: u32) -> u32 {
+    Speed::from_code(code).map(|s| s.multiplier()).unwrap_or(0)
+}
+
+/// What this player has asked for. The panel shows every slot's, which is what
+/// makes "why are we crawling" answerable without anybody having to say so.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_speed_request(slot: u32) -> u32 {
+    game().map(|g| g.requested(slot).code()).unwrap_or(0)
+}
+
+/// What the world is actually running at: the slowest request there is.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_effective_speed() -> u32 {
+    game()
+        .map(|g| g.world.effective_speed().code())
+        .unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_cmd_speed(slot: u32, code: u32) {
+    let Some(speed) = Speed::from_code(code) else {
+        return;
+    };
+    if let Some(game) = game() {
+        game.send(Command::SetSpeed { slot, speed });
+    }
+}
+
+// --- where the ship is ------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_world_x() -> f64 {
+    game().map(|g| g.world.ship.position().x).unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_world_y() -> f64 {
+    game().map(|g| g.world.ship.position().y).unwrap_or(0.0)
+}
+
+/// Radians, 0 at north and growing clockwise. See `flight::angle`.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_world_heading() -> f64 {
+    game().map(|g| g.world.ship.heading).unwrap_or(0.0)
+}
+
+/// World units a game minute. Zero unless the ship is actually under way.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_world_speed() -> f64 {
+    game()
+        .and_then(|g| g.world.trip_state())
+        .map(|s| s.speed)
+        .unwrap_or(0.0)
+}
+
+/// Docked, holding, or travelling — `world::ShipState`'s own codes.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_world_state() -> u32 {
+    game().map(|g| g.world.ship.state.code()).unwrap_or(0)
+}
+
+/// Which part of the trip it is in — a `flight::Phase`, indexing `PHASE_NAMES`.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_trip_phase() -> u32 {
+    game()
+        .map(|game| world_paint::phase_code(game))
+        .unwrap_or(0)
+}
+
+/// Whether the trip under way is a **stop** rather than a trip.
+///
+/// A redirect is an abort followed by a departure, so for a while the ship is
+/// braking towards nowhere in particular. "Braking" is the true answer and
+/// "Stopping" is the useful one: a player who has just asked to go somewhere
+/// else wants to know that is what is happening.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_trip_aborting() -> u32 {
+    game()
+        .and_then(|g| g.world.plan())
+        .is_some_and(|plan| plan.aborting) as u32
+}
+
+/// The station it is tied to, **plus one**, or 0 for nowhere. There is no
+/// negative `u32` to say "nothing" with, and station ids start at zero.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_docked_at() -> u32 {
+    match game().map(|g| &g.world.ship.state) {
+        Some(world::ShipState::Docked { station }) => station + 1,
+        _ => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_fuel_aboard() -> u32 {
+    game().map(|g| g.world.ship.fuel_aboard()).unwrap_or(0)
+}
+
+/// Fuel spoken for by the trip under way. It cannot be sold and no other trip
+/// may be planned against it.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_fuel_reserved() -> u32 {
+    game().map(|g| g.world.ship.reserved_fuel).unwrap_or(0)
+}
+
+/// Whose route is on the map, **plus one**, or 0 if nobody has set one.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_destination_by() -> u32 {
+    game()
+        .and_then(|g| g.world.ship.destination_set_by)
+        .map(|slot| slot + 1)
+        .unwrap_or(0)
+}
+
+/// 0 in open space, 1 alongside something.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_frame_kind() -> u32 {
+    game().map(|g| g.world.ship.frame.code()).unwrap_or(0)
+}
+
+/// What it is alongside: 0 for a body and 1 for a station, matching the map
+/// list below. Meaningless while `ship_frame_kind` is 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_frame_node_kind() -> u32 {
+    match game().and_then(|g| g.world.ship.frame.node()) {
+        Some(Node::Body(_)) => 0,
+        Some(Node::Station(_)) => 1,
+        None => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_frame_node_id() -> u32 {
+    match game().and_then(|g| g.world.ship.frame.node()) {
+        Some(Node::Body(id)) | Some(Node::Station(id)) => id,
+        None => 0,
+    }
+}
+
+/// How far the crew can see, in world units. Eyesight, or the sensor arrays.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_detection_range() -> f64 {
+    game().map(|g| g.world.detection_range()).unwrap_or(0.0)
+}
+
+/// The world's identity, for a client one day comparing itself against a
+/// server. In two halves like every other 64-bit number here.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_world_checksum_hi() -> u32 {
+    (game().map(|g| g.world.checksum()).unwrap_or(0) >> 32) as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_world_checksum_lo() -> u32 {
+    game().map(|g| g.world.checksum()).unwrap_or(0) as u32
+}
+
+// --- the map -----------------------------------------------------------------
+//
+// Only what the crew have found. Undiscovered things are not in the list at
+// all rather than being in it and hidden: a host that could count them could
+// leak how much system there is left to explore.
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_map_count() -> u32 {
+    game().map(|g| g.world.discovered.len() as u32).unwrap_or(0)
+}
+
+fn map_node(i: u32) -> Option<Node> {
+    game()?.world.discovered.get(i as usize).copied()
+}
+
+/// 0 for a body, 1 for a station.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_map_kind(i: u32) -> u32 {
+    match map_node(i) {
+        Some(Node::Body(_)) => 0,
+        Some(Node::Station(_)) => 1,
+        None => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_map_id(i: u32) -> u32 {
+    match map_node(i) {
+        Some(Node::Body(id)) | Some(Node::Station(id)) => id,
+        None => 0,
+    }
+}
+
+/// What sort of thing it is: a `worldgen::BodyKind` or `StationKind`, which
+/// the host reads against `BODY_KIND_NAMES` or `STATION_KIND_NAMES` depending
+/// on `ship_map_kind`.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_map_type(i: u32) -> u32 {
+    let Some(game) = game() else { return 0 };
+    match map_node(i) {
+        Some(Node::Body(id)) => game
+            .world
+            .system
+            .body(id)
+            .map(|b| b.kind as u32)
+            .unwrap_or(0),
+        Some(Node::Station(id)) => game
+            .world
+            .system
+            .station(id)
+            .map(|s| s.kind as u32)
+            .unwrap_or(0),
+        None => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_map_x(i: u32) -> f64 {
+    map_position(i).map(|at| at.x).unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_map_y(i: u32) -> f64 {
+    map_position(i).map(|at| at.y).unwrap_or(0.0)
+}
+
+fn map_position(i: u32) -> Option<worldgen::math::DVec2> {
+    let game = game()?;
+    game.world.system.absolute_position(map_node(i)?)
+}
+
+/// Which discovered thing a click on the map is near enough to, **plus one**,
+/// or 0 for empty space — which is a perfectly good place to fly to.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_map_pick(x: f32, y: f32, slop: f32) -> u32 {
+    let Some(game) = game() else { return 0 };
+    let Some(node) = game.pick(x, y, slop) else {
+        return 0;
+    };
+    game.world
+        .discovered
+        .iter()
+        .position(|&n| n == node)
+        .map(|i| i as u32 + 1)
+        .unwrap_or(0)
+}
+
+/// Where a point on the canvas is, in the system.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_map_point_x(x: f32, y: f32) -> f64 {
+    game().map(|g| g.point_at(x, y).x).unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_map_point_y(x: f32, y: f32) -> f64 {
+    game().map(|g| g.point_at(x, y).y).unwrap_or(0.0)
+}
+
+// --- planning a trip ----------------------------------------------------------
+//
+// A preview is worked out for the **local player only** and is never a
+// command: two players hovering over different planets must not be an argument
+// about where the ship is going.
+
+fn target_of(kind: u32, id: u32) -> Target {
+    if kind == 1 {
+        Target::Station(id)
+    } else {
+        Target::Body(id)
+    }
+}
+
+/// Quote a trip to the `i`th thing on the map.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_preview_node(i: u32) {
+    let Some(node) = map_node(i) else { return };
+    let target = match node {
+        Node::Body(id) => Target::Body(id),
+        Node::Station(id) => Target::Station(id),
+    };
+    if let Some(game) = game() {
+        game.preview(target);
+    }
+}
+
+/// Quote a trip to a bare point in space.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_preview_point(x: f64, y: f64) {
+    if let Some(game) = game() {
+        game.preview(Target::Point(worldgen::math::dvec2(x, y)));
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_preview_clear() {
+    if let Some(game) = game() {
+        game.clear_preview();
+    }
+}
+
+/// 0 for nothing quoted, 1 for a trip, 2 for a refusal. Three answers rather
+/// than two, because "no preview yet" and "that trip cannot be flown" are
+/// different things to show.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_preview_state() -> u32 {
+    match game().and_then(|g| g.preview.as_ref()) {
+        None => 0,
+        Some(Ok(_)) => 1,
+        Some(Err(_)) => 2,
+    }
+}
+
+/// A `flight::PlanError`, indexing `PLAN_ERRORS`. Meaningless unless
+/// `ship_preview_state` is 2.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_preview_error() -> u32 {
+    match game().and_then(|g| g.preview.as_ref()) {
+        Some(Err(why)) => why.code(),
+        _ => 0,
+    }
+}
+
+/// The whole trip, in game minutes, **stopping first included**.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_preview_minutes() -> f64 {
+    preview_field(|p| p.minutes)
+}
+
+/// How much of that is coming to rest before setting off. Zero from a
+/// standstill, and often most of the bill when a trip is already under way.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_preview_stopping() -> f64 {
+    preview_field(|p| p.stopping)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_preview_fuel() -> f64 {
+    preview_field(|p| p.fuel)
+}
+
+/// Whether arriving means docking. A station with no airlock to get out of is
+/// a station to hold beside.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_preview_docks() -> u32 {
+    preview_field(|p| u32::from(p.docks) as f64) as u32
+}
+
+fn preview_field(read: impl Fn(&world::Preview) -> f64) -> f64 {
+    match game().and_then(|g| g.preview.as_ref()) {
+        Some(Ok(preview)) => read(preview),
+        _ => 0.0,
+    }
+}
+
+// --- orders --------------------------------------------------------------------
+//
+// Queued rather than applied. A command lands at a **step**, the same step for
+// everybody, which is the whole reason `web/ship.js` stamps each one with
+// `ship_world_steps() + 1` on its way through `net`.
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_cmd_confirm_node(slot: u32, kind: u32, id: u32) {
+    if let Some(game) = game() {
+        game.send(Command::Confirm {
+            slot,
+            target: target_of(kind, id),
+        });
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_cmd_confirm_point(slot: u32, x: f64, y: f64) {
+    if let Some(game) = game() {
+        game.send(Command::Confirm {
+            slot,
+            target: Target::Point(worldgen::math::dvec2(x, y)),
+        });
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_cmd_abort(slot: u32) {
+    if let Some(game) = game() {
+        game.send(Command::Abort { slot });
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_cmd_buy(slot: u32, resource: u32, units: u32) {
+    let Some(resource) = ResourceId::ALL.get(resource as usize).copied() else {
+        return;
+    };
+    if let Some(game) = game() {
+        game.send(Command::Buy {
+            slot,
+            resource,
+            units,
+        });
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_cmd_sell(slot: u32, resource: u32, units: u32) {
+    let Some(resource) = ResourceId::ALL.get(resource as usize).copied() else {
+        return;
+    };
+    if let Some(game) = game() {
+        game.send(Command::Sell {
+            slot,
+            resource,
+            units,
+        });
+    }
+}
+
+// --- what happened -------------------------------------------------------------
+//
+// The same arrangement as the room's diary: a code and a number, with
+// `EVENT_LINES` in `web/ship.js` holding the sentences. An event whose code
+// has no line there is **dropped from the page** rather than shown blank, and
+// what catches a missing one is the row count against `ship_event_count`.
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_event_count() -> u32 {
+    game().map(|g| g.events.len() as u32).unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_event_code(i: u32) -> u32 {
+    event(i).map(WorldEvent::code).unwrap_or(0)
+}
+
+/// The one number the sentence needs. Which number it is depends on the code,
+/// exactly as `MEMORY_LINES` works in the room.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_event_value(i: u32) -> f64 {
+    event(i).map(|e| e.value() as f64).unwrap_or(0.0)
+}
+
+fn event(i: u32) -> Option<WorldEvent> {
+    game()?.events.get(i as usize).copied()
+}
+
+/// Drop everything the page has read. Called once a frame after the rows are
+/// drawn — an event is a thing that happened once.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_events_clear() {
+    if let Some(game) = game() {
+        game.events.clear();
+    }
+}
+
+// --- the two views ---------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_view_mode() -> u32 {
+    game().map(|g| g.mode as u32).unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_set_view_mode(mode: u32) {
+    if let Some(game) = game() {
+        game.set_mode(if mode == 1 {
+            ViewMode::Map
+        } else {
+            ViewMode::Ship
+        });
+    }
+}
+
+/// The pointer, over the ship view. Turned back through the heading, so a
+/// click lands on the tile it looks like it landed on at any heading.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_game_hover(x: f32, y: f32) {
+    if let Some(game) = game() {
+        game.hover = Some(game.tile_at(x, y));
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_game_leave() {
+    if let Some(game) = game() {
+        game.hover = None;
+    }
+}
+
+/// Whether the pointer is over the hull at all. The two below are meaningless
+/// when it is not, and there is no negative `u32` to say so with.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_game_tile_inside() -> u32 {
+    match game().and_then(|g| g.hover.map(|t| (g, t))) {
+        Some((game, tile)) => game.world.ship.design.holds(tile) as u32,
+        None => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_game_tile_x() -> i32 {
+    game().and_then(|g| g.hover).map(|t| t.0).unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_game_tile_y() -> i32 {
+    game().and_then(|g| g.hover).map(|t| t.1).unwrap_or(0)
 }
 
 // --- the self check -------------------------------------------------------
 
 /// Every bit set means the wasm build agrees with the native one.
-pub const SELF_CHECK_ALL: u32 = 0b111111;
+pub const SELF_CHECK_ALL: u32 = 0b1111111;
 
 /// What a native `cargo test` cannot answer: does *this target* get the same
 /// answers?
@@ -718,7 +1431,27 @@ pub extern "C" fn ship_self_check() -> u32 {
     if stowed && shipdesign::exposure(&design).is_empty() {
         bits |= 1 << 5;
     }
+    // And the **world**: a fixed scenario, stepped a fixed number of times,
+    // checksummed. This is the one that catches a target that disagrees about
+    // flying rather than about building — `crates/world`'s
+    // `the_reference_run_comes_out_at_the_number_it_is_pinned_to` is the other
+    // half, and a drift fails exactly one of the two.
+    if world::fixture::reference_run() == world::fixture::REFERENCE_CHECKSUM {
+        bits |= 1 << 6;
+    }
     bits
+}
+
+/// The world checksum as this target computes it, so a failed
+/// [`ship_self_check`] can be read rather than guessed at.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_reference_checksum_hi() -> u32 {
+    (world::fixture::reference_run() >> 32) as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_reference_checksum_lo() -> u32 {
+    world::fixture::reference_run() as u32
 }
 
 /// The reference design's hash as this target computes it, so a failed
@@ -732,3 +1465,6 @@ pub extern "C" fn ship_reference_hash_hi(crew: u32) -> u32 {
 pub extern "C" fn ship_reference_hash_lo(crew: u32) -> u32 {
     shipdesign::design_hash(&shipdesign::fixture::reference(crew)) as u32
 }
+
+#[cfg(test)]
+mod tests;

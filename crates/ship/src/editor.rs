@@ -26,14 +26,25 @@ use shipdesign::{
 use crate::view::View;
 
 /// Which half of the page's life it is in.
+///
+/// Two, and there is deliberately no third. "Is it finished", "may I still
+/// edit" and "has the game started" are the same question asked three ways,
+/// and three exports answering it would be three things that can disagree —
+/// there were three for about an hour once and the boundary check is what
+/// said so.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u32)]
 pub enum Phase {
     /// Placing and removing, instant and free to undo by removal.
     Design = 0,
-    /// Everybody has accepted the same ship. Editing is locked and the
-    /// design is waiting to be handed to the play phase.
-    Finished = 1,
+    /// Everybody accepted the same ship, the design is settled, and the game
+    /// has it. Editing is locked; from here on the world's clock is running.
+    ///
+    /// The code is unchanged from when this was called `Finished` and meant
+    /// "waiting for a play phase that does not exist yet" — it crosses the
+    /// wasm boundary, and `PHASE_DESIGN` in `web/ship.js` is the other half of
+    /// the pair.
+    Game = 1,
 }
 
 /// A pointer held down over the grid.
@@ -228,7 +239,7 @@ impl Editor {
         }
         self.accepts[slot as usize] = Some(hash);
         if self.everyone_agrees() {
-            self.phase = Phase::Finished;
+            self.phase = Phase::Game;
         }
         true
     }
@@ -253,7 +264,7 @@ impl Editor {
     /// is nothing to hand it to yet, so the page shows a placeholder and this
     /// is what it will one day pass on.
     pub fn finish_design(&self) -> Option<&ShipDesign> {
-        (self.phase == Phase::Finished).then_some(&self.design)
+        (self.phase == Phase::Game).then_some(&self.design)
     }
 
     // --- the pointer ------------------------------------------------------

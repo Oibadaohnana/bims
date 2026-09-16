@@ -2,7 +2,9 @@
 # `crates/`:
 #
 #   game        the room: the simulation and its wasm exports. A cdylib.
-#   ship        the design phase in the browser. The other cdylib.
+#   ship        the design phase and the game it starts. The other cdylib.
+#   world       one system, the ship in it, and the clock they both run on.
+#   flight      ship dynamics and the closed-form plan that flies a trip.
 #   shipdesign  what a ship is made of and the rules for building one.
 #   worldgen    the galaxy, systems and station blueprints. Client and server.
 #   physics     ship mass, engine thrust and travel time. Pure arithmetic.
@@ -12,9 +14,10 @@
 #
 # The split is not tidiness. `worldgen` has to produce the same world on the
 # wasm client and on the native server that will one day be authoritative,
-# `physics` has to give the same answers to the world generator now that it
-# gives the builder and the flight step later, and `shipdesign` and `economy`
-# have to admit the same ships and charge the same prices on both. Two
+# `physics` has to give the same answers to the world generator that it gives
+# the designer and the flight step, `shipdesign` and `economy` have to admit
+# the same ships and charge the same prices on both, and `world` and `flight`
+# have to put the ship in the same place after the same number of steps. Two
 # implementations of any of them would be two different games.
 [workspace]
 members = ["crates/*"]

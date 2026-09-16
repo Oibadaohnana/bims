@@ -1,4 +1,5 @@
-# The ship designer: the wasm the design phase runs in.
+# The ship designer and the game it starts: the wasm both halves of
+# web/ship.html run in.
 #
 # It is the second cdylib in the workspace, and it is a *second* one rather
 # than another export on the room's because the two are different pages. The
@@ -16,9 +17,13 @@ edition = "2024"
 description = "The ship design phase — wasm exports, input and the draw buffer for web/ship.html"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 economy = { path = "../economy" }
+flight = { path = "../flight" }
 physics = { path = "../physics" }
 shipdesign = { path = "../shipdesign" }
+time = { path = "../time" }
+world = { path = "../world" }
+worldgen = { path = "../worldgen" }

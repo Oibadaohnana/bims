@@ -241,14 +241,20 @@
                 chmod -R u+w source
                 cd source
                 export CARGO_HOME="$NIX_BUILD_TOP/cargo"
-                # Named packages rather than --workspace: `bims` and `ship`
-                # are cdylibs meant for wasm and their tests are the probes
-                # and harnesses in scratchpad/, which want a terminal. These
-                # six are plain libraries and their tests are plain
-                # `cargo test`.
+                # Named packages rather than --workspace: `bims` is a cdylib
+                # meant for wasm and its tests are the probes and harnesses in
+                # scratchpad/, which want a terminal. The eight libraries have
+                # plain `cargo test` tests.
+                #
+                # `ship` is on the list and is a cdylib, which is the one
+                # exception and a narrow one: it is also an rlib, and the
+                # geometry that turns a design tile into a place on screen and
+                # back is pure arithmetic that gets silently wrong in a way no
+                # harness can see. Everything else in it is still checked by
+                # scratchpad/ship-check.mjs against the real page.
                 cargo test --locked --offline \
                   -p time -p physics -p worldgen -p shipdesign -p economy \
-                  -p health \
+                  -p health -p flight -p world -p ship \
                   --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget}
                 touch "$out"
               '';

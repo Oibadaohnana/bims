@@ -10,6 +10,11 @@ and the deck goes dark at night.
 **You steer one of them.** James takes orders; Kate does not. See
 [The crew](#the-crew).
 
+Beside it there is a ship to design and a system to fly it round. The lobby
+starts a [design phase](#the-ship-designer); accepting the design starts
+[the game](#the-game) — one star system, the ship docked at a station in it,
+and one clock everything runs on. The crew are not aboard that one yet.
+
 ## Running it
 
 ```sh
@@ -25,7 +30,7 @@ There are three things to run, and more will follow:
 ```sh
 nix run .#game        # the room: the simulation, on a canvas — port 8080
 nix run .#builder     # the start menu, game setup and the lobby — port 8081
-nix run .#ship        # the ship design phase, on a tile grid — port 8082
+nix run .#ship        # the ship design phase, and the game it starts — port 8082
 ```
 
 `nix run .` is `nix run .#game`. All three serve the same directory and differ
@@ -34,7 +39,8 @@ at the same time.
 
 While editing, `./run game`, `./run builder` and `./run ship` do the same
 against the live `web/` directory rather than the frozen copy in the Nix store
-— see [The builder](#the-builder) and [The ship designer](#the-ship-designer).
+— see [The builder](#the-builder), [The ship designer](#the-ship-designer) and
+[The game](#the-game).
 
 Running it again while it is already up starts neither a second server nor a
 second tab. It recognises its own build by the wasm being served and just tells
@@ -308,15 +314,8 @@ order it was built in. Any successful edit by anybody changes that hash and
 clears every Accept, so there is no way to be holding one for a ship that is
 no longer on screen.
 
-When everybody's Accept matches the current hash the phase ends: editing locks
-and the handoff screen takes over. It says the play phase is not implemented
-yet, and shows what would be handed on — the part count, the money left, what
-is in the hold, how many tiles are exposed, the ship's mass and its
-acceleration on each axis, all of it out of `physics`, so the numbers flight
-will one day want are computed and looked at now rather than discovered to be
-wrong later.
-
-Solo, one Accept settles it.
+When everybody's Accept matches the current hash the phase ends: editing locks,
+and **the game starts**. Solo, one Accept settles it.
 
 ### The two crates behind it
 
@@ -335,16 +334,123 @@ Solo, one Accept settles it.
   station charges for a unit of anything, and which class of hold it goes in.
   Every sum in it is checked — overflow is an error, never a wrap.
 
-What the play phase is promised is written down at the top of
-`crates/shipdesign/src/lib.rs`: the exposure map is the input for radiation,
-food is in cold stores and fuel in tanks, Bim *i* spawns at bunk *i*, and the
-money left over carries across.
-
 Its multiplayer seam is the same idea as the builder's. `net` in
 `web/ship.js` has a transport's shape, every Edit and every Accept goes
 through it carrying the design hash it was made against, and the host end
 applies messages in arrival order and reports a refusal back to whoever sent
 it. No click handler touches the wasm's editing exports directly.
+
+## The game
+
+The design phase is the only phase before it. The moment the last Accept lands,
+the ship is real: it is **docked at the spawn station** with whatever was left
+of the pool in the crew's hands, and from then on there is one world, one clock
+and one loop.
+
+That is worth saying plainly because it is the decision everything else hangs
+off. The star system, the ship in it, and everything aboard it all advance
+together in `World::step`, which moves the world by a sixtieth of a game minute
+and nothing else. Crew, construction and health are not written yet; when they
+are, they go **inside that step**, at the places already marked for them. A
+second clock would be two simulations that disagree, and the failure would read
+as a ship in two places.
+
+### Flying it
+
+Any player can take the helm. Open the map with **M**, click a planet, a
+station or a bare point in space, and the panel quotes the trip before anybody
+commits to it: how long, how much fuel, and whether it ends docked or holding
+alongside. Confirm sends the ship.
+
+A trip is one straight line and four phases:
+
+1. **Align** — turn to face the arrival point, thrusters flat out for half the
+   turn and flat out the other way for the rest, so it starts and ends still.
+2. **Burn** — the engines, all the way to the changeover.
+3. **Brake** — whichever is quicker: flip end over end and burn on the same
+   engines, or push on the backward engines without turning at all. A ship with
+   no backward engine always flips; a ship with strong ones never does.
+4. **Arrive** — docked if it was aimed at a station and has an airlock,
+   holding beside it otherwise.
+
+There is no speed limit and no coasting in the middle. It is flat out to the
+changeover and braking from there, which is the same shape the world generator
+laid every system out against.
+
+**Abort** brings it to rest along the line it is already on — it never
+reverses — and holds there. A Confirm while it is under way is a redirect,
+which is the same thing followed by a fresh departure: it stops first, and the
+moment it has stopped it sets off again on its own. Only the latest confirmed
+target is kept, and the route line on the map is drawn in the colour of
+whoever set it.
+
+### Fuel, and what it is spoken for
+
+Confirming a trip **reserves** the fuel it will take. Reserved fuel cannot be
+sold and no second trip can be planned against it, so a crew cannot promise the
+same hundred units to two places. It is burnt over the engine phases — an align
+and a flip cost nothing, because thrusters burn nothing — and it comes out of
+the hold when the plan ends. An abort is charged for what was actually burnt:
+the part of the trip that happened, plus the stopping, and the rest of the
+reservation is handed back.
+
+### Seeing where you are
+
+The ship can see `VISION_RANGE` with the crew's own eyes, which out here is
+almost nothing, and a great deal further with a **sensor array**. Anything that
+comes within range of the stretch the ship travelled — the stretch, not the
+endpoints, because at 24x a step is a long way — is discovered, shared by the
+whole crew and never forgotten. Undiscovered things are not drawn on the map at
+all, and there is no way to plot a trip to one.
+
+### Speed, and who decides
+
+Pause, 1×, 3×, 10× and 24×. **Every player has a request and the slowest one
+wins**; a pause by anybody is a pause. That is not a compromise, it is the
+point: the player who needs it slow is the player something is going wrong for,
+and nobody is ever carried past something they wanted to look at. The panel
+shows what everybody asked for as well as what is actually happening, so being
+held at 1× is never a mystery.
+
+### Trading
+
+**Money only works while docked**, because a station is where there is somebody
+to buy from. Holding station beside one is not docked — that wants an airlock —
+and out between them the pool buys nothing at all. Supply is unlimited and every
+station charges the same; what bounds a purchase is the money and the hold.
+
+### The two views
+
+**Ship** is the live ship at tile scale, drawn turned to its heading, with the
+starfield sliding the other way behind it. **System map** is the star, what the
+crew have found, the ring the scanner reaches to, the route, and a marker
+pointing where the ship is pointing.
+
+The camera is **north-up in both, always**. It is the ship that turns on
+screen. A camera that followed the heading would make a flip legible and every
+other moment unreadable — you could not tell which way you were going, because
+"which way" would always look the same.
+
+### The two crates behind that
+
+- **`crates/flight`** is what a design does when you push it — mass, centre of
+  mass, inertia, acceleration, how fast it turns — and the trip that takes it
+  somewhere. A plan is worked out **once** and then read at a time: nothing
+  integrates, so a browser at 24×, a browser at 1× and a server catching up on
+  an hour of somebody's disconnection all put the ship in the same place.
+- **`crates/world`** is the star system, the ship in it, the clock, and the
+  order things happen in. It renders nothing and exports nothing to wasm.
+
+What the steps after this one are promised is written down at the top of
+`crates/world/src/lib.rs`: Bims live in ship-design tile coordinates and the
+ship's rotation does not reach them, every ship change goes through
+`on_ship_changed`, construction spends what is aboard and asks
+`can_modify_part` first, money is only for docks, and the design's exposure map
+is the radiation input.
+
+Which world you land in is a seed and a galaxy shape, and for now they come off
+`ship.html`'s query string with a fixed default behind them. The lobby's World
+tab will pick them instead; nothing else about them changes.
 
 ## The crew
 
@@ -1607,7 +1713,7 @@ crossing the boundary are a handful of numbers and one pointer, which means no
 binding generator and no JavaScript in the build — `cargo build` is the whole
 pipeline, and the module has zero imports.
 
-### Eight crates
+### Ten crates
 
 The repository is a cargo workspace and everything is under `crates/`. The
 split is not tidiness — each line of it is something that has to give the same
@@ -1616,18 +1722,21 @@ answer in two places at once:
 | Crate | What it is | Who else needs it |
 | --- | --- | --- |
 | `game` | The room: the simulation, and its wasm exports. A cdylib | — |
-| `ship` | The design phase in the browser: camera, pointer, draw buffer. The other cdylib | — |
-| `shipdesign` | What a ship is made of and the rules for putting one together | `ship` now; the play phase later; the native server, which has to admit the same ships |
+| `ship` | `web/ship.html`: the design phase, and the game it starts. Camera, pointer, draw buffer. The other cdylib | — |
+| `world` | One star system, the ship in it, and the one clock they both run on | `ship`; the native server, which has to run the identical loop |
+| `flight` | What a design does when you push it, and the closed-form plan that flies a trip | `world`; the native server, which has to put the ship in the same place |
+| `shipdesign` | What a ship is made of and the rules for putting one together | `ship`, `flight` and `world`; the native server, which has to admit the same ships |
 | `worldgen` | The galaxy, what is in each system, and station blueprints | The native server that will one day be authoritative, which has to generate the identical world from the same seed |
-| `physics` | Ship mass, engine thrust, travel time. Pure arithmetic | `worldgen` now, to check its layouts; the builder and the flight step later |
-| `economy` | Money: whole euros, the shared pool, what a station charges and which hold it goes in | `shipdesign` and `ship` now; anything that ever charges for anything later |
-| `health` | One body's health: conditions with stages, mending, death. Radiation dose, sickness and cancer are the first two | The play phase, which will hold one per Bim; the native server, which has to agree about who survived |
+| `physics` | Ship mass, engine thrust, travel time. Pure arithmetic | `worldgen`, to check its layouts; `shipdesign` and `flight`, to weigh and fly a real ship |
+| `economy` | Money: whole euros, the shared pool, what a station charges and which hold it goes in | `shipdesign`, `world` and `ship`; anything that ever charges for anything later |
+| `health` | One body's health: conditions with stages, mending, death. Radiation dose, sickness and cancer are the first two | The crew step, which will hold one per Bim; the native server, which has to agree about who survived |
 | `time` | How long a minute, an hour and a day are | All of them — a day that is two lengths is two games |
 
-Everything but the two cdylibs builds for `wasm32` and for the host both, and
-`nix flake check` builds them both ways and runs their unit tests natively.
-`game` and `ship` are wasm-shaped and are checked by the probes and harnesses
-in `scratchpad/` instead.
+Everything builds for `wasm32` and for the host both, and `nix flake check`
+builds them both ways and runs the libraries' unit tests natively. `game` is
+wasm-shaped and is checked by the probes and harnesses in `scratchpad/`
+instead; so is most of `ship`, bar the arithmetic that turns a design tile into
+a place on screen and back, which is pure and is unit tested.
 
 ### Inside the room
 

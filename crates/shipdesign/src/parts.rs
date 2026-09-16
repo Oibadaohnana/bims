@@ -36,8 +36,8 @@
 //!   it and everything else is over it, directly or through the deck.
 //! - **Floor** is the deck plating you walk on. It needs structure.
 //! - **Object** is the one thing standing in the tile — a wall, a bunk, an
-//!   engine. Most need deck; a wall, an outside wall and a sensor array are
-//!   hull and stand straight on structure.
+//!   engine. Most need deck; a wall, an outside wall, a sensor array and a
+//!   thruster are hull and stand straight on structure.
 //! - **Utility** is what runs *through* a tile without filling it: conduit.
 //!   It needs structure and nothing stands on it.
 //!
@@ -137,12 +137,16 @@ pub enum PartKind {
     SensorArray = 24,
     Shelf = 25,
     Shower = 26,
+    /// A manoeuvring thruster. What turns the ship, and the only thing that
+    /// does — the main engines push through the centre of mass and never spin
+    /// it.
+    Thruster = 27,
 }
 
 impl PartKind {
     /// Every kind, in discriminant order. `ALL[k as usize] == k`, which
     /// [`PartKind::def`] relies on and [`defs_are_sound`] checks.
-    pub const ALL: [PartKind; 27] = [
+    pub const ALL: [PartKind; 28] = [
         PartKind::Floor,
         PartKind::Wall,
         PartKind::Door,
@@ -170,6 +174,7 @@ impl PartKind {
         PartKind::SensorArray,
         PartKind::Shelf,
         PartKind::Shower,
+        PartKind::Thruster,
     ];
 
     /// The number that crosses the wasm boundary. No strings do.
@@ -217,13 +222,19 @@ impl Rotation {
 
     /// Which way an engine at this rotation pushes the ship.
     ///
-    /// **Placeholder.** Grid "up" — a part at [`Rotation::R0`] — is
+    /// Grid "up" — a part at [`Rotation::R0`] — is
     /// [`physics::Facing::Forward`], and the rest follow it round clockwise.
-    /// The mapping is arbitrary in the one way that matters: whether ships
-    /// rotate, and how a ship's own frame lines up with the grid it was drawn
-    /// on, is undecided. `physics` deliberately refuses to assume an answer
-    /// and neither does anything else; this is the placeholder that lets the
-    /// mass and acceleration arithmetic be written and tested now.
+    /// **This is no longer arbitrary.** The flight step decided it: the ship's
+    /// Forward *is* the design grid's up, so at heading 0 the design is drawn
+    /// on screen exactly as it was laid out, and a ship that turns to a
+    /// heading of π/2 has the top of its grid pointing east. Changing this
+    /// mapping now would turn every ship anybody has drawn through a quarter
+    /// circle.
+    ///
+    /// Only `Forward` and `Backward` are flown: the autopilot burns along the
+    /// start–arrival line and turns with thrusters, so an engine bolted
+    /// sideways contributes nothing but its weight. That is a warning on the
+    /// design rather than a refusal — see [`crate::validate`].
     pub fn facing(self) -> physics::Facing {
         match self {
             Rotation::R0 => physics::Facing::Forward,
@@ -266,8 +277,8 @@ pub struct PartDef {
     pub price: Money,
     /// Whether the part keeps radiation out — see
     /// [`crate::validate::exposure`]. Hull, essentially: the outside wall,
-    /// the airlock, the sensor array and the engine block. A plain internal
-    /// wall does not, and neither does a door.
+    /// the airlock, the sensor array, the thruster and the engine block. A
+    /// plain internal wall does not, and neither does a door.
     pub shields: bool,
     /// What this part holds, if it holds anything: a class of storage and how
     /// many units of it. `None` for everything that is not a container.
@@ -284,7 +295,21 @@ pub struct PartDef {
     /// contract in [`crate::materials`].
     pub recipe: &'static [(ResourceId, u32)],
     /// Greater than zero for [`PartKind::Engine`] and nothing else.
+    ///
+    /// A main engine's push goes through the ship's **centre of mass**
+    /// whatever tile it is bolted to, so it produces no torque. That is a
+    /// simplification and a deliberate one: engines placed off the centreline
+    /// would otherwise spin a ship that a player laid out symmetrically to the
+    /// eye and not to the gram, and there is nothing they could do about it.
     pub thrust: f64,
+    /// Greater than zero for [`PartKind::Thruster`] and nothing else.
+    ///
+    /// Force, not torque: what it becomes depends on how far the thruster is
+    /// from the centre of mass, which is `flight::dynamics`'s arithmetic and
+    /// not a fact about the part. A thruster fires **either way round**, so
+    /// one of them turns the ship in both directions and four of them turn it
+    /// faster; there is no left thruster and no right one.
+    pub torque_thrust: f64,
 }
 
 /// The table. Placeholder numbers throughout; see the module note.
@@ -293,7 +318,7 @@ pub struct PartDef {
 /// told about how a part is approached — [`crate::validate`] already insists
 /// every one of them is floor a body can stand on and that they can all reach
 /// each other, so a design that passes here is one the crew can work.
-pub static PARTS: [PartDef; 27] = [
+pub static PARTS: [PartDef; 28] = [
     PartDef {
         kind: PartKind::Floor,
         footprint: (1, 1),
@@ -306,6 +331,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: None,
         recipe: &[(ResourceId::Metal, 1)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     PartDef {
         kind: PartKind::Wall,
@@ -322,6 +348,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: None,
         recipe: &[(ResourceId::Metal, 2)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     PartDef {
         kind: PartKind::Door,
@@ -337,6 +364,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: None,
         recipe: &[(ResourceId::Metal, 2), (ResourceId::Components, 2)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     PartDef {
         kind: PartKind::Engine,
@@ -352,6 +380,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: None,
         recipe: &[(ResourceId::Metal, 40), (ResourceId::Components, 40)],
         thrust: 500.0,
+        torque_thrust: 0.0,
     },
     PartDef {
         kind: PartKind::Bunk,
@@ -365,6 +394,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: None,
         recipe: &[(ResourceId::Metal, 3), (ResourceId::Components, 2)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     PartDef {
         kind: PartKind::ColdStore,
@@ -378,6 +408,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: Some((Storage::ColdStore, 100)),
         recipe: &[(ResourceId::Metal, 6), (ResourceId::Components, 6)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     PartDef {
         kind: PartKind::Worktop,
@@ -391,6 +422,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: None,
         recipe: &[(ResourceId::Metal, 3)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     PartDef {
         kind: PartKind::Hob,
@@ -404,6 +436,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: None,
         recipe: &[(ResourceId::Metal, 3), (ResourceId::Components, 3)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     PartDef {
         kind: PartKind::Dishwasher,
@@ -417,6 +450,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: None,
         recipe: &[(ResourceId::Metal, 5), (ResourceId::Components, 3)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     PartDef {
         kind: PartKind::Table,
@@ -433,6 +467,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: None,
         recipe: &[(ResourceId::Metal, 2)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     PartDef {
         kind: PartKind::Chair,
@@ -449,6 +484,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: None,
         recipe: &[(ResourceId::Metal, 1)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     PartDef {
         kind: PartKind::Toilet,
@@ -462,6 +498,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: None,
         recipe: &[(ResourceId::Metal, 3), (ResourceId::Components, 1)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     PartDef {
         kind: PartKind::Basin,
@@ -475,6 +512,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: None,
         recipe: &[(ResourceId::Metal, 2)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     PartDef {
         kind: PartKind::HydroBay,
@@ -488,6 +526,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: None,
         recipe: &[(ResourceId::Metal, 8), (ResourceId::Components, 8)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     PartDef {
         kind: PartKind::BroomLocker,
@@ -501,6 +540,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: None,
         recipe: &[(ResourceId::Metal, 1), (ResourceId::Components, 1)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     // --- the frame, and the hull on it ------------------------------------
     PartDef {
@@ -518,6 +558,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: None,
         recipe: &[(ResourceId::Metal, 2)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     PartDef {
         kind: PartKind::OutsideWall,
@@ -533,6 +574,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: None,
         recipe: &[(ResourceId::Metal, 4), (ResourceId::Components, 1)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     // --- systems -----------------------------------------------------------
     PartDef {
@@ -549,6 +591,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: None,
         recipe: &[(ResourceId::Metal, 4), (ResourceId::Components, 20)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     PartDef {
         kind: PartKind::Reactor,
@@ -565,6 +608,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: None,
         recipe: &[(ResourceId::Metal, 30), (ResourceId::Components, 30)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     PartDef {
         kind: PartKind::PowerConduit,
@@ -578,6 +622,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: None,
         recipe: &[(ResourceId::Metal, 1)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     PartDef {
         kind: PartKind::Battery,
@@ -591,6 +636,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: None,
         recipe: &[(ResourceId::Metal, 4), (ResourceId::Components, 10)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     PartDef {
         kind: PartKind::FuelTank,
@@ -606,6 +652,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: Some((Storage::FuelTank, 200)),
         recipe: &[(ResourceId::Metal, 10)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     PartDef {
         kind: PartKind::LifeSupport,
@@ -619,6 +666,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: None,
         recipe: &[(ResourceId::Metal, 8), (ResourceId::Components, 12)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     PartDef {
         kind: PartKind::Airlock,
@@ -634,6 +682,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: None,
         recipe: &[(ResourceId::Metal, 8), (ResourceId::Components, 6)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     PartDef {
         kind: PartKind::SensorArray,
@@ -648,6 +697,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: None,
         recipe: &[(ResourceId::Metal, 3), (ResourceId::Components, 12)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     // --- crew ---------------------------------------------------------------
     PartDef {
@@ -662,6 +712,7 @@ pub static PARTS: [PartDef; 27] = [
         capacity: Some((Storage::Shelf, 100)),
         recipe: &[(ResourceId::Metal, 2)],
         thrust: 0.0,
+        torque_thrust: 0.0,
     },
     PartDef {
         kind: PartKind::Shower,
@@ -675,6 +726,34 @@ pub static PARTS: [PartDef; 27] = [
         capacity: None,
         recipe: &[(ResourceId::Metal, 3), (ResourceId::Components, 2)],
         thrust: 0.0,
+        torque_thrust: 0.0,
+    },
+    PartDef {
+        kind: PartKind::Thruster,
+        footprint: (1, 1),
+        layer: Layer::Object,
+        blocks_movement: true,
+        // Bolted to the frame on the outside, like the hull and the sensor
+        // array. A thruster inside the ship would be pushing against its own
+        // hull — and standing it on the frame is also what puts it out at the
+        // edges, which is where a lever arm comes from.
+        requires: Some(Layer::Structure),
+        use_spots: &[],
+        price: 2_500,
+        // It is hull, so it keeps the radiation out like the rest of the
+        // skin. A ring of thrusters with gaps between them is still gaps.
+        shields: true,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 4), (ResourceId::Components, 6)],
+        thrust: 0.0,
+        // Placeholder, and picked against a scenario rather than out of the
+        // air: four of these on the flyable fixture's hull turn it through
+        // half a circle in about a hundred and ten game minutes, inside the
+        // two hours the flight step asks for.
+        // `flight`'s `four_thrusters_flip_the_reference_inside_two_hours` is
+        // what pins it, and `what_the_fixture_actually_flies_like` beside it
+        // prints the numbers for whoever has to move this next.
+        torque_thrust: 1_000.0,
     },
 ];
 
@@ -767,9 +846,10 @@ fn recipe_is_sound(recipe: &'static [(ResourceId, u32)]) -> bool {
 
 /// Whether the table above holds together: one entry per kind, in order, each
 /// made of something and costing something, thrust on engines and nowhere
-/// else, a footprint with area in it, exactly one part on the floor layer and
-/// exactly one on the structure layer, nothing requiring its own layer, and
-/// no container that holds nothing.
+/// else, turning force on thrusters and nowhere else, a footprint with area in
+/// it, exactly one part on the floor layer and exactly one on the structure
+/// layer, nothing requiring its own layer, and no container that holds
+/// nothing.
 pub fn defs_are_sound() -> bool {
     if PARTS.len() != PartKind::ALL.len() {
         return false;
@@ -777,6 +857,7 @@ pub fn defs_are_sound() -> bool {
     PartKind::ALL.iter().enumerate().all(|(i, &kind)| {
         let def = &PARTS[i];
         let engine = kind == PartKind::Engine;
+        let thruster = kind == PartKind::Thruster;
         def.kind == kind
             && recipe_is_sound(def.recipe)
             && part_mass(kind) > 0.0
@@ -784,6 +865,12 @@ pub fn defs_are_sound() -> bool {
             && def.thrust.is_finite()
             && def.thrust >= 0.0
             && (def.thrust > 0.0) == engine
+            // The two are exclusive on purpose. A part that both pushed and
+            // turned would make "which engines are burning" — and therefore
+            // the fuel bill — a different question for every design.
+            && def.torque_thrust.is_finite()
+            && def.torque_thrust >= 0.0
+            && (def.torque_thrust > 0.0) == thruster
             && def.footprint.0 > 0
             && def.footprint.1 > 0
             && (def.layer == Layer::Floor) == (kind == PartKind::Floor)

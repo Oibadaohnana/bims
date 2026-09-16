@@ -1,0 +1,18 @@
+# How a ship flies a trip: what its mass and its thrusters do to it, and the
+# closed-form plan that takes it from one place in a system to another.
+#
+# Pure arithmetic, like `physics` and `shipdesign` beside it. No rendering, no
+# wasm exports and no world — a plan is worked out once and then *evaluated* at
+# a time, so the browser stepping sixty times a second and a native server
+# catching up on a day in one go get the same answer to the last unit.
+[package]
+name = "flight"
+version = "0.1.0"
+edition = "2024"
+description = "Ship dynamics and closed-form trip plans"
+
+[dependencies]
+physics = { path = "../physics" }
+shipdesign = { path = "../shipdesign" }
+time = { path = "../time" }
+worldgen = { path = "../worldgen" }

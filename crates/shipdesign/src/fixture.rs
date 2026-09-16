@@ -17,7 +17,7 @@ use physics::ResourceId;
 
 use crate::budget::Budget;
 use crate::design::{Edit, ShipDesign, apply};
-use crate::parts::{PartKind, Rotation};
+use crate::parts::{Layer, PartKind, Rotation};
 
 /// Tiles a side. Small enough to read, big enough to hold a working ship.
 pub const AREA: u32 = 20;
@@ -144,6 +144,96 @@ pub fn reference(crew: u32) -> ShipDesign {
         if let Ok(next) = apply(&design, &budget, Edit::Buy { resource, units }) {
             design = next;
         }
+    }
+
+    design
+}
+
+/// Where the flyer's four thrusters and its sensor array go, as hull tiles
+/// they **replace**.
+///
+/// Mid-edge rather than at the corners, and all four of them, because what a
+/// thruster is worth is its distance from the centre of mass and a corner is
+/// no further out than the middle of a side on a square hull. Replacing the
+/// plating rather than standing beside it is the only option there is: a
+/// thruster is hull, it stands on the frame, and a tile holds one object.
+const THRUSTER_TILES: [(u32, u32); 4] = [(9, 1), (9, 18), (1, 9), (18, 9)];
+const SENSOR_TILE: (u32, u32) = (5, 1);
+
+/// How much fuel [`flyer`] leaves the dock with: a full tank.
+pub const FLYER_FUEL: u32 = 200;
+
+/// The reference ship again, with everything a trip actually needs.
+///
+/// [`reference`] is a ship you can **live** on and it is deliberately not one
+/// you can fly: it has an engine and nothing else, so it raises every one of
+/// the flight warnings and is exactly the fixture those warnings are tested
+/// against. This is the other one — four thrusters to turn with, an airlock
+/// to dock through, a sensor array to see with, a tank and two hundred units
+/// of fuel to burn — and it is what `flight` and `world` measure their
+/// scenarios against.
+///
+/// Its hash is deliberately **not** pinned. [`REFERENCE_HASH`] is about two
+/// targets agreeing; this one is about a trip being flyable, and pinning a
+/// second number would only mean a second thing to update whenever a placement
+/// here moved.
+pub fn flyer(crew: u32) -> ShipDesign {
+    let budget = Budget::new(REFERENCE_POOL);
+    let mut design = reference(crew);
+
+    // The hull comes off first. Both replacements shield, so the skin is
+    // still closed when they go back on — which `exposure` is asked about in
+    // `a_flyer_is_still_sealed`.
+    let swap = |design: &mut ShipDesign, tile: (u32, u32), kind: PartKind| {
+        let standing = design
+            .grid()
+            .get(Layer::Object, (tile.0 as i32, tile.1 as i32));
+        if standing != 0
+            && let Ok(next) = apply(design, &budget, Edit::Remove { part_id: standing })
+        {
+            *design = next;
+        }
+        if let Ok(next) = apply(
+            design,
+            &budget,
+            Edit::Place {
+                kind,
+                origin: tile,
+                rotation: Rotation::R0,
+            },
+        ) {
+            *design = next;
+        }
+    };
+
+    for tile in THRUSTER_TILES {
+        swap(&mut design, tile, PartKind::Thruster);
+    }
+    swap(&mut design, SENSOR_TILE, PartKind::SensorArray);
+
+    for (kind, origin) in [(PartKind::Airlock, (16, 8)), (PartKind::FuelTank, (2, 12))] {
+        if let Ok(next) = apply(
+            &design,
+            &budget,
+            Edit::Place {
+                kind,
+                origin,
+                rotation: Rotation::R0,
+            },
+        ) {
+            design = next;
+        }
+    }
+
+    if let Ok(next) = apply(
+        &design,
+        &budget,
+        Edit::Buy {
+            resource: ResourceId::Fuel,
+            units: FLYER_FUEL,
+        },
+    ) {
+        design = next;
     }
 
     design

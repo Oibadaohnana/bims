@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Bims — Ship design</title>
+    <title>Bims — Ship</title>
     <style>
       /* The room's palette, the same as the builder's: the menus, the design
          phase and the deck are one game and should not look like three
@@ -283,6 +283,8 @@
       /* --- the station's goods -------------------------------------------- */
 
       #trade .good,
+      #game-trade .good,
+      #game-trade .hold,
       #trade .hold {
         display: flex;
         align-items: center;
@@ -291,34 +293,41 @@
         font-variant-numeric: tabular-nums;
       }
 
-      #trade .good .name {
+      #trade .good .name,
+      #game-trade .good .name {
         min-width: 74px;
       }
 
       #trade .good .price,
+      #game-trade .good .price,
+      #game-trade .hold .used,
       #trade .hold .used {
         margin-left: auto;
         color: var(--muted);
         font-size: 11px;
       }
 
-      #trade .good .units {
+      #trade .good .units,
+      #game-trade .good .units {
         min-width: 26px;
         text-align: right;
         color: var(--muted);
       }
 
-      #trade .good.carried .units {
+      #trade .good.carried .units,
+      #game-trade .good.carried .units {
         color: var(--ink);
         font-weight: 600;
       }
 
-      #trade .deal {
+      #trade .deal,
+      #game-trade .deal {
         display: flex;
         gap: 2px;
       }
 
-      #trade .deal-on {
+      #trade .deal-on,
+      #game-trade .deal-on {
         padding: 1px 3px;
         border: 1px solid var(--edge);
         border-radius: 3px;
@@ -330,28 +339,33 @@
         cursor: pointer;
       }
 
-      #trade .deal-on.buy:hover:not([disabled]) {
+      #trade .deal-on.buy:hover:not([disabled]),
+      #game-trade .deal-on.buy:hover:not([disabled]) {
         border-color: var(--accent);
         color: var(--accent);
       }
 
-      #trade .deal-on.sell:hover:not([disabled]) {
+      #trade .deal-on.sell:hover:not([disabled]),
+      #game-trade .deal-on.sell:hover:not([disabled]) {
         border-color: var(--warn);
         color: var(--warn);
       }
 
-      #trade .deal-on[disabled] {
+      #trade .deal-on[disabled],
+      #game-trade .deal-on[disabled] {
         cursor: default;
         opacity: 0.3;
       }
 
       /* A hold with no room left in it. What a player is about to be refused
          for, said before the click rather than after it. */
-      #trade .hold.full .used {
+      #trade .hold.full .used,
+      #game-trade .hold.full .used {
         color: var(--warn);
       }
 
-      #trade .holds {
+      #trade .holds,
+      #game-trade .holds {
         margin-top: 6px;
         padding-top: 5px;
         border-top: 1px solid var(--edge);
@@ -465,47 +479,187 @@
         text-align: center;
       }
 
-      /* --- the handoff ----------------------------------------------------- */
+      /* --- the game --------------------------------------------------------- */
 
-      #done-screen:not([hidden]) {
+      #game-bar {
+        display: flex;
         align-items: center;
-        justify-content: center;
-        padding: 28px;
+        gap: 18px;
+        padding: 8px 14px;
+        border-bottom: 1px solid var(--edge);
+        background: #101614;
       }
 
-      .card {
-        max-width: 560px;
-        padding: 18px;
-        border: 1px solid var(--edge);
-        border-radius: 8px;
-        background: var(--panel);
+      #game-bar h1 {
+        margin: 0;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.2em;
+        text-transform: uppercase;
       }
 
-      .card p {
-        margin: 0 0 9px;
-      }
-
-      .card .muted {
-        color: var(--muted);
-      }
-
-      .debug {
-        margin-top: 12px;
-        padding-top: 10px;
-        border-top: 1px solid var(--edge);
+      .reading {
         color: var(--muted);
         font-variant-numeric: tabular-nums;
       }
 
-      .debug div {
-        display: flex;
-        gap: 10px;
+      #purse {
+        color: var(--ink);
+        font-weight: 600;
       }
 
-      .debug b {
-        min-width: 150px;
-        color: var(--ink);
+      #play {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+      }
+
+      #game-stage-wrap {
+        position: relative;
+        flex: 1;
+        min-width: 0;
+      }
+
+      #game-stage {
+        display: block;
+        width: 100%;
+        height: 100%;
+        touch-action: none;
+      }
+
+      #game-readout {
+        position: absolute;
+        left: 10px;
+        top: 10px;
+        display: flex;
+        gap: 14px;
+        padding: 5px 9px;
+        border: 1px solid var(--edge);
+        border-radius: 5px;
+        background: rgba(12, 18, 16, 0.85);
+        font-variant-numeric: tabular-nums;
+        pointer-events: none;
+      }
+
+      #game-readout .what {
+        font-weight: 600;
+      }
+
+      #game-readout .price {
+        color: var(--muted);
+      }
+
+      #game-keys {
+        position: absolute;
+        left: 10px;
+        bottom: 10px;
+        color: var(--muted);
+        pointer-events: none;
+      }
+
+      /* What just happened. The newest few lines, and they go on their own —
+         an event is a thing that happened once. */
+      #log {
+        position: absolute;
+        right: 10px;
+        bottom: 10px;
+        max-width: 340px;
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        align-items: flex-end;
+        pointer-events: none;
+      }
+
+      #log div {
+        padding: 4px 8px;
+        border: 1px solid var(--edge);
+        border-radius: 5px;
+        background: rgba(12, 18, 16, 0.9);
+        text-align: right;
+      }
+
+      #controls {
+        width: 268px;
+        flex: none;
+        overflow-y: auto;
+        background: var(--panel);
+        border-left: 1px solid var(--edge);
+        padding: 10px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      #controls .row {
+        display: flex;
+        gap: 6px;
+      }
+
+      #plan div,
+      #ship-facts div,
+      #speed-asks div {
+        display: flex;
+        gap: 8px;
+        padding: 1px 0;
+        font-variant-numeric: tabular-nums;
+      }
+
+      #plan b,
+      #ship-facts b {
+        min-width: 104px;
+        color: var(--muted);
         font-weight: 500;
+      }
+
+      #plan.refused {
+        color: var(--warn);
+      }
+
+      #plan .empty {
+        color: var(--muted);
+      }
+
+      #speed-buttons {
+        display: flex;
+        gap: 4px;
+      }
+
+      #speed-buttons button {
+        flex: 1;
+        padding: 4px 0;
+        border: 1px solid var(--edge);
+        border-radius: 4px;
+        background: none;
+        color: var(--muted);
+        font: inherit;
+        font-variant-numeric: tabular-nums;
+        cursor: pointer;
+      }
+
+      #speed-buttons button.on {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+
+      /* What the world is *actually* running at, which is the slowest anybody
+         asked for. Marked differently from what this player asked for, or a
+         player held at 1x by somebody else has no way to tell why. */
+      #speed-buttons button.effective {
+        background: #1d2b24;
+        color: var(--ink);
+      }
+
+      #speed-asks {
+        margin-top: 5px;
+        color: var(--muted);
+      }
+
+      /* The trade panel is only there while the ship is docked — money works
+         at a station and nowhere else. Switched with `hidden`, so the rule
+         that gives it a `display` carries `:not([hidden])`. */
+      #game-trade[data-panel]:not([hidden]) {
+        display: block;
       }
 
       #error {
@@ -567,19 +721,56 @@
         </div>
       </section>
 
-      <!-- Where the play phase will open. Stage 5 takes the design; until it
-           exists this says so, and shows the numbers flight will want so that
-           they are computed and looked at now. -->
-      <section id="done-screen" data-screen="done" hidden>
-        <div class="card">
-          <p><strong>The ship is settled.</strong></p>
-          <p class="muted">
-            Everybody accepted the same design, so the design phase is over
-            and nothing can be moved any more. The play phase — Bims aboard,
-            and every change built or pulled apart by hand — is not
-            implemented yet.
-          </p>
-          <div class="debug" id="handoff"></div>
+      <!-- The game. One world, one clock, and the same canvas: the design
+           phase's palette and checks are gone and the helm and the station
+           are in their place. -->
+      <section id="game-screen" data-screen="game" hidden>
+        <header id="game-bar">
+          <h1>Bims</h1>
+          <span class="reading" id="clock"></span>
+          <span class="reading" id="where"></span>
+          <span class="spacer"></span>
+          <span class="reading" id="purse"></span>
+        </header>
+        <div id="play">
+          <div id="game-stage-wrap">
+            <canvas id="game-stage"></canvas>
+            <div id="game-readout">
+              <span class="what" id="view-name"></span>
+              <span class="price" id="trip-phase"></span>
+              <span class="price" id="velocity"></span>
+              <span class="price" id="heading"></span>
+            </div>
+            <div id="game-keys">
+              M switches the ship and the map · click the map to plot ·
+              middle-drag or WASD to pan · wheel to zoom
+            </div>
+            <div id="log" role="status"></div>
+          </div>
+          <aside id="controls">
+            <div id="helm">
+              <h2>Helm</h2>
+              <div id="plan"></div>
+              <div class="row">
+                <button type="button" id="confirm" class="big">Confirm</button>
+                <button type="button" id="abort" class="big">Abort</button>
+              </div>
+            </div>
+            <div id="speed">
+              <h2>Speed</h2>
+              <div id="speed-buttons"></div>
+              <div id="speed-asks" aria-label="What each player has asked for"></div>
+            </div>
+            <div id="game-trade" data-panel="trade" hidden>
+              <h2>Station</h2>
+              <div id="game-goods" aria-label="What the station sells"></div>
+              <div class="holds" id="game-holds" aria-label="What the ship can hold"></div>
+            </div>
+            <div id="status">
+              <h2>Ship</h2>
+              <div id="ship-facts"></div>
+            </div>
+          </aside>
         </div>
       </section>
     </main>

@@ -60,19 +60,96 @@
         color: #ff8f7a;
       }
 
+      /* No padding, and the canvas below carries no border: the deck runs to
+         the edge of the window and every panel sits on top of it, flush with
+         that edge. A rounded box drawn round the whole interface reads as a
+         window frame inside a window, which is one frame too many. */
       main {
         position: relative;
         flex: 1;
         min-height: 0;
-        padding: 0 20px 20px;
       }
 
-      /* The agenda: what the Bim is on, and what is waiting behind it. */
-      #agenda {
+      /* Down the left-hand side: what is under the pointer, then what the Bim
+         is on and what is waiting behind it. The readout goes above the
+         agenda rather than below it because the agenda comes and goes, and a
+         panel that shuffles up and down the screen is hard to read. */
+      #left {
         position: absolute;
         z-index: 5;
-        top: 12px;
-        left: 32px;
+        top: 0;
+        left: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      /* What the pointer is over. Always here, whether or not it is over
+         anything: a box that appears and vanishes under the mouse is worse to
+         read than one line of nothing much. */
+      #hover {
+        padding: 7px 9px;
+        min-width: 216px;
+        border: 1px solid var(--edge);
+        background: rgb(20 29 25 / 0.9);
+        font-size: 13px;
+      }
+
+      #hover .thing {
+        color: var(--ink);
+      }
+
+      /* What is on the deck there, in the one warm colour the room keeps for
+         things worth noticing. */
+      #hover .on-it {
+        margin-top: 2px;
+        color: #ffb4a6;
+        font-size: 12px;
+      }
+
+      #hover .on-it:empty {
+        display: none;
+      }
+
+      /* One agenda per crew member, stacked. */
+      #agendas {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      /* Whose panel this is. The same header sits on the agenda and on the
+         needs panel, so a name read on one side of the deck means the same
+         thing on the other. */
+      .who {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        padding: 1px 3px 5px;
+        font-size: 12px;
+        letter-spacing: 0.10em;
+        text-transform: uppercase;
+      }
+
+      .who .tag {
+        color: var(--ink);
+        font-weight: 600;
+      }
+
+      /* The one the player steers, in the colour everything steerable uses. */
+      .who.yours .tag {
+        color: var(--accent);
+      }
+
+      .who .aside {
+        color: var(--muted);
+        font-size: 11px;
+        letter-spacing: 0.04em;
+        text-transform: none;
+      }
+
+      /* The agenda: what a Bim is on, and what is waiting behind it. */
+      .agenda {
         margin: 0;
         padding: 7px;
         min-width: 216px;
@@ -82,11 +159,11 @@
         font-size: 13px;
       }
 
-      #agenda[hidden] {
+      .agenda[hidden] {
         display: none;
       }
 
-      #agenda li {
+      .agenda li {
         display: flex;
         align-items: center;
         gap: 9px;
@@ -94,12 +171,12 @@
         color: var(--muted);
       }
 
-      #agenda li.active {
+      .agenda li.active {
         color: var(--ink);
       }
 
       /* Progress sits at the left-hand end of every row. */
-      #agenda .bar {
+      .agenda .bar {
         flex: none;
         width: 56px;
         height: 6px;
@@ -108,7 +185,7 @@
         overflow: hidden;
       }
 
-      #agenda .bar i {
+      .agenda .bar i {
         display: block;
         height: 100%;
         border-radius: 3px;
@@ -116,11 +193,11 @@
         transition: width 0.12s linear;
       }
 
-      #agenda li.active .bar i {
+      .agenda li.active .bar i {
         background: var(--accent);
       }
 
-      #agenda .box {
+      .agenda .box {
         flex: none;
         display: grid;
         place-items: center;
@@ -130,11 +207,11 @@
         border-radius: 3px;
       }
 
-      #agenda li.active .box {
+      .agenda li.active .box {
         border-color: var(--accent);
       }
 
-      #agenda li.active .box::after {
+      .agenda li.active .box::after {
         content: "";
         width: 7px;
         height: 7px;
@@ -147,14 +224,157 @@
       #side {
         position: absolute;
         z-index: 5;
-        top: 12px;
-        right: 32px;
+        top: 0;
+        right: 0;
         display: flex;
         flex-direction: column;
         gap: 8px;
       }
 
-      #needs {
+      /* One crew member's column: their name, what they want, how they are
+         bearing up, and who they are. Only the selected one is on screen. */
+      .crew {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .crew[hidden] {
+        display: none;
+      }
+
+      /* Somebody else's Bim. The panels are the same shape as your own — she
+         is not a different kind of thing — but the edge is her own colour, so
+         a glance at the right-hand side says whose crew sheet is open without
+         reading the name. The mauve is the coverall she is drawn in. */
+      .crew.theirs .needs,
+      .crew.theirs .health,
+      .crew.theirs .sheet {
+        border-color: #6b4257;
+      }
+
+      .crew.theirs .who .tag {
+        color: #d6a6c0;
+      }
+
+      /* The character sheet: who this Bim is, tabbed the way the tray is. */
+      .sheet {
+        min-width: 226px;
+        border: 1px solid var(--edge);
+        background: rgb(20 29 25 / 0.9);
+        font-size: 13px;
+      }
+
+      .sheet-tabs {
+        display: flex;
+        align-items: stretch;
+        gap: 2px;
+        padding: 4px 4px 0;
+      }
+
+      .sheet .tab {
+        padding: 5px 11px;
+        border: 0;
+        background: none;
+        color: var(--muted);
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+      }
+
+      .sheet .tab.on {
+        background: #23372e;
+        color: var(--ink);
+      }
+
+      .crew.theirs .sheet .tab.on {
+        background: #3a2733;
+      }
+
+      .sheet .tab:hover:not(.on) {
+        color: var(--ink);
+      }
+
+      .sheet-body {
+        padding: 8px 9px 9px;
+        border-top: 1px solid var(--edge);
+      }
+
+      .crew.theirs .sheet-body {
+        border-top-color: #6b4257;
+      }
+
+      .sheet-body [data-sheet][hidden] {
+        display: none;
+      }
+
+      /* Name, age, born: a label and a value per row. */
+      .about .row {
+        display: flex;
+        align-items: baseline;
+        gap: 9px;
+        padding: 2px 1px;
+      }
+
+      .about .label {
+        flex: none;
+        width: 78px;
+        color: var(--muted);
+      }
+
+      .about .value {
+        color: var(--ink);
+      }
+
+      /* The diary. Newest day at the top, because that is the one you came to
+         read; within a day, in the order it happened. */
+      .diary {
+        max-height: 178px;
+        overflow-y: auto;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .diary .day {
+        margin: 7px 0 2px;
+        color: var(--accent);
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .crew.theirs .diary .day {
+        color: #d6a6c0;
+      }
+
+      .diary .day:first-child {
+        margin-top: 0;
+      }
+
+      .diary .line {
+        display: flex;
+        gap: 8px;
+        color: var(--muted);
+      }
+
+      .diary .when {
+        flex: none;
+        color: #5f7469;
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* The ones that stand out: the same warm colour everything worth
+         noticing is drawn in. */
+      .diary .line.notable {
+        color: #ffb4a6;
+      }
+
+      .diary .nothing {
+        color: var(--muted);
+        font-style: italic;
+      }
+
+      .needs {
         margin: 0;
         padding: 7px;
         min-width: 226px;
@@ -164,7 +384,7 @@
         font-size: 13px;
       }
 
-      #needs li {
+      .needs li {
         display: flex;
         align-items: center;
         gap: 9px;
@@ -174,13 +394,13 @@
 
       /* Wide enough for the longest name there is — "Cleanliness" — and no
          wrapping, so a name can never run under the bar beside it. */
-      #needs .name {
+      .needs .name {
         flex: none;
         width: 78px;
         white-space: nowrap;
       }
 
-      #needs .bar {
+      .needs .bar {
         flex: 1;
         height: 6px;
         border-radius: 3px;
@@ -188,7 +408,7 @@
         overflow: hidden;
       }
 
-      #needs .bar i {
+      .needs .bar i {
         display: block;
         height: 100%;
         border-radius: 3px;
@@ -198,23 +418,23 @@
 
       /* Past the trigger the Bim goes and does something about it, so the row
          turns the one warm colour the palette keeps for things worth noticing. */
-      #needs li.urgent {
+      .needs li.urgent {
         color: #ffb4a6;
       }
 
-      #needs li.urgent .bar i {
+      .needs li.urgent .bar i {
         background: #e2604a;
       }
 
-      #needs .pct,
-      #health .pct {
+      .needs .pct,
+      .health .pct {
         flex: none;
         width: 4ch;
         text-align: right;
         font-variant-numeric: tabular-nums;
       }
 
-      #health {
+      .health {
         padding: 7px;
         min-width: 226px;
         border: 1px solid var(--edge);
@@ -222,7 +442,7 @@
         font-size: 13px;
       }
 
-      #health .row {
+      .health .row {
         display: flex;
         align-items: center;
         gap: 9px;
@@ -231,13 +451,13 @@
       }
 
       /* The same column as the needs above it, so the two panels line up. */
-      #health .name {
+      .health .name {
         flex: none;
         width: 78px;
         white-space: nowrap;
       }
 
-      #health .bar {
+      .health .bar {
         flex: 1;
         height: 6px;
         border-radius: 3px;
@@ -245,7 +465,7 @@
         overflow: hidden;
       }
 
-      #health .bar i {
+      .health .bar i {
         display: block;
         height: 100%;
         border-radius: 3px;
@@ -255,41 +475,44 @@
 
       /* Losing health only happens at the worst stage, so the bar moving at
          all is already bad news. */
-      #health.hurt .bar i {
+      .health.hurt .bar i {
         background: #e2604a;
       }
 
-      #condition,
-      #drowsiness,
-      #urge,
-      #discomfort {
+      .condition,
+      .drowsiness,
+      .urge,
+      .discomfort,
+      .loneliness {
         margin: 2px 3px 0;
         color: var(--muted);
         font-size: 12px;
       }
 
-      #drowsiness:empty,
-      #urge:empty,
-      #discomfort:empty {
+      .drowsiness:empty,
+      .urge:empty,
+      .discomfort:empty,
+      .loneliness:empty {
         display: none;
       }
 
-      #drowsiness.warn,
-      #urge.warn,
-      #discomfort.warn {
+      .drowsiness.warn,
+      .urge.warn,
+      .discomfort.warn,
+      .loneliness.warn {
         color: #ffd7a6;
       }
 
-      #condition.warn {
+      .condition.warn {
         color: #ffb4a6;
       }
 
-      #condition.gone {
+      .condition.gone {
         color: #ff8f7a;
         font-weight: 600;
       }
 
-      #agenda .pct {
+      .agenda .pct {
         margin-left: auto;
         color: var(--muted);
         font-variant-numeric: tabular-nums;
@@ -303,8 +526,6 @@
         -webkit-user-select: none;
         width: 100%;
         height: 100%;
-        border: 1px solid #23352c;
-        border-radius: 10px;
         background: #0c1210;
       }
 
@@ -332,28 +553,31 @@
         display: none;
       }
 
-      /* The tray: bottom-left of the deck, tabbed, and foldable away. */
+      /* The tray: bottom-left corner of the deck, tabbed, and foldable away.
+         Bigger than everything else on screen and deliberately so — the
+         timetable and the triggers under it are where the day is actually
+         decided, and they are read and edited rather than glanced at. */
       #tray {
         position: absolute;
         z-index: 5;
-        bottom: 12px;
-        left: 32px;
-        width: 468px;
-        max-width: calc(100% - 64px);
+        bottom: 0;
+        left: 0;
+        width: 580px;
+        max-width: 100%;
         border: 1px solid var(--edge);
         background: rgb(20 29 25 / 0.92);
-        font-size: 13px;
+        font-size: 15px;
       }
 
       #tray-tabs {
         display: flex;
         align-items: stretch;
         gap: 2px;
-        padding: 4px 4px 0;
+        padding: 5px 5px 0;
       }
 
       #tray .tab {
-        padding: 6px 12px;
+        padding: 8px 15px;
         border: 0;
         background: none;
         color: var(--muted);
@@ -372,7 +596,7 @@
 
       #tray-toggle {
         margin-left: auto;
-        width: 26px;
+        width: 30px;
         border: 0;
         border-radius: 6px;
         background: none;
@@ -390,7 +614,7 @@
       }
 
       #tray-body {
-        padding: 9px 10px 10px;
+        padding: 11px 12px 12px;
         border-top: 1px solid var(--edge);
       }
 
@@ -398,7 +622,7 @@
         display: flex;
         align-items: center;
         gap: 6px;
-        margin-bottom: 8px;
+        margin-bottom: 9px;
       }
 
       /* The schedule's "?" sits at the end of the brush row, past Sleep and
@@ -456,11 +680,11 @@
       #hours li {
         position: relative;
         flex: 1;
-        height: 30px;
+        height: 40px;
         border-radius: 3px;
         color: var(--muted);
-        font-size: 9px;
-        line-height: 30px;
+        font-size: 11px;
+        line-height: 40px;
         text-align: center;
         cursor: crosshair;
       }
@@ -476,6 +700,65 @@
         inset: -3px;
         border: 1px solid var(--accent);
         border-radius: 5px;
+      }
+
+      /* What sends the Bim off to see to itself, under the timetable it sits
+         with: the strip says when it is *allowed* to sleep, these say when it
+         has had enough of going without. */
+      #thresholds {
+        margin-top: 11px;
+        padding-top: 10px;
+        border-top: 1px solid var(--edge);
+      }
+
+      #thresholds .head {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        margin-bottom: 7px;
+        color: var(--muted);
+      }
+
+      #thresholds .trigger {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        padding: 4px 1px;
+        color: var(--ink);
+      }
+
+      /* Switched off, the row stays legible but plainly inactive — the level
+         it would have fired at is still worth reading. */
+      #thresholds .trigger.off {
+        color: var(--muted);
+      }
+
+      #thresholds .trigger.off input[type="range"] {
+        opacity: 0.4;
+      }
+
+      #thresholds .trigger .name {
+        flex: none;
+        width: 82px;
+        cursor: pointer;
+      }
+
+      #thresholds input[type="range"] {
+        flex: 1;
+        min-width: 0;
+        accent-color: var(--accent);
+      }
+
+      #thresholds input[type="checkbox"] {
+        flex: none;
+        accent-color: var(--accent);
+      }
+
+      #thresholds output {
+        flex: none;
+        width: 5ch;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
       }
 
       /* Everything explanatory lives in here rather than on the page: one
@@ -563,6 +846,122 @@
         accent-color: var(--accent);
       }
 
+      /* The work list. `:not([hidden])` for the same reason the management
+         panel needs it — see the note above; a bare `display` here would show
+         this under the schedule tab as well as its own. */
+      #tray [data-panel="work"]:not([hidden]) {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: 2px 1px 4px;
+      }
+
+      /* Sorting is a thing you press, not a rule that stays on. Rows would
+         otherwise jump out from under the pointer on the click that changed
+         them, which at the wrap from 5 back to 1 is the whole length of the
+         list. The `on` mark says which order was last applied, and it is
+         cleared the moment a box is clicked, because the list may no longer
+         be in it. */
+      #work-sort {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+
+      #work-sort .sort-label {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      #work-sort .sort {
+        padding: 2px 8px;
+        border: 1px solid var(--edge);
+        border-radius: 999px;
+        background: none;
+        color: var(--muted);
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+      }
+
+      #work-sort .sort:hover,
+      #work-sort .sort:focus-visible {
+        border-color: var(--accent);
+        color: var(--ink);
+      }
+
+      #work-sort .sort.on {
+        border-color: var(--accent);
+        background: rgb(127 209 168 / 0.14);
+        color: var(--accent);
+      }
+
+      #work {
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+
+      #work th {
+        padding: 2px 18px 3px 0;
+        border-bottom: 1px solid var(--edge);
+        color: var(--muted);
+        font-weight: 500;
+        text-align: left;
+      }
+
+      #work td {
+        padding: 3px 18px 3px 0;
+        color: var(--ink);
+      }
+
+      /* The box itself. One square per job, the number in it, and the colour
+         saying what the number means — five steps from the warm end of the
+         palette to the cold, so a glance down the column reads as an order
+         without anybody having to work out which way round 1 and 5 go. */
+      .pri {
+        display: inline-grid;
+        place-items: center;
+        width: 22px;
+        height: 22px;
+        padding: 0;
+        border: 1px solid currentColor;
+        border-radius: 5px;
+        background: none;
+        font: inherit;
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
+        line-height: 1;
+        cursor: pointer;
+      }
+
+      .pri:hover,
+      .pri:focus-visible {
+        outline: 1px solid var(--ink);
+        outline-offset: 1px;
+      }
+
+      .pri.p1 {
+        color: #ff8f7a;
+        background: rgb(255 143 122 / 0.16);
+      }
+      .pri.p2 {
+        color: #ffd7a6;
+        background: rgb(255 215 166 / 0.14);
+      }
+      .pri.p3 {
+        color: var(--accent);
+        background: rgb(127 209 168 / 0.14);
+      }
+      .pri.p4 {
+        color: #61dbf2;
+        background: rgb(97 219 242 / 0.12);
+      }
+      .pri.p5 {
+        color: var(--muted);
+        background: rgb(143 168 154 / 0.1);
+      }
+
       /* The speed lives in the header, beside the clock it is speeding up,
          rather than in a tray you have to open to reach it. */
       #speed-control {
@@ -641,6 +1040,18 @@
 
       #stock td.where {
         color: var(--muted);
+      }
+
+      /* A row that points at something on the deck. The tint is the same cyan
+         the ring out there is drawn in, so the row and the fixture read as the
+         two ends of one gesture. No underline and no help cursor: nothing pops
+         up, so there is nothing being offered to click or to ask. */
+      .points {
+        transition: background-color 0.12s linear;
+      }
+
+      .points:hover {
+        background: rgb(97 219 242 / 0.12);
       }
 
       #menu {
@@ -725,12 +1136,21 @@
     </header>
     <main>
       <canvas id="stage"></canvas>
-      <ul id="agenda" aria-label="What the Bim is doing" hidden></ul>
+      <aside id="left">
+        <div id="hover" aria-label="What the pointer is over" aria-live="off">
+          <div class="thing"></div>
+          <div class="on-it"></div>
+        </div>
+        <!-- One agenda per crew member, built by the host from the crew size
+             wasm reports rather than written out twice here. -->
+        <div id="agendas" aria-label="What the crew are doing"></div>
+      </aside>
       <section id="tray" class="open">
         <div id="tray-tabs">
           <button type="button" class="tab on" data-tab="schedule">
             Schedule
           </button>
+          <button type="button" class="tab" data-tab="work">Work</button>
           <button type="button" class="tab" data-tab="management">
             Management
           </button>
@@ -755,6 +1175,33 @@
               </button>
             </div>
             <ol id="hours" aria-label="The day, one slot an hour"></ol>
+            <div id="thresholds" aria-label="Action thresholds"></div>
+          </div>
+          <!-- What the crew get on with, and in what order. One row per job,
+               built by the host from the count wasm reports rather than
+               written out here, because the list grows. -->
+          <div data-panel="work" hidden>
+            <div id="work-sort">
+              <span class="sort-label">Sort</span>
+              <button type="button" class="sort on" data-sort="up">
+                Priority 1→5
+              </button>
+              <button type="button" class="sort" data-sort="down">
+                Priority 5→1
+              </button>
+              <button type="button" class="sort" data-sort="name">
+                Name A–Z
+              </button>
+            </div>
+            <table id="work" aria-label="What the crew get on with">
+              <thead>
+                <tr>
+                  <th>Job</th>
+                  <th>Priority</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
           </div>
           <div data-panel="management" hidden>
             <label id="auto-control">
@@ -778,8 +1225,8 @@
               <thead>
                 <tr>
                   <th>Item</th>
-                  <th>Held</th>
-                  <th>Where</th>
+                  <th>Stock</th>
+                  <th>Location</th>
                 </tr>
               </thead>
               <tbody></tbody>
@@ -787,20 +1234,11 @@
           </div>
         </div>
       </section>
-      <aside id="side">
-        <ul id="needs" aria-label="What the Bim wants"></ul>
-        <div id="health" aria-label="How the Bim is bearing up">
-          <div class="row">
-            <span class="name">Health</span>
-            <span class="bar"><i></i></span>
-            <span class="pct"></span>
-          </div>
-          <p id="condition"></p>
-          <p id="drowsiness"></p>
-          <p id="urge"></p>
-          <p id="discomfort"></p>
-        </div>
-      </aside>
+      <!-- The selected crew member: what they want, how they are bearing up,
+           and who they are. One at a time — picking a Bim is what puts its
+           panels here, and nothing is on show when nothing is picked. Built
+           by the host. -->
+      <aside id="side" aria-label="The selected crew member"></aside>
     </main>
     <div id="menu" role="menu" hidden></div>
     <div id="tip" role="tooltip" hidden></div>

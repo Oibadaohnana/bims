@@ -1,0 +1,591 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bims — Builder</title>
+    <style>
+      /* The palette is the room's, deliberately: the menu, the lobby and the
+         deck are one game and should not look like two products. */
+      :root {
+        color-scheme: dark;
+        --ink: #e7efe9;
+        --muted: #8fa89a;
+        --accent: #7fd1a8;
+        --panel: #18211d;
+        --edge: #2b3a32;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        display: flex;
+        flex-direction: column;
+        background: #0c1210;
+        color: var(--ink);
+        font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+          sans-serif;
+      }
+
+      /* One screen is on at a time. Screens are switched with the `hidden`
+         attribute, so every rule that gives one a `display` carries
+         `:not([hidden])` — the UA rule behind `hidden` is only `display: none`
+         at the lowest specificity and loses to anything else. */
+      main {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        justify-content: center;
+        padding: 28px 20px;
+      }
+
+      section[data-screen]:not([hidden]) {
+        display: flex;
+        flex-direction: column;
+        width: 100%;
+        max-width: 980px;
+        min-height: 0;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 30px;
+        font-weight: 600;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+      }
+
+      h2 {
+        margin: 0;
+        font-size: 15px;
+        font-weight: 600;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+
+      h3 {
+        margin: 0 0 9px;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.10em;
+        text-transform: uppercase;
+      }
+
+      p {
+        margin: 0;
+      }
+
+      .muted {
+        color: var(--muted);
+      }
+
+      /* --- the start menu ------------------------------------------- */
+
+      #menu-screen:not([hidden]) {
+        justify-content: center;
+        align-items: center;
+        gap: 26px;
+        text-align: center;
+      }
+
+      #menu-screen .tagline {
+        color: var(--muted);
+        letter-spacing: 0.04em;
+      }
+
+      #choices {
+        display: flex;
+        gap: 12px;
+      }
+
+      /* Play and Create lobby sit side by side and read as equals: one starts
+         a ship on your own, the other starts one other people can walk into. */
+      .big {
+        min-width: 170px;
+        padding: 13px 26px;
+        border: 1px solid var(--edge);
+        border-radius: 9px;
+        background: var(--panel);
+        color: var(--ink);
+        font: inherit;
+        font-size: 15px;
+        letter-spacing: 0.06em;
+        cursor: pointer;
+      }
+
+      .big:hover,
+      .big:focus-visible {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+
+      .big.primary {
+        border-color: var(--accent);
+        background: #1d2f27;
+      }
+
+      #join {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      #join label {
+        color: var(--muted);
+      }
+
+      input[type="text"] {
+        width: 120px;
+        padding: 7px 10px;
+        border: 1px solid var(--edge);
+        border-radius: 7px;
+        background: #101815;
+        color: var(--ink);
+        font: inherit;
+        font-family: ui-monospace, monospace;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+      }
+
+      input[type="text"]:focus-visible {
+        border-color: var(--accent);
+        outline: none;
+      }
+
+      .small {
+        padding: 7px 14px;
+        border: 1px solid var(--edge);
+        border-radius: 7px;
+        background: none;
+        color: var(--muted);
+        font: inherit;
+        cursor: pointer;
+      }
+
+      .small:hover:not(:disabled),
+      .small:focus-visible:not(:disabled) {
+        border-color: var(--accent);
+        color: var(--ink);
+      }
+
+      .small:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+
+      /* What the multiplayer surface says while there is nothing behind it.
+         It says so out loud rather than failing silently. */
+      #join-note {
+        min-height: 21px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      #join-note.warn {
+        color: #ffd7a6;
+      }
+
+      /* --- screen chrome -------------------------------------------- */
+
+      .screen-head {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding-bottom: 14px;
+        border-bottom: 1px solid var(--edge);
+      }
+
+      .screen-head .spacer {
+        flex: 1;
+      }
+
+      .screen-foot {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        justify-content: flex-end;
+        padding-top: 14px;
+        margin-top: 14px;
+        border-top: 1px solid var(--edge);
+      }
+
+      .screen-foot .said {
+        margin-right: auto;
+        color: var(--muted);
+      }
+
+      .body {
+        flex: 1;
+        min-height: 0;
+        padding: 16px 0;
+        overflow: auto;
+      }
+
+      /* --- the lobby ------------------------------------------------- */
+
+      /* Slots on the left, the settings on the right. */
+      #lobby-body {
+        display: grid;
+        grid-template-columns: 300px 1fr;
+        gap: 18px;
+        align-items: start;
+      }
+
+      @media (max-width: 760px) {
+        #lobby-body {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .card {
+        padding: 13px 14px;
+        border: 1px solid var(--edge);
+        border-radius: 10px;
+        background: rgb(20 29 25 / 0.92);
+      }
+
+      #slots {
+        display: flex;
+        flex-direction: column;
+        gap: 7px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      #slots li {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 9px 11px;
+        border: 1px solid var(--edge);
+        border-radius: 8px;
+      }
+
+      #slots li.open {
+        border-style: dashed;
+        color: var(--muted);
+      }
+
+      #slots .who {
+        font-weight: 600;
+      }
+
+      #slots li.open .who {
+        font-weight: 400;
+      }
+
+      #slots .role {
+        margin-left: auto;
+        color: var(--muted);
+        font-size: 12px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      #slots .pip {
+        width: 9px;
+        height: 9px;
+        border-radius: 999px;
+        background: var(--accent);
+      }
+
+      #slots li.open .pip {
+        background: #3b4a42;
+      }
+
+      /* The code is the whole point of the lobby screen, so it is set like a
+         thing to read out to somebody. */
+      #room {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+      }
+
+      #room .label {
+        color: var(--muted);
+        font-size: 12px;
+        letter-spacing: 0.10em;
+        text-transform: uppercase;
+      }
+
+      #code {
+        padding: 5px 12px;
+        border: 1px solid var(--accent);
+        border-radius: 7px;
+        color: var(--accent);
+        font-family: ui-monospace, monospace;
+        font-size: 16px;
+        font-weight: 600;
+        letter-spacing: 0.24em;
+      }
+
+      /* --- the settings tool ----------------------------------------- */
+
+      .tool {
+        display: flex;
+        flex-direction: column;
+        border: 1px solid var(--edge);
+        border-radius: 10px;
+        background: rgb(20 29 25 / 0.92);
+      }
+
+      .tool-tabs {
+        display: flex;
+        gap: 2px;
+        padding: 5px 5px 0;
+      }
+
+      .tool .tab {
+        padding: 8px 15px;
+        border: 0;
+        border-radius: 7px 7px 0 0;
+        background: none;
+        color: var(--muted);
+        font: inherit;
+        cursor: pointer;
+      }
+
+      .tool .tab.on {
+        background: #23372e;
+        color: var(--ink);
+      }
+
+      .tool .tab:hover:not(.on) {
+        color: var(--ink);
+      }
+
+      .tool-body {
+        padding: 14px 15px 16px;
+        border-top: 1px solid var(--edge);
+      }
+
+      .tool-body [data-tab]:not([hidden]) {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      .field .what {
+        display: flex;
+        align-items: baseline;
+        gap: 9px;
+        margin-bottom: 8px;
+      }
+
+      .field .name {
+        font-weight: 600;
+      }
+
+      .field .note {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      /* One row of mutually exclusive choices, the same shape as the
+         schedule's brushes in the room. */
+      .options {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 7px;
+      }
+
+      .option {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 2px;
+        padding: 8px 13px;
+        border: 1px solid var(--edge);
+        border-radius: 8px;
+        background: none;
+        color: var(--muted);
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .option:hover:not(.on):not(:disabled) {
+        color: var(--ink);
+      }
+
+      .option.on {
+        border-color: var(--accent);
+        color: var(--ink);
+      }
+
+      .option:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+
+      .option .sub {
+        color: var(--muted);
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* A tab with nothing behind it yet says so, rather than showing an
+         empty box that reads as a load that failed. */
+      .empty {
+        color: var(--muted);
+      }
+
+      .empty strong {
+        display: block;
+        margin-bottom: 5px;
+        color: var(--ink);
+        font-weight: 600;
+      }
+
+      /* --- the placeholder the builder will grow into ----------------- */
+
+      #build-screen .chosen {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin-top: 12px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      #build-screen .chosen b {
+        color: var(--accent);
+        font-weight: 600;
+      }
+
+      #error {
+        margin: 0;
+        padding: 10px 20px;
+        color: #ff8f7a;
+      }
+
+      #error:empty {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <!-- The start menu. Play and Create lobby stand side by side; the code
+           field below is the other half of the multiplayer surface. -->
+      <section id="menu-screen" data-screen="menu">
+        <h1>Bims</h1>
+        <p class="tagline">A ship, a crew, and whatever they can grow.</p>
+        <div id="choices">
+          <button type="button" id="play" class="big primary">Play</button>
+          <button type="button" id="create-lobby" class="big">
+            Create lobby
+          </button>
+        </div>
+        <form id="join">
+          <label for="join-code">Join with a code</label>
+          <input
+            id="join-code"
+            type="text"
+            maxlength="6"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="——————"
+            aria-label="Room code"
+          />
+          <button type="submit" id="join-go" class="small">Join</button>
+        </form>
+        <p id="join-note" role="status"></p>
+      </section>
+
+      <!-- Play: the same settings tool, on its own. -->
+      <section id="setup-screen" data-screen="setup" hidden>
+        <div class="screen-head">
+          <button type="button" class="small" data-goto="menu">← Back</button>
+          <h2>Game setup</h2>
+          <span class="spacer"></span>
+          <span class="muted">One crew, no lobby</span>
+        </div>
+        <div class="body"><div id="setup-tool"></div></div>
+        <div class="screen-foot">
+          <button type="button" class="big primary" data-start="solo">
+            Start
+          </button>
+        </div>
+      </section>
+
+      <!-- Create lobby: slots on the left, the code up top, the settings tool
+           on the right. Nothing is wired to a network yet; net.js is the one
+           seam where that goes. -->
+      <section id="lobby-screen" data-screen="lobby" hidden>
+        <div class="screen-head">
+          <button type="button" class="small" data-goto="menu">← Leave</button>
+          <h2>Lobby</h2>
+          <span class="spacer"></span>
+          <div id="room">
+            <span class="label">Room code</span>
+            <output id="code"></output>
+            <button type="button" id="copy" class="small">Copy</button>
+          </div>
+        </div>
+        <div class="body">
+          <div id="lobby-body">
+            <div class="card">
+              <h3>Crew</h3>
+              <ol id="slots" aria-label="Who is in the lobby"></ol>
+              <p id="lobby-note" class="muted"></p>
+            </div>
+            <div id="lobby-tool"></div>
+          </div>
+        </div>
+        <div class="screen-foot">
+          <span class="said muted" id="lobby-said"></span>
+          <button type="button" class="big primary" data-start="lobby">
+            Start
+          </button>
+        </div>
+      </section>
+
+      <!-- Where the ship builder proper will open. It is a placeholder and
+           says so; what it shows is the settings it was handed, so the path
+           from the menu to a configured game is testable before the builder
+           exists. -->
+      <section id="build-screen" data-screen="build" hidden>
+        <div class="screen-head">
+          <button type="button" class="small" data-goto="menu">← Menu</button>
+          <h2>Builder</h2>
+        </div>
+        <div class="body">
+          <div class="card">
+            <p><strong>The ship builder goes here.</strong></p>
+            <p class="muted">
+              Nothing is drawn yet. These are the settings it will be handed.
+            </p>
+            <div class="chosen" id="chosen"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+    <p id="error" role="alert"></p>
+    <script>
+      // A failure to even parse builder.js cannot be caught by builder.js, and
+      // leaves nothing on screen. This is the only place that can report it.
+      window.addEventListener("error", (event) => {
+        const box = document.getElementById("error");
+        if (box && !box.textContent) {
+          box.textContent = `Could not start the builder: ${event.message}`;
+        }
+      });
+
+      const build = Date.now();
+      window.BIMS_BUILD = build;
+      const tag = document.createElement("script");
+      tag.src = `builder.js?v=${build}`;
+      document.body.appendChild(tag);
+    </script>
+  </body>
+</html>

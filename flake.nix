@@ -48,14 +48,22 @@
             buildPhase = ''
               runHook preBuild
               export CARGO_HOME="$NIX_BUILD_TOP/cargo"
-              cargo build --release --locked --offline --target wasm32-unknown-unknown
+              # --workspace, not just the root package: `time`, `physics` and
+              # `worldgen` are meant to compile for wasm32 as well as for the
+              # native server, and nothing else in the build would ever find
+              # out if one of them stopped.
+              cargo build --release --locked --offline --target wasm32-unknown-unknown --workspace
               runHook postBuild
             '';
 
             installPhase = ''
               runHook preInstall
               mkdir -p "$out/share/bims"
+              # Both front ends out of one directory: the room is index.html,
+              # the menus in front of it are builder.html. They share the wasm,
+              # and one day the builder will start the game with it.
               cp web/index.html web/bims.js "$out/share/bims/"
+              cp web/builder.html web/builder.js "$out/share/bims/"
               cp target/wasm32-unknown-unknown/release/bims.wasm "$out/share/bims/"
               runHook postInstall
             '';
@@ -66,18 +74,49 @@
             };
           };
 
-          # `nix run` should just put the game in front of you. The page fetches
-          # bims.wasm, and fetch is blocked on file:// URLs, so it needs a server.
-          bims-serve = pkgs.writeShellApplication {
+          # `nix run` should just put the thing in front of you. The pages
+          # fetch bims.wasm, and fetch is blocked on file:// URLs, so they
+          # need a server.
+          #
+          # One per front end, differing only in which page is opened and
+          # which port it falls back to. Separate ports on purpose: the room
+          # and the builder come out of the same directory, so a shared
+          # default would have the second one find the first already there and
+          # hand you the wrong page.
+          serveFor =
+            {
+              name,
+              page,
+              port,
+              about,
+            }:
+            pkgs.writeShellApplication {
+              inherit name;
+              runtimeInputs = [ pkgs.python3 ];
+              text = ''
+                exec python3 ${./dev-server.py} \
+                  --directory ${bims}/share/bims \
+                  --page ${page} --default-port ${toString port} "$@"
+              '';
+              meta.description = about;
+            };
+
+          bims-serve = serveFor {
             name = "bims-serve";
-            runtimeInputs = [ pkgs.python3 ];
-            text = ''
-              exec python3 ${./dev-server.py} --directory ${bims}/share/bims "$@"
-            '';
+            page = "index.html";
+            port = 8080;
+            about = "Serve the Bims room on http://localhost:8080";
+          };
+
+          bims-builder = serveFor {
+            name = "bims-builder";
+            page = "builder.html";
+            port = 8081;
+            about = "Serve the Bims builder on http://localhost:8081";
           };
         in
         {
-          inherit bims bims-serve;
+          inherit bims bims-serve bims-builder;
         };
     in
     {
@@ -87,23 +126,36 @@
           built = bimsFor pkgs;
         in
         {
-          inherit (built) bims bims-serve;
+          inherit (built) bims bims-serve bims-builder;
           default = built.bims;
         }
       );
 
+      # One app per thing you can run. `nix run .#game` is the room and is the
+      # default; `nix run .#builder` is the menus in front of it. More will
+      # follow, and each is a name here rather than a flag on one app.
       apps = eachSystem (
         pkgs:
         let
-          serve = {
+          built = bimsFor pkgs;
+
+          game = {
             type = "app";
-            program = nixpkgs.lib.getExe (bimsFor pkgs).bims-serve;
-            meta.description = "Serve Bims on http://localhost:8080 (pass a port to change it)";
+            program = nixpkgs.lib.getExe built.bims-serve;
+            meta.description = "Play Bims on http://localhost:8080 (pass a port to change it)";
+          };
+
+          builder = {
+            type = "app";
+            program = nixpkgs.lib.getExe built.bims-builder;
+            meta.description = "The start menu, setup and lobby on http://localhost:8081";
           };
         in
         {
-          inherit serve;
-          default = serve;
+          inherit game builder;
+          # The old name for the game, kept so `nix run .#serve` still works.
+          serve = game;
+          default = game;
         }
       );
 
@@ -120,6 +172,34 @@
         in
         {
           build = built.bims;
+
+          # The parts that are pure arithmetic — travel times, ship mass, the
+          # world generator — carry their own unit tests, and those run
+          # natively because a wasm test harness would need a runtime to host
+          # it. The room itself is still checked by the probes and harnesses
+          # in scratchpad/, which want a real terminal.
+          tests =
+            pkgs.runCommand "bims-check-tests"
+              {
+                nativeBuildInputs = [
+                  pkgs.cargo
+                  pkgs.rustc
+                  pkgs.stdenv.cc # a native test binary is linked with cc, not lld
+                ];
+              }
+              ''
+                cp -r ${src} source
+                chmod -R u+w source
+                cd source
+                export CARGO_HOME="$NIX_BUILD_TOP/cargo"
+                # Named packages rather than --workspace: the room is a
+                # cdylib meant for wasm and its tests are the probes in
+                # scratchpad/, which want a terminal. These three are plain
+                # libraries and their tests are plain `cargo test`.
+                cargo test --locked --offline -p time -p physics -p worldgen \
+                  --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget}
+                touch "$out"
+              '';
 
           formatting =
             pkgs.runCommand "bims-check-formatting"

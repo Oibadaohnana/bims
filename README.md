@@ -2,10 +2,13 @@
 
 A 2D top-down game written in Rust, running in the browser via WebAssembly.
 
-One character — a Bim — pottering about a compartment on a ship. Told to, it
-will cook itself a meal from start to finish and clear up after it, take itself
-to bed, or go and use the heads; left alone, it decides for itself which of
-those to do. A clock runs the whole time, and the deck goes dark at night.
+Two characters — Bims — pottering about a compartment on a ship. Either will
+cook a meal from start to finish and clear up after it, take itself to bed, or
+go and use the heads, entirely on its own account. A clock runs the whole time,
+and the deck goes dark at night.
+
+**You steer one of them.** James takes orders; Kate does not. See
+[The crew](#the-crew).
 
 ## Running it
 
@@ -16,6 +19,21 @@ nix run .
 That builds the game, serves it, and opens it in a browser tab. `Ctrl+C` stops
 the server. Pass a port to pin one (`nix run . -- 3000`), or `--no-open` to keep
 it out of your browser.
+
+There are two things to run, and more will follow:
+
+```sh
+nix run .#game        # the room: the simulation, on a canvas — port 8080
+nix run .#builder     # the start menu, game setup and the lobby — port 8081
+```
+
+`nix run .` is `nix run .#game`. Both serve the same directory and differ only
+in which page they open, so they have separate default ports and can be up at
+the same time.
+
+While editing, `./run game` and `./run builder` do the same against the live
+`web/` directory rather than the frozen copy in the Nix store — see
+[The builder](#the-builder).
 
 Running it again while it is already up starts neither a second server nor a
 second tab. It recognises its own build by the wasm being served and just tells
@@ -54,27 +72,199 @@ looking at a build from hours ago. `dev-server.py` sends `no-store`, and the
 page loads `bims.js` and `bims.wasm` under a per-load query string, so a cache
 poisoned before any of that was in place cannot outlive it either.
 
+## The builder
+
+`nix run .#builder` opens what comes *before* the room: a start menu, a game
+setup screen, and a lobby. It is `web/builder.html` and `web/builder.js`, a
+page of its own — `web/bims.js` is the room and knows nothing about menus, and
+the builder touches no wasm at all yet.
+
+**Play** goes straight to game setup. **Create lobby** opens a room other
+people will one day be able to walk into, and a code field beside the two of
+them is the other half of that: type a code, press Join, and it refuses out
+loud. That refusal is the honest state of things — there is no transport yet.
+
+The lobby is the settings screen with company. Down the left, four slots: you
+in the first one as host, the rest open and waiting. Across the top, the room
+code, set like something you read out to somebody. On the right, the same
+tabbed tool the setup screen uses:
+
+- **Game setup** — starting stores at ×0.5, ×1 or ×2, and the ship you start
+  with at 30 × 30, 40 × 40 or 60 × 60 tiles. ×1 and 40 × 40 unless you say
+  otherwise.
+- **World** — where the ship is and what it can reach. Nothing behind it yet;
+  the tab says so rather than showing an empty box.
+
+One settings object sits behind both copies of the tool, so what you pick on
+the setup screen is what the lobby shows and the other way about.
+
+Starting opens a placeholder that lists what the ship builder will be handed.
+The builder proper is the next thing to be written; the path from the menu to a
+configured game is real and covered by `scratchpad/builder-check.mjs` in the
+meantime.
+
+### The multiplayer seam
+
+`net` in `web/builder.js` is the whole of it: `create`, `join`, `push`,
+`leave`, and events the screens listen to. It is a local stand-in with the
+shape a transport will have, and **nothing in the screens reaches past it** —
+the slot list is drawn from what `net` says the players are, not from what the
+lobby knows about itself. Giving it a socket is meant to be a change to that
+object and to nothing else.
+
+Two things it already does properly, because they are easy to get wrong later:
+the settings tool knows how to be read-only, for a guest in somebody else's
+lobby, and the settings themselves are plain numbers — a factor and a tile
+count. Nothing but numbers can cross into the simulation anyway.
+
+## The crew
+
+Two Bims live aboard: **James** and **Kate**. Their names are written over
+their heads on the deck, each has an agenda down the left, and the one you have
+selected has its bars and its crew sheet down the right.
+
+They are not two kinds of thing. Both run the same needs on the same clock,
+both take themselves to bed and to the galley and to the heads for the same
+reasons, and nothing in the simulation distinguishes them except an index. The
+one asymmetry is the player: **every order goes to James**. Selection, the
+right-click move order, recruiting, and every item on every fixture menu act on
+him and only him. Kate takes no instruction from anybody and lives her whole
+day on her own account — which is the point of her being there.
+
+A Bim's name, coverall and hair are the host's business and the drawing's; the
+simulation knows crew member 0 and crew member 1. No strings cross the wasm
+boundary, so the names are written on the canvas by `web/bims.js` after the
+shape buffer has been replayed, not carried across in it.
+
+### Picking one, and the crew sheet
+
+**Clicking a Bim selects it, and selecting is what puts its panels on the
+right-hand side**: the four bars, health, and a character sheet under them.
+One at a time, and nothing at all when nothing is picked — the right-hand side
+answers *who am I looking at*, not *what is everybody up to*. Kate's bars are
+hers until you click on her, and her panels carry her own colour so a glance
+says whose sheet is open without reading the name.
+
+**Selecting is looking at, not taking charge of.** Any of them can be picked;
+only James takes orders. Click Kate, right-click the floor, and nothing
+happens — which is the same answer as before, arrived at more visibly.
+
+The sheet is tabbed the way the tray at the bottom left is, because it is the
+same kind of thing: pages of detail you open when you want them rather than a
+readout to be watched.
+
+- **About** — name, age, and the date they were born. Everyone aboard was born
+  between **2350** and **2380**, rolled at the start of the game and fixed
+  thereafter; the game opens on the first of January **2400**, so the crew are
+  somewhere between twenty and fifty. The ship keeps a 365-day calendar with
+  twelve months of the usual lengths and **no leap years** — a leap day buys
+  nothing here and costs a special case in every piece of date arithmetic,
+  including working out whether this year's birthday has been had yet.
+- **Memory** — the Bim's own account of its days.
+
+### What a Bim remembers
+
+One line per thing worth a line, newest day at the top and in the order it
+happened within a day. The ordinary entries are the errands it finished:
+*"04:38 Woke up after 6 hours"*, *"12:06 Made myself a bowl and ate it"*,
+*"13:33 Put something in to grow"*. They are written when the errand ends,
+which is why a night's sleep is filed under waking up rather than going to
+bed — that reads better and puts it on the day it mattered to.
+
+The ones that stand out are marked in the warm colour the rest of the game
+keeps for trouble, and they are the things that went wrong: an accident, being
+sick, dropping off standing up, and each stage further into hunger or
+sleeplessness as it arrives — once, as it happens, not once a frame for as long
+as it lasts. Coming back out of one is not an entry; the bars say so.
+
+And **what it saw**. When something happens to one of the crew, any of the
+others near enough to see it and awake to notice remembers that too: *"Saw Kate
+have an accident."* A Bim asleep in its bunk on the far side of the compartment
+witnessed nothing, and a diary that claims otherwise is one nobody can trust.
+
+No strings cross the wasm boundary, here as everywhere. An entry is a day, a
+time, a code and one number; `MEMORY_LINES` in `web/bims.js` is where the
+sentences live. A Bim that remembers being sick remembers `(day 4, 18:22,
+WasSick, 0)` and "on the deck" is the host's wording of nothing at all. The
+book is bounded — a few hundred entries, oldest falling off the front — so a
+game left running does not grow without end. Memory is finite; so is this.
+
+### What is one each, and what is shared
+
+Each has **a berth of its own** and **a seat of its own**. There are two bunks —
+one against the left wall where the only bunk aboard always stood, one in the
+top-right corner, mirrored so its ladder faces the room — and two chairs, one
+each side of the table, with a place laid in front of each. A Bim goes to its
+own bed and sits in its own chair; neither is ever contested.
+
+Everything else is shared, and two of the shared things are one pair of hands'
+worth:
+
+- **The galley.** One cold store, one board, one knife, one pot, one hob, one
+  dishwasher. While one Bim is on a galley errand the other's simply does not
+  start — the menu item says *"Kate is in the galley"* and is greyed out, and
+  Kate's own hunger waits and tries again. Tending the hydroponic bay counts as
+  a galley errand, because that chain ends by putting the harvest in the
+  fridge.
+- **The heads.** One pan, one basin, one door.
+
+Nobody queues for either: the errand is not begun, `consider_errand` moves on
+to whatever else that Bim could be doing, and it comes round again a moment
+later. That is the same shape as every other "can't do that yet" in the game —
+an empty cold store, a locked door — rather than a new mechanism.
+
+The **deck** is shared too, which means a mess one of them makes is a mess the
+other has to stand in. How far gone each is for standing in it is still its
+own: the mess is the room's, the two hours spent beside it are the Bim's.
+
+### They walk through each other
+
+**Bodies do not collide.** Two Bims that meet pass straight through one
+another, and both slow to **70% of their pace** for as long as they are within
+a body's width. Close quarters are slow; that is the whole of the rule.
+
+It is the one resolution that cannot leave anybody stuck, and being stuck is
+the real hazard here. **A route is planned once and never replanned**, so a Bim
+whose line goes through the other has no second plan to fall back on. Anything
+that stops it getting where that line goes — pushing it aside, holding it up —
+risks two of them standing nose to nose for ever with errands on both agendas.
+Letting them overlap gives that failure nowhere to happen.
+
+An earlier version did try to be clever about it: push them apart, pick one at
+random to stand aside for three seconds, shove that one sideways out of the
+other's lane. It worked, eventually, after two rounds of fixing what the fix
+broke — but every part of it existed to stop bodies overlapping, and once
+overlapping is allowed the whole apparatus has nothing left to do.
+
+A Bim sitting at the table or asleep in its bunk slows nobody: it is tucked
+into the furniture rather than standing in the gangway, and walking past the
+foot of a bed should cost nothing.
+
 ## Controls
 
 | | |
 | --- | --- |
 | Click the fridge | Menu: what is left, **Make a stew**, **Make a bowl**, the door |
-| Click the stove | Menu: turn on/off — the Bim walks over and flips it |
-| Click the bunk bed | Menu: **Nap** (30 min) or **Sleep** (6 hours) |
+| Click the stove | Menu: turn on/off — James walks over and flips it |
+| Click either bunk | Menu: **Nap** (30 min) or **Sleep** (6 hours) — James goes to his own |
 | Click the dishwasher | Menu: what is stowed, and **Run now** |
 | Click the hydroponic bay | Menu: the trays, **Automate**, and what to plant |
+| Click the broom locker | Menu: **Sweep up** — and they get round to it themselves |
 | Click the toilet | Menu: **Use** — and a wash at the basin after |
 | Click the bathroom door | Menu: open/close, lock/unlock |
 | Right-click a fixture | The same menu, on the other button |
-| `1` | Select the Bim (control group 1) |
-| `r` | Recruit the Bim, or let it go — see below |
-| Drag a box over it | Select the Bim |
-| Click it | Select it — a click is just a box of no size |
-| Click empty floor / `Esc` | Deselect |
+| `1` | Select James (control group 1) — the one you steer |
+| `r` | Recruit James, or let him go — see below |
+| Drag a box over one | Select it — either of them. Selecting shows its crew sheet |
+| Click one | Select it — a click is just a box of no size. Only James takes orders |
+| Click empty floor / `Esc` | Deselect — the right-hand panels go with it |
 | Right-click the floor | Send the selection there — opens a door on the way if it must |
-| Tray, bottom left | **Schedule** — paint the day; **Management** — autonomy, speed, food to keep |
-| Let the Bim decide | Whether it starts errands on its own when idle |
-| Speed slider | Run the simulation from 1x up to 24x |
+| Tray, bottom left | **Schedule** — paint the day and set the thresholds; **Management** — autonomy, food to keep, what is aboard |
+| Action thresholds, under the strip | Rest and Food: how low each may get before the Bim acts, and a tick box to stop it acting at all |
+| Point at anything | Top left says what it is, and what is lying on it |
+| Point at a management row | The place it names is ringed on the deck |
+| Let the Bim decide | Whether the crew start errands on their own when idle |
+| Speed slider, top right | Run the simulation from 1x up to 24x |
 | Rest on an underlined word or a ? | It explains itself, after a third of a second |
 
 Nothing on the page explains itself in prose any more. The explanations are in
@@ -86,12 +276,17 @@ rules, and nothing else pops anything up:
   with the help cursor. Hovering the row, the bar or the panel does nothing.
 - **A "?".** Where there is no word of its own to underline, a small question
   mark sits beside the controls: the schedule's is at the end of the brush row,
-  past **Sleep** and **Everything**.
+  past **Sleep** and **Everything**, and **Action threshold** has one of its
+  own — it names a block of two rows rather than a single control, so there is
+  no one word the explanation belongs on.
 
 Either opens after the pointer has rested on it for 300ms. The delay is the
-point: crossing a panel on the way somewhere else sets nothing off. The one
-number inside a tooltip that could go stale — the rested-enough threshold in
-the schedule's — is filled in from wasm rather than written into the markup.
+point: crossing a panel on the way somewhere else sets nothing off. The ring a
+management row draws round its fixture is not one of these and needs no
+affordance — nothing pops up, nothing is said, and it is gone the instant the
+pointer moves on. The one number inside a tooltip that could go stale — the
+rested-enough level in the schedule's — is filled in from wasm rather than
+written into the markup.
 
 Either button opens a fixture's menu, and doing so leaves the selection alone;
 a *sweep* across one is still a marquee. Right-clicking bare floor is still a
@@ -118,6 +313,10 @@ like when it got there.
 
 Where a fixture has two sides — the bathroom door — the Bim goes to whichever
 panel it is nearest, so it can let itself out as readily as in.
+
+Produce is held to the same rule. A plant lifted from the hydroponic bay is in
+the Bim's hands until it has carried it up the room and put it in the cold
+store — see [The harvest is carried](#the-harvest-is-carried).
 
 ## Interrupting, and getting back to it
 
@@ -183,7 +382,8 @@ board, knife — before parting company:
 
 - **A stew.** Two vegetables, fetched one at a time, chopped one after the
   other, tipped in the pot and cooked. The second trip skips the drawer,
-  because the knife is already in hand.
+  because the knife is already in hand. **A pot holds two helpings**: the Bim
+  has a plate of it now and the rest of it later.
 - **A bowl.** One block of tofu chopped into cubes, with the salad that came
   out of the fridge alongside it, tipped into a bowl and eaten cold. No pot, no
   heat, and about two thirds the time of a stew.
@@ -192,6 +392,27 @@ The loop and the fork in the chain are the same one mechanism: `Step::next` is
 still a straight line, and `Task::next_step` overrides it in the three places
 where the recipe matters — round again for the second vegetable, skip the
 drawer on that second trip, and turn off towards the bowl instead of the pot.
+
+### The pot keeps
+
+A stew is cooked once and eaten twice. Tipping it in fills the pot with two
+helpings; serving a plate takes one. When the Bim is hungry again and there is
+still something in the pot it goes back to it — a plate out of the drawer, the
+rest of the stew, and the same sit-down and clearing-up — which is half the
+time of a fresh meal and costs the store nothing. After the second plate the
+pot is empty and the next meal is cooked from scratch.
+
+It is the same chain as a meal, started part-way along: at the drawer rather
+than the fridge, and skipping the hob on the way past, since nothing was lit.
+The hob menu offers it by hand as **Eat from the pot**, and a Bim deciding for
+itself always prefers it — cooking a second pot on top of the first would throw
+the first away.
+
+The helping comes off the pot when the serving *finishes* rather than spoonful
+by spoonful, so a serve that was interrupted and started again costs the pot
+nothing. What the spoonfuls move is the picture.
+
+### The cold store
 
 The cold store is **two counts, not one**: vegetables and blocks of tofu, and
 they are not interchangeable. A stew is two vegetables; a bowl is one block of
@@ -301,15 +522,68 @@ one already running) is simply refused, and the next Bim to finish a meal tries
 again. The rack goes back into the galley stores when the cycle ends, which is
 the one bit of hand-waving in here: nobody unloads it.
 
+## Sweeping up
+
+The broom lives in a locker set into the port bulkhead, between the foot of the
+first bunk and the hydroponic bay. It is the **only thing aboard that undoes a
+mess**: everything else either makes one or gets out of its way.
+
+A Bim with nothing else on fetches it and sweeps. That is the whole trigger —
+sweeping sits at the very bottom of `consider_errand`, below every need, below
+a scheduled night and below the bay, so it is what a Bim does with time it has
+nothing better to spend. Anything arriving interrupts it exactly like any other
+errand, and the half-swept deck goes on the queue to be picked up after. You can
+also ask for it: the locker has a **Sweep up** item, greyed out when the deck is
+already clean.
+
+The chain is fetch, sweep, fetch again: **broom out → walk to the worst tile →
+sweep it → walk to the next → …** up to five tiles, then the broom goes back.
+Five rather than "until it is done" so that hunger and the heads get a look in
+between armfuls; if the deck still wants it and nothing else has come up, the
+Bim goes straight back for the broom.
+
+Which tile is next is worst-first with distance counting against it, so the Bim
+works outwards from where it is standing rather than crossing the compartment
+for the single filthiest tile every time. A tile comes all the way clean in one
+go — it is swept or it is not — and the **time** is in the chain rather than in
+chipping away at the score.
+
+Two things worth knowing about the corners:
+
+- **It sweeps the tile it set out for, not the one under its boots.** They
+  differ whenever the dirt is somewhere a body cannot quite stand, and a broom
+  has the reach for that. Sweeping underfoot instead would leave those tiles
+  filthy for ever *and* send the Bim back to the same one every time, because
+  it would still be the worst on the deck.
+- **A tile nobody can get to is never chosen.** Some of the deck is deck and
+  still unreachable — the corner past the end of the counter, hemmed in by the
+  bunk. A mess there would otherwise be picked as the worst tile for ever, with
+  the Bim fetching the broom, failing the walk, giving up and starting again.
+
+There is one broom, so one Bim sweeps at a time; the other's errand simply does
+not start, the same way the galley and the heads work. And the locker door is
+drawn from *whose hands the broom is in* rather than from a flag of its own, so
+a chain given up mid-sweep cannot leave the cupboard claiming to hold a broom
+that is somewhere else.
+
 ## The hydroponic bay
 
-Five trays along the bottom-left wall, and the only thing aboard that puts food
+Six trays along the bottom-left wall, and the only thing aboard that puts food
 *back* into the cold store. Right-click it for its two controls.
 
-**Automate** puts the bay on the manager's target (below). While the store is
-under it the bay has work, and the Bim walks over and does it a tray at a time:
+**Automate** is on out of the box and puts the bay on the manager's target
+(below) — a bay that has to be switched on is a bay that is off whenever the
+player has not noticed it, and at dawn the store already holds what the target
+asks for, so it sits quietly until the first meal dips below the mark. While
+the store is under it the bay has work, and the Bim walks over and does it a tray at a time:
 lift anything ripe, then plant whatever is missing. Greens come up in **one
 day**, soy in **a day and a half** and is pressed into tofu.
+
+Six trays is one bay per Bim, near enough. At the two-to-one ratio that is four
+trays of greens and two of soy, which comes out at about four vegetables and one
+and a third blocks of tofu a day. A Bim eats two meals a day and a pot covers
+both of them, so it gets through two or three vegetables and a block of tofu —
+the bay keeps up, with a little to spare for the days it cooks twice.
 
 What it plants is decided by which of the two the store is furthest behind on,
 as a *share* of what was asked for. The share matters: measured in plain
@@ -332,6 +606,34 @@ Both controls are *settings* rather than errands — the same kind of thing as
 the timetable or letting the Bim decide. The deciding is the player's; every
 bit of the doing is still the Bim's, on foot, one tray at a time.
 
+### The harvest is carried
+
+A plant lifted out of a tray is **in the Bim's hands**, not in the store. The
+bay is at the bottom-left wall and the cold store is at the top of the room, so
+the tend errand carries on past the tray: up the room with the vegetable,
+fridge open, plant in, fridge shut. Only then does the count in the management
+tab go up.
+
+That is [Nothing is remote](#nothing-is-remote) applied to the one thing that
+was still cheating. The trays used to empty and the store used to fill in the
+same instant, with the Bim standing twenty feet away — which is the exact
+pattern the rest of the game exists to avoid, and it showed: a bay running flat
+out looked like it was posting produce through a wall.
+
+There is a real consequence, not just a nicer animation. The walk is most of
+the errand now, so a bay working hard costs the Bim a noticeable part of its
+day, and a harvest interrupted half way is a Bim standing about holding a
+carrot until it gets back to it. The crop rides along in the saved chain, so
+being pulled off it loses nothing; the only case where produce is banked
+without a hand on it is a chain given up for good because a door shut across
+the walk, and putting it in the store then is the lesser of the two wrongs.
+
+A **planting** has nothing to carry and ends at the tray, which is why a
+planting's row on the agenda vanishes at about half a bar. That is deliberate:
+weighting the chain by what the Bim turns out to be holding would make the bar
+run *backwards* the moment a harvest came up, because nothing is in its hands
+until the tray is already worked.
+
 ## The manager
 
 **Management** in the tray holds one number so far: **how much food to keep**.
@@ -344,11 +646,97 @@ That target is what the bay plants to, and it is the only demand there is for
 now. The manager is where the rest will go as they arrive: one row per thing
 the place is told to keep up.
 
+Under it is **what is aboard**: a table of one row per thing, with what it is,
+how many there are, and where they are — vegetables and tofu in the cold store,
+and whatever is left in the pot on the hob. It is built from a list rather than
+written into the markup, so a new thing to keep track of is a new line rather
+than a new table.
+
+**Resting on a row rings the place on the deck.** "Cold store" and "Pot on the
+hob" are words, and the room is full of grey rectangles standing against the
+same wall; pointing at the row draws a cyan ring round the actual fixture, so
+the two do not have to be matched up by eye. The food target does the same for
+the hydroponic bay, which is what works to it.
+
+It is not a tooltip and does not go through the tooltip machinery: nothing pops
+up, nothing is said, and a pointer crossing the panel on its way somewhere else
+lights a fixture for a moment and leaves nothing behind. That is why it can
+hang off a whole row rather than needing a word of its own to underline — every
+row is about exactly one place. The ring is drawn *over* the night wash, since
+a highlight that dims at three in the morning is no highlight, and in the
+ship's own cyan rather than the green that means "selected" or the warm colours
+that mean trouble.
+
+The speed slider used to sit here too. It is in the header now, beside the
+clock it is speeding up.
+
 A note on the arithmetic, since the two readings of "food unit" differ. A unit
 here is one *item* split two to one, so 99 units is 99 things — 33 days of
 greens at two a stew, or about seven weeks for one Bim. Read instead as "99
 meals' worth", at two vegetables and a block of tofu each, it would be 198 and
 99. The first is what the field does, because that is what was asked for.
+
+## Work priorities
+
+The **Work** tab is the third in the tray, and it is the answer to "what should
+they do first". One row per job, a number from **1 to 5** in a box beside each,
+and **1 is done first**. Click a box and it steps one less important, from 5
+back round to 1. Everything starts at **3**, all equal, so out of the box this
+changes nothing at all — the ship behaves exactly as it did before the panel
+existed, which is deliberate: a default that is already an opinion is a default
+you have to undo before you can use anything.
+
+| | |
+| --- | --- |
+| **Cleaning** | sweeping the deck |
+| **Planting** | sowing an empty tray in the bay |
+| **Plant cutting** | lifting a ripe one out of it |
+| **Hauling** | carrying what was lifted to the cold store |
+| **Cook** | making a meal |
+
+The colour of the box says what the number means without anybody having to
+remember which end is which: warm at the top of the list, cold at the bottom,
+five steps across the palette. At the top of the panel are three ways to
+reorder the rows — **Priority 1→5**, **Priority 5→1** and **Name A–Z**.
+
+Sorting is something you *press*, not a rule that stays on. If the list
+re-sorted itself live, the row you just clicked would jump out from under the
+pointer — and at the wrap from 5 back to 1 it would jump the whole length of
+the list. So the button reorders the rows there and then, and the mark showing
+which order was applied is cleared the moment a box is clicked, because the
+list may no longer be in it.
+
+Resting on a row rings the place the job happens, the same as a management row:
+the locker for cleaning, the bay for both bay jobs, the cold store for hauling,
+the hob for cooking. Nothing pops up and nothing is said — see
+[A highlight is not a tooltip](#what-the-pointer-is-over).
+
+### What it actually changes
+
+Only what a Bim takes on **of its own accord**. A Bim with nothing pressing
+looks at whatever work is going — a tray asking, a deck wanting the broom, its
+own hunger — and does the one nearest the top of the list. Whether it then gets
+on with it is a separate question: there is one galley and one broom, so the
+other Bim may have the thing it needs, in which case it moves down the list
+rather than waiting in line.
+
+Two things the list deliberately does **not** touch:
+
+- **Sleep and the heads are not work.** There is no row for either and no
+  number to set. A timetable and an action threshold are how those are steered.
+- **Nobody starves for it.** Cooking at the bottom with a deck that never comes
+  clean is exactly the arrangement a player will try, and a Bim is allowed to
+  put the meal off — but once going without has actually begun to tell on it,
+  the meal jumps the queue whatever the cook row says. The list is a statement
+  about what to do next, not about whether to eat at all.
+
+**Hauling has no errand of its own yet**, because nothing aboard is fetched or
+moved except a harvest, and that is carried in the same chain that lifted it.
+So it is the back half of a cutting, and a cutting waits on whichever of
+**Plant cutting** and **Hauling** is set later. Put hauling at the bottom and
+the bay stops being emptied, which is the truthful answer: there is nobody to
+carry it. When something else worth hauling arrives, that is the row it goes
+under.
 
 ## The timetable
 
@@ -363,12 +751,14 @@ It comes with a night already painted in: **22:00 through to 04:00**, six hours,
 the same length as a night actually is. Wipe it with the grey brush if you want
 the Bim left entirely to its own devices.
 
-Only sleep is timetabled so far, and **the timetable is the only thing that
-sends the Bim to bed**. Running low on rest is not a reason in itself: the level
-decides whether a scheduled night is worth taking, not whether to have one. Wipe
-the strip entirely and the Bim never sleeps at all, and rest sits at zero —
-which costs it nothing, there being no penalty attached to it, but it will not
-put itself to bed.
+Only sleep is timetabled so far, and **the timetable is what sends the Bim to
+bed on an ordinary night**. Running low on rest is not a reason in itself for a
+scheduled night: the level decides whether that block is worth taking, not
+whether to have one. Underneath the timetable there is a floor — the **Rest
+threshold**, below — which catches the Bim when the timetable has not. Wipe the
+strip entirely and the threshold is all that is left: the Bim goes to bed when
+rest runs past it, whatever the hour. Untick that too and it never sleeps at
+all.
 
 The timetable is still not an order. When the clock walks into a painted block
 the Bim adds a sleep to the **back** of its agenda — behind whatever it is doing
@@ -385,7 +775,7 @@ Two rules keep it from being silly:
   early night taken at three quarters rested runs about ninety minutes rather
   than the full six hours, and the Bim is up and about again.
 - **Hungry, and it eats first.** A sleep waiting at the front of the agenda
-  stands aside while food is past its trigger and there is something to cook:
+  stands aside while food is past its threshold and there is something to cook:
   turning in starving costs the Bim six hours of losing health and it wakes no
   better off, where the meal costs it three quarters of an hour and puts the
   need away entirely. The sleep is held, not dropped, and goes ahead the moment
@@ -394,13 +784,16 @@ Two rules keep it from being silly:
   the galley behind a locked door, or autonomy switched off, bedtime goes ahead
   as it is. Waiting on a meal nobody is going to cook would be a Bim that never
   sleeps at all.
-- **Needing the heads, and it goes first.** You go before bed. The same rule and
-  the same guards: the sleep is held while the restroom need is past its trigger
-  and the pan is actually reachable, and a locked door is not a reason to keep a
-  tired Bim up. Nothing worse than an early start hangs on it — the need and its
-  accidents are both frozen while the Bim sleeps — but a Bim that turns in at
-  nothing per cent wakes at nothing per cent and has to run for it, and now it
-  simply goes first.
+- **Under 80% on the restroom need, and it goes first.** You go before bed.
+  Unlike the meal, this one does not wait for the 10% threshold: the restroom need
+  is the only one that keeps draining through the night, and a night is six
+  hours — turn in at four fifths and the Bim wakes at nothing. So anything under
+  four fifths is worth emptying out first, and the sleep waits the twenty
+  minutes it takes. The same guards as the meal: only while the Bim is free to
+  go, and only while the pan is reachable — a locked door is not a reason to
+  keep a tired Bim up. This is half a rule on its own: holding the sleep back
+  does nothing unless something *starts* the trip, and the need is nowhere near
+  the trigger the errand loop watches, so `consider_errand` starts it by name.
 
 A block fires once however long it is: painting the whole day sends the Bim to
 bed once, not twenty-four times. Painting sleep onto the hour it already is
@@ -416,6 +809,78 @@ to bed at 22:01, 22:00, 22:00, 22:05, 22:03, 22:00, arriving at ten o'clock
 between 8% and 14% rested every time and getting up around a quarter to four,
 fully rested and a little short of the six hours. A 25-hour rhythm pulled onto a
 24-hour day is exactly what entrainment looks like.
+
+## Action thresholds
+
+Under the hour strip, in the same tab, sit the two levels that say **how low a
+need may get before the Bim does something about it**: one for Rest, one for
+Food. Each is a tick box and a slider, and each starts ticked at 10%.
+
+(In the code these are `needs::Trigger` — a level and a switch. "Threshold" is
+the player's word for the setting; "trigger" is what the mechanism does.)
+
+They are the other half of the timetable's question. The strip says when the Bim
+*may* sleep; the Rest threshold says when it should go anyway. A Bim whose night
+has been wiped off the strip, or who has been kept out of bed by a long errand,
+falls past the threshold and turns in on its own account — which is why wiping
+the timetable no longer means a Bim that never sleeps.
+
+A threshold fires the same errand a need has always fired, so everything that
+already governed those errands still governs these:
+
+- **A meal comes first.** The Rest threshold stands aside for hunger exactly as a
+  scheduled night does, and for the same reason.
+- **So does a trip to the heads.** You go before bed, and the Rest threshold waits
+  the twenty minutes it takes. The two rules have to be paired: the threshold
+  refusing to start the sleep is what makes something else start the trip.
+- **Autonomy and orders still outrank it.** With *Let the Bim decide* off, or
+  the Bim recruited, no threshold starts anything.
+
+**Unticking one is not the same as setting it to nothing.** The need carries on
+draining and everything going without does to the Bim still bites — a Bim with
+the Rest threshold off still gets sleepy, sleep-deprived, and finally drops off on
+its feet. All that stops is the Bim going and doing something about it on its
+own account. Three days of that leaves it hovering just under the level it would
+have acted on, clawing back a few minutes at a time from nodding off where it
+stands.
+
+Restroom and Cleanliness have no threshold on the page. The first is not something
+a player should be able to talk the Bim out of; the second has no errand behind
+it to start.
+
+One thing the numbers assume, and worth knowing before you move one: the drain
+rates are derived from a tenth. Each need is written as the drop from full to
+10%, divided by how long that drop is supposed to take, so two meals and three
+visits a day come out of the arithmetic rather than being tuned by eye. Tell the
+Bim to eat at half full and it eats more often than twice a day — which is the
+point of being able to say so, but it is no longer the day the rates were built
+for.
+
+## What the pointer is over
+
+Top left, above the agenda, one line says **what is under the pointer**. Deck
+plating, a bulkhead, the worktop, the chopping board, the cold store, the hob,
+the dishwasher, the table, the chair, the bunk, the hydroponic bay, the toilet,
+the basin, the bathroom door — and *outside the hull* if the pointer is off the
+ship altogether, which it can be, because the room is a fixed size letterboxed
+into whatever window you have.
+
+Where there is something worth saying about the state of it, it says that too:
+the hob **lit**, the cold store **open**, the door **locked** or **shut**, the
+dishwasher **running**, the bay with **two ready to lift**.
+
+And on deck, a second line says what is lying there: **Wet**, **Soiled** or
+**Vomit**, with how far down that tile has been taken. The simulation itself has
+never distinguished one stain from another — a tile is one number, and the
+average around the Bim is all anything reads — so the kind is remembered
+alongside the score purely for this readout. It keeps the worst of what has
+happened rather than the latest: being sick on a tile already wet reads as sick.
+
+The readout is a different question from a click, and answers accordingly. A
+click asks *what would this act on*, which is why only the few things with a
+menu behind them are hit-testable and why each of those is given a few pixels of
+slack. The readout asks *what is this*, so everything aboard has a name and
+nothing is expanded: a pixel beside the pan is deck, not toilet.
 
 ## Recruiting
 
@@ -441,11 +906,15 @@ nothing else and drawn whether or not the Bim happens to be selected.
 
 ## Needs, and the day they make
 
-Four levels run the Bim's day, shown down the right-hand side of the deck and
-always visible: **Rest**, **Food**, **Restroom** and **Cleanliness**. Each sits
-at 1 when the Bim is comfortable and falls as the day goes on. One dropping
-below 10% is what sends the Bim to bed, to the fridge or to the heads; doing the
-thing fills it back up, and a meal fills hunger completely however empty it was.
+Four levels run a Bim's day, shown down the right-hand side of the deck for
+whichever of the crew is selected: **Rest**, **Food**, **Restroom** and
+**Cleanliness**. Kate's are worth going and looking at precisely because you
+cannot order her about — her bars are the only warning you get. Each sits
+at 1 when the Bim is comfortable and falls as the day goes on. One dropping past
+its **threshold** — a tenth, until you move it — is what sends the Bim to bed,
+to the fridge or to the heads; doing the thing fills it back up, and a meal fills
+hunger completely however empty it was. Rest and Food have theirs on the page,
+under the timetable; see [Action thresholds](#action-thresholds).
 
 The restroom need covers both ends of the business deliberately, rather than
 being two numbers. They come up together, they are dealt with in one trip, and
@@ -474,11 +943,15 @@ than guessed, and measured to the moment the need is *full* rather than to the
 end of the chain: a meal carries on for another ten minutes stacking the
 dishwasher, and the Bim is getting hungry again through all of it.
 
-| need | per day | slot | errand costs | drain per waking minute |
+| need | per day | slot | errand costs | drain per minute |
 | --- | --- | --- | --- | --- |
 | Rest | 1 | 1140 | 6 | 0.9 / 1134 |
 | Food | 2 | 540 | 48 | 0.9 / 492 |
-| Restroom | 3 | 360 | 14 | 0.9 / 346 |
+| Restroom | 3 | 480 | 14 | 0.9 / 466 |
+
+The first two drain per *waking* minute and the last one per minute of the day,
+because the restroom need is the one that keeps going while the Bim sleeps —
+hence a slot of 1440/3 rather than 1080/3. See below.
 
 Recovery is spread across the act itself, so a bar fills while the Bim is doing
 the thing rather than jumping at the end: six hours in bed carries Rest from the
@@ -504,13 +977,20 @@ starts.
 The one figure that moves is how much of a *calendar* day is spent asleep: 360
 minutes in every 1502 is 5.75 hours a day rather than a flat six.
 
-Nothing drains at all while the Bim is asleep. That is deliberate, and it is
-what makes the counts come out: if the restroom need ran down overnight the Bim
-would wake already past the trigger and three visits a day would drift into four.
-Sleeping through the night is the point of sleeping. The accidents that hang
-off the restroom need are frozen with it, for the same reason: the one-in-ten
-an hour rolled through a six-hour night would wet the bed about half the time,
-for a need that is not even moving while the Bim sleeps.
+Hunger and rest stop while the Bim is asleep — six hours in bed cost it nothing
+to put right afterwards. **The restroom need is the exception: it runs all
+night.** A body does not stop making water because its owner is unconscious.
+
+Which is why its slot is the whole 1440 rather than the waking 1080. Derive it
+off the waking day and the night quietly adds a fourth visit; derive it off the
+calendar day and three a day stays three, with one of the three falling not long
+after the Bim gets up. The other half of keeping that honest is the rule that
+sends the Bim to the heads before bed, so the night starts from full rather than
+from wherever the evening left it.
+
+What *is* still frozen is the accidents that hang off the need — the one-in-ten
+an hour would otherwise roll six times a night and wet the bed about half the
+time. The level falls; nothing happens because of it until the Bim is up.
 
 Run it and the Bim eats twice, visits the heads three times, and — because the
 default night is painted in — sleeps once, at ten.
@@ -552,14 +1032,61 @@ why it is there.
 ### The deck, tile by tile
 
 The deck is scored tile by tile on the same 52-pixel grid it is drawn on. A tile
-starts at **10** and only ever goes down: an accident takes one straight to
-**−100**, and so does being sick on one; wetting one costs 35. **Nothing cleans
-up yet** — that is a job for something that does not exist, and until it does a
-mess is permanent. Being sick is the one a Bim does over and over, so a Bim at
+starts at **10** and goes down as things happen on it: an accident takes one
+straight to **−100**, and so does being sick on one; wetting one costs 35.
+**A broom puts it back** — see [Sweeping up](#sweeping-up) — and it is the only
+thing that does. Being sick is the one a Bim does over and over, so a Bim at
 the worst stage leaves a trail of ruined tiles behind it as it moves away from
-each in turn. The Bim carries its own share around separately, 0 to 1, because
-a Bim that soils itself takes the mess with it when it walks away. A wash at
-the basin gets half of it off; nothing else does anything.
+each in turn, and somebody has to go round after it. The Bim carries its own
+share around separately, 0 to 1, because a Bim that soils itself takes the mess
+with it when it walks away; no broom reaches that. A wash at the basin gets half
+of it off, and nothing else does anything.
+
+The score is the whole of what the simulation reads — the average around the
+Bim, how fast that grinds it down, which way it walks to get clear. Alongside it
+each tile also remembers **what** was spilt on it, which nothing in the
+simulation looks at: it is there so that pointing at a tile gets an answer a
+player can use. "−65" is no answer to *what is that*.
+
+### Dirty work, and dirt that walks
+
+Not every mess is an accident. **The dirty jobs mark the deck around them**: a
+knife going through a vegetable, a pot tipped and served, a pair of hands in a
+hydroponic tray, a crop going into the cold store. Each of those steps has
+about a **one in three** chance of flicking something onto one of the nine
+tiles around the Bim, worth 14 off that tile — a stain, not a ruined tile, but
+well past the threshold where the broom is worth getting out. So the galley and
+the bay go grubby on their own, and the crew have standing work even on a week
+where nobody has a bad day.
+
+It goes on a tile *near* the Bim rather than always underfoot, so a week of
+cooking spreads a patch across the galley instead of wearing one hole in the
+deck in front of the stove. Nothing is ever flicked somewhere a body cannot
+walk to, because that is a stain the broom would never reach and the deck would
+keep for good — the same question `worst_tile` asks, asked here too.
+
+And **dirt travels on boots**. Each time a Bim steps from one tile to the next,
+there is a **25% chance** it carries **25% of what was on the tile behind** onto
+the tile ahead. Both numbers are about the tile it is leaving, not a fixed
+amount: a boot out of a ruined tile leaves a real smear, a boot out of a faint
+one leaves almost nothing. The mess it left behind is now a source in its own
+turn, so a Bim pacing the same route lays a trail that thins as it lengthens — a
+quarter, then a sixteenth — and falls under the sweeping threshold after three
+or four steps. That is what stops one accident eventually reaching every tile
+aboard.
+
+The dirt **moves rather than multiplies**: the tile behind loses exactly what
+the tile ahead gains. Copying it would let a Bim walking back and forth across
+the galley make filth out of nothing, and the deck would lose to a pair of feet.
+Nothing is drawn from the dice at all unless the step crossed a tile boundary
+*and* the tile behind had something on it — a Bim crossing clean deck costs
+nothing, which matters because every roll aboard comes off one stream.
+
+The smear carries the *name* of what it came off, too: a boot out of a tile
+somebody was sick on leaves a fainter patch of the same thing, not a new kind of
+mess. Only what a dirty job leaves has its own name — **grime** — and it is the
+least bad of them, so grime tracked across a ruined tile never talks the readout
+back down.
 
 ### Cleanliness
 
@@ -606,6 +1133,86 @@ for.
 Everything it starts for itself is an ordinary chain, so it can be interrupted
 and queued like any other. Uncheck **Let the Bim decide** in the header to drive
 it entirely by hand; the levels carry on moving, they just stop giving orders.
+
+## Socializing
+
+The fifth bar, and the only one that wants **another Bim** rather than a
+fixture. It runs down like the others, twice a waking day, and past its trigger
+the Bim goes and finds the other one.
+
+### Talking
+
+Both crew are handed the errand in the same frame, each walking to **its own
+spot** either side of a meeting point worked out from where the two of them are
+standing. That is not a flourish. A route here is planned once and never
+replanned, so a Bim sent to *where the other one is* would be walking at a
+target that is itself walking: it would converge on empty deck and stand there
+for ever with `arrived()` never coming true. Two fixed points is the only shape
+of this that terminates.
+
+They stand **side by side** rather than either side of the line they happened to
+approach along. A pair who met walking north–south would end up one above the
+other, and the host paints each name a body's height above its head — so the
+lower one's label lands squarely on the upper one. Left and right, and nothing
+is written over anything.
+
+A **speech bubble** goes up over whichever of them has the floor. They take
+turns, and whose turn it is comes off the ship's clock rather than off either
+one's own errand: they arrive a moment apart, and two bubbles over two Bims
+standing together would sit on top of each other. What they talk about is
+picked out of the speaker's own recent diary — a harvest, a bad night, being
+sick on the deck — so a conversation is about the week they have actually had.
+The code crosses the boundary; the words are entirely the host's, in
+`CHAT_TOPICS`.
+
+A conversation is the one errand that is **dropped rather than put down** when
+something interrupts it. Half of one is worth nothing and the other half will
+have walked off by the time it is picked up again.
+
+The other Bim gets interrupted to have it, if it is merely working — sweeping,
+or at the bay. Not if it is asleep, in the heads, or sitting on the deck. The
+alternative is two Bims who are never both free at the same moment and so never
+speak, and with the deck always finding something to be swept that is not a
+hypothetical.
+
+### Going without
+
+The bar is the comfortable end of it. What matters is a second clock, in days,
+that only a conversation resets — the same shape as malnutrition and as
+standing in the mess, where reaching nothing is the start of it and not the end.
+
+| alone for | stage | what it does |
+| --- | --- | --- |
+| 3 days | **desocialized** | writes low entries in its diary every four hours, and everything it does takes **a tenth longer** |
+| 5 days | **badly desocialized** | that, and **sits down on the deck for ten minutes**, roughly every five hours, wherever it happens to be |
+| 7 days | **isolated** | that, and **hurts itself every four hours** — ten points of health a time |
+| 10 days | — | **3% an hour of giving up altogether**, and three points more for every further day |
+
+The stages do not replace each other: an isolated Bim is still brooding and
+still sitting down, because each one is the one before it and worse.
+
+The self-harm rate is set against the mending, not picked by eye. A well-fed Bim
+recovers half its health a day, so six bouts of ten is ten points a day of *net*
+damage — the three days between the isolated stage and the despair that follows
+it leave it worn down and alive, which is the shape the escalation wants. Make
+it much faster and nothing ever reaches the tenth day to give up on it.
+
+Two things that are easy to get wrong here and were:
+
+- **Health mends every frame, so a bar taken to nothing by anything sudden is
+  back above nothing before the game has looked at it.** Hunger works on health
+  over hours and reaching zero from it is checked in the same frame it happens;
+  a Bim hurting itself, or giving up, sets the bar to zero in a *later* part of
+  the frame and the recovery on the next one undid it. The result was a Bim
+  whose health read nought and who was still walking about. `Health::update`
+  now returns at once from zero: nothing comes back from nothing.
+- **The clock belongs to a body.** It is per Bim and never on anything shared —
+  the same lesson `filth::Ordeal` is there to record. One Bim's solitude must
+  never be reachable from the other's frame.
+
+None of this can be switched off in the work list, and there is deliberately no
+row for it: the list is for jobs, and a player who could put *company* at the
+bottom could set a Bim to die of loneliness without meaning to.
 
 ## The heads
 
@@ -663,11 +1270,19 @@ at the basin, and the lock it never set stays set.
 
 ## Bed time
 
-The bunk bed is against the left wall. Its menu offers a nap of thirty minutes
-or a sleep of six hours; both run the same chain — walk over, up the ladder,
-under the covers, out cold, a stretch, and back down — and differ only in how
-long the Bim stays put. The menu says what time it will be up, and the status
-line counts the rest down while it sleeps.
+There are two bunks, one per crew member: one against the left wall, one in the
+top-right corner. A Bim only ever goes to its own. Either bunk's menu offers a
+nap of thirty minutes or a sleep of six hours; both run the same chain — walk
+over, up the ladder, under the covers, out cold, a stretch, and back down — and
+differ only in how long the Bim stays put. The menu says what time it will be
+up, and the status line counts the rest down while James sleeps.
+
+The second bunk is the first one mirrored. A `Berth` carries which side of it
+the deck is on, and the ladder, the spot the Bim stands on to climb it and the
+way it turns to do so are all read off that rather than written into the
+drawing twice. Everything else — pillow at the top of the room, head towards
+it — is the same in both, so a sleeper lies the same way up whichever bunk it
+is in.
 
 Drawing a bunk bed from directly above is the interesting part, because the top
 bunk hides the bottom one almost entirely. So the lower bed is drawn first, set
@@ -702,6 +1317,27 @@ surface: the counter fascia, the induction coils etched into the hob, the rim of
 the table, the underside of the top bunk, the jambs of the bathroom door. Warm
 colours are held back for heat and for trouble, which is why a live hob and a
 locked door are the only two warm things in the room and both read instantly.
+
+The two crew are told apart by their clothes and their hair, not by where they
+happen to be standing: James is in the blue coverall with cropped hair, Kate in
+the mauve one with hers worn long, which from directly above is a second
+ellipse behind the head. Their names are written over them — James's in the
+green that everything steerable uses, Kate's in plain ink, so which one takes
+orders reads without being explained.
+
+The page around it is arranged the same way: nothing is framed. The deck runs to
+the edge of the window, the canvas carries no border of its own, and every panel
+sits flush in a corner of it — the readout and the agendas top left, the
+selected Bim's bars and crew sheet top right, the tray in the bottom-left
+corner. A rounded box drawn
+round the whole interface reads as a window frame inside a window, which is one
+frame too many; only the header, with the name and the clock, sits above the
+deck rather than on it.
+
+The tray is the exception to everything being small. It is set a size larger
+than the rest — wider, bigger type, taller hour cells — because the timetable
+and the action thresholds under it are where the day is actually decided, and they are
+read and edited rather than glanced at.
 
 ## How it fits together
 

@@ -181,6 +181,21 @@ impl Health {
         self.points <= 0.0
     }
 
+    /// Take a flat amount off, never past nothing. Hunger works on the health
+    /// bar over hours; this is for the things that happen all at once — so
+    /// far, a Bim nobody has spoken to in a week hurting itself.
+    pub fn hurt(&mut self, points: f32) {
+        self.points = (self.points - points).max(0.0);
+    }
+
+    /// The end of it, by the Bim's own hand. Kept apart from [`Health::hurt`]
+    /// with everything left of the bar taken at once, so that what happened is
+    /// legible here rather than being a subtraction that happened to reach
+    /// zero.
+    pub fn give_up(&mut self) {
+        self.points = 0.0;
+    }
+
     /// `minutes` is game minutes elapsed, `food` and `rest` the levels now,
     /// and `resting` whether the Bim is actually asleep this instant.
     ///
@@ -190,6 +205,15 @@ impl Health {
     /// malnutrition is meant to be. Sleeplessness plainly does not, so that one
     /// only counts waking minutes.
     pub fn update(&mut self, minutes: f32, food: f32, rest: f32, resting: bool) {
+        // Nothing comes back from nothing. Health mends on its own while the
+        // Bim is fed, and without this the bar taken to zero by anything
+        // *sudden* — a Bim hurting itself, a Bim giving up — is back above
+        // zero on the very next frame, before `Game` has looked at it. The
+        // death then simply never happens: the run ends with a Bim whose
+        // health reads nought and who is still walking about.
+        if self.points <= 0.0 {
+            return;
+        }
         if food <= EMPTY {
             self.starved += minutes;
         } else {

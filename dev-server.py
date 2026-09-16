@@ -104,6 +104,21 @@ def main():
     )
     parser.add_argument("--directory", default="web")
     parser.add_argument(
+        "--page",
+        default="index.html",
+        help="page under the served directory to open (default index.html)",
+    )
+    parser.add_argument(
+        "--default-port",
+        type=int,
+        default=DEFAULT_PORT,
+        help=(
+            f"port to use when none is given (default {DEFAULT_PORT}). Each "
+            "front end has its own, so the room and the builder can be up at "
+            "once out of one directory"
+        ),
+    )
+    parser.add_argument(
         "--open",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -111,14 +126,14 @@ def main():
     )
     args = parser.parse_args()
 
-    port = args.port or DEFAULT_PORT
+    port = args.port or args.default_port
     mine = build_on_disk(args.directory)
 
     # Running the command twice should take you to the game, not start a second
     # copy of it on another port and open a second browser tab.
     running = build_being_served(port)
     if running == mine:
-        url = f"http://localhost:{port}/"
+        url = f"http://localhost:{port}/{args.page}"
         print(f"Bims is already running at {url}", flush=True)
         # Not opening a tab here on purpose: you already have one. Opening on
         # every invocation is what left several copies of the game running.
@@ -139,7 +154,7 @@ def main():
     # caller did not insist on it, move along rather than failing.
     handler = functools.partial(Handler, directory=args.directory)
     httpd = bind(port, search=args.port is None, handler=handler)
-    url = f"http://localhost:{httpd.server_address[1]}/"
+    url = f"http://localhost:{httpd.server_address[1]}/{args.page}"
 
     # flush: stdout is block-buffered when piped, and the URL is the one thing
     # you want to see immediately.

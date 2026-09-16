@@ -44,6 +44,16 @@ impl Rng {
         self.unit() < p
     }
 
+    /// A whole number in `0..n`, and 0 for an empty range. Taken off the top
+    /// bits rather than by remainder: the low bits of an xorshift are the
+    /// weakest it has, and a modulo would lean on exactly those.
+    pub fn below(&mut self, n: u32) -> u32 {
+        if n == 0 {
+            return 0;
+        }
+        ((self.next_u32() as u64 * n as u64) >> 32) as u32
+    }
+
     /// Roughly standard-normal (Irwin–Hall, n=4). Small turns are common and
     /// large ones are rare, which is what makes a wander look deliberate.
     pub fn gaussian(&mut self) -> f32 {

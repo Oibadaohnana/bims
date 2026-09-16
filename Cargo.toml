@@ -1,3 +1,6 @@
+# The workspace root. `bims` — the room, and the only cdylib — is still the
+# package here; everything a future native server will also need lives in
+# `crates/` beside it, so those parts compile for x86 as readily as for wasm.
 [package]
 name = "bims"
 version = "0.1.0"
@@ -6,6 +9,12 @@ description = "Bims - a 2D top-down game that runs in the browser"
 
 [lib]
 crate-type = ["cdylib"]
+
+[dependencies]
+time = { path = "crates/time" }
+
+[workspace]
+members = ["crates/*"]
 
 [profile.release]
 opt-level = "z"

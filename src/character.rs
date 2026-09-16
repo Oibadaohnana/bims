@@ -4,7 +4,7 @@
 use crate::draw::{Color, DrawList};
 use crate::math::{PI, Rect, TAU, Vec2, angle_lerp, approach, clamp, lerp, vec2, wrap_angle};
 use crate::rng::Rng;
-use crate::room::{Dish, GRIP, STEEL, draw_knife, draw_plate, draw_spoon};
+use crate::room::{BROOM_HEAD, BROOM_POLE, Dish, GRIP, STEEL, draw_knife, draw_plate, draw_spoon};
 
 // --- behaviour tuning ---------------------------------------------------
 
@@ -55,6 +55,12 @@ pub const BITE_PERIOD: f32 = 0.95;
 
 const SHIRT: Color = Color::rgb(0.33, 0.58, 0.85);
 const SLEEVE: Color = Color::rgb(0.27, 0.49, 0.74);
+/// The second of the crew, in the ship's other coverall. Far enough from the
+/// first that the two never have to be told apart by where they happen to be
+/// standing.
+const SHIRT_B: Color = Color::rgb(0.74, 0.42, 0.62);
+const SLEEVE_B: Color = Color::rgb(0.60, 0.33, 0.51);
+const HAIR_B: Color = Color::rgb(0.42, 0.26, 0.13);
 const SKIN: Color = Color::rgb(0.91, 0.73, 0.55);
 const NOSE: Color = Color::rgb(0.82, 0.62, 0.45);
 const HAIR: Color = Color::rgb(0.23, 0.17, 0.12);
@@ -82,6 +88,64 @@ pub const ACCENT: Color = Color::rgb(0.50, 0.82, 0.66);
 /// glance and does not have to be told apart from being merely selected.
 const COMMAND: Color = Color::rgb(1.0, 0.82, 0.35);
 
+/// Which of the crew this is, as far as the drawing is concerned: a coverall,
+/// a hair colour, and whether it is worn long.
+///
+/// Nothing but `draw` reads it. Two Bims behave identically — that is the
+/// point of the second one — so the only thing that distinguishes them in the
+/// simulation is the index, and the only thing that distinguishes them on the
+/// deck is this.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Look {
+    /// Blue coverall, cropped hair.
+    First,
+    /// Mauve coverall, hair down past the collar.
+    Second,
+}
+
+impl Look {
+    /// The index decides it, so a third of the crew would be a third arm here
+    /// rather than a change anywhere else.
+    pub fn of(who: usize) -> Look {
+        if who % 2 == 0 {
+            Look::First
+        } else {
+            Look::Second
+        }
+    }
+
+    fn shirt(self) -> Color {
+        match self {
+            Look::First => SHIRT,
+            Look::Second => SHIRT_B,
+        }
+    }
+
+    fn sleeve(self) -> Color {
+        match self {
+            Look::First => SLEEVE,
+            Look::Second => SLEEVE_B,
+        }
+    }
+
+    fn hair(self) -> Color {
+        match self {
+            Look::First => HAIR,
+            Look::Second => HAIR_B,
+        }
+    }
+
+    /// How far the hair reaches past the head, seen from above. Nothing for
+    /// the cropped one; a fall down the back for the other, which is the one
+    /// thing that reads as a difference at this scale even in silhouette.
+    fn mane(self) -> f32 {
+        match self {
+            Look::First => 0.0,
+            Look::Second => 1.0,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Activity {
     Walking,
@@ -101,6 +165,8 @@ pub enum Held {
     Slices,
     Knife,
     Spoon,
+    /// The broom, out of its locker.
+    Broom,
     /// A plate or a bowl, carrying how full it is and which it is.
     Plate(f32, Dish),
 }
@@ -124,22 +190,34 @@ pub enum Action {
     /// Hopping on the spot: what a Bim that needs the heads does while it
     /// waits, and the only warning the player gets before an accident.
     Fidget,
+    /// Both hands on a broom, working it across the deck.
+    Sweep,
     /// Doubled over, being sick on the deck.
     Retch,
+    /// Talking to the other one: a hand comes up and drops again, the way one
+    /// does. The *words* are the host's — no strings cross this boundary — so
+    /// all the simulation ever draws is the gesture.
+    Talk,
 }
 
 /// One turn of the hands under the tap.
 const SCRUB_PERIOD: f32 = 0.55;
+/// One stroke of the broom across the deck and back.
+const SWEEP_PERIOD: f32 = 0.9;
 
 /// One hop on the spot, and one heave.
 const HOP_PERIOD: f32 = 0.42;
 const HEAVE_PERIOD: f32 = 0.75;
+/// One rise and fall of the hand while talking.
+const TALK_PERIOD: f32 = 1.1;
 
 /// How long one breath takes while asleep, in seconds.
 const BREATH_PERIOD: f32 = 5.4;
 
 pub struct Character {
     pub pos: Vec2,
+    /// Which of the crew this is to look at. Read by `draw` and nothing else.
+    look: Look,
     /// The direction the body actually faces, in radians.
     pub heading: f32,
     pub speed: f32,
@@ -196,10 +274,11 @@ pub struct Character {
 }
 
 impl Character {
-    pub fn new(pos: Vec2, rng: &mut Rng) -> Character {
+    pub fn new(pos: Vec2, look: Look, rng: &mut Rng) -> Character {
         let heading = rng.range(0.0, TAU);
         let mut c = Character {
             pos,
+            look,
             heading,
             speed: 0.0,
             intent: heading,
@@ -397,6 +476,12 @@ impl Character {
 
     pub fn is_dead(&self) -> bool {
         self.dead
+    }
+
+    /// Sitting or lying: put there by a chain, and not to be shoved about by
+    /// anything outside it.
+    pub fn is_seated(&self) -> bool {
+        self.seated
     }
 
     pub fn set_action(&mut self, action: Action) {
@@ -712,6 +797,20 @@ impl Character {
                     reach: 1.0,
                 }
             }
+            Action::Sweep => {
+                // Both hands on the pole, the head of the broom travelling
+                // side to side across the deck in front. Seen from above that
+                // is the arms swinging together rather than alternately, which
+                // is what tells it apart from a walk.
+                let swing = (p * TAU / SWEEP_PERIOD).sin();
+                Pose {
+                    left: 7.0 + swing * 2.0,
+                    right: 7.0 - swing * 2.0,
+                    tool: vec2(26.0, swing * 16.0),
+                    tool_rot: swing * 0.5,
+                    reach: 1.0,
+                }
+            }
             Action::Sleep => {
                 // Arms in at the sides, lifting a little with each breath.
                 let breath = (p * TAU / BREATH_PERIOD).sin();
@@ -755,6 +854,18 @@ impl Character {
                     tool: vec2(18.0, 8.0),
                     tool_rot: 0.0,
                     reach: 0.8,
+                }
+            }
+            Action::Talk => {
+                // One hand up and down, the other still. Small: it is a
+                // conversation, not a semaphore.
+                let wave = (p * TAU / TALK_PERIOD).sin();
+                Pose {
+                    left: 3.0 + wave * 2.5,
+                    right: 1.0,
+                    tool: vec2(15.0, 12.0),
+                    tool_rot: 0.0,
+                    reach: 0.25 + 0.15 * wave.max(0.0),
                 }
             }
         }
@@ -846,7 +957,12 @@ impl Character {
             _ => 1.0,
         };
         b.ellipse(Vec2::ZERO, vec2(25.0, 33.0) * breath, 0.0, OUTLINE);
-        b.ellipse(Vec2::ZERO, vec2(22.0, 30.0) * breath, 0.0, SHIRT);
+        b.ellipse(
+            Vec2::ZERO,
+            vec2(22.0, 30.0) * breath,
+            0.0,
+            self.look.shirt(),
+        );
 
         // What it has got on itself. Down the front and around the legs, where
         // it would be, and in the same colour as the mess on the deck so the
@@ -880,7 +996,7 @@ impl Character {
         for (side, forward) in [(-1.0f32, pose.left), (1.0f32, pose.right)] {
             let at = vec2(forward - 1.0, 13.5 * side);
             b.ellipse(at, vec2(11.5, 11.5), 0.0, OUTLINE);
-            b.ellipse(at, vec2(9.5, 9.5), 0.0, SLEEVE);
+            b.ellipse(at, vec2(9.5, 9.5), 0.0, self.look.sleeve());
         }
 
         // Head assembly, pivoting about the neck. Seen from above it is mostly
@@ -890,7 +1006,24 @@ impl Character {
 
         b.ellipse(at(Vec2::ZERO), vec2(15.5, 15.5), 0.0, OUTLINE);
         b.ellipse(at(Vec2::ZERO), vec2(13.5, 13.5), 0.0, SKIN);
-        b.ellipse(at(vec2(-2.0, 0.0)), vec2(11.0, 13.0), look, HAIR);
+        // Hair worn long falls back over the shoulders, which from directly
+        // above is a second ellipse behind the head. Drawn before the crown so
+        // the crown sits on top of it rather than the fall sitting on the face.
+        let mane = self.look.mane();
+        if mane > 0.0 {
+            b.ellipse(
+                at(vec2(-7.5 * mane, 0.0)),
+                vec2(14.0, 17.5) * mane,
+                look,
+                self.look.hair(),
+            );
+        }
+        b.ellipse(
+            at(vec2(-2.0, 0.0)),
+            vec2(11.0, 13.0),
+            look,
+            self.look.hair(),
+        );
         b.ellipse(at(vec2(5.6, 0.0)), vec2(4.0, 3.2), look, NOSE);
 
         self.draw_held(list, pose);
@@ -980,6 +1113,30 @@ impl Character {
             }
             Held::Knife => draw_knife(list, to_world(vec2(20.0, -6.0)), self.heading),
             Held::Spoon => draw_spoon(list, to_world(vec2(20.0, -6.0)), self.heading),
+            Held::Broom => {
+                // Held out in front and across, the way anyone carries one:
+                // the pole running away from the body and the head on the
+                // deck at the far end of it, swinging with the pose.
+                let across = pose.tool.y * 0.5;
+                let grip = to_world(vec2(13.0, across * 0.3));
+                let head = to_world(vec2(36.0, across));
+                list.line(grip, head, 4.0, BROOM_POLE);
+                list.rect(
+                    head,
+                    vec2(9.0, 30.0),
+                    self.heading + pose.tool_rot,
+                    2.0,
+                    BROOM_HEAD,
+                );
+                // Bristles, splayed the way the stroke is going.
+                list.rect(
+                    head + Vec2::from_angle(self.heading) * 5.0,
+                    vec2(4.0, 26.0),
+                    self.heading + pose.tool_rot,
+                    1.5,
+                    BROOM_POLE.alpha(0.55),
+                );
+            }
         }
 
         let tool_at = to_world(pose.tool);

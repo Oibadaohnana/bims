@@ -9,6 +9,7 @@ use crate::bath::Bath;
 use crate::clock::MINUTES_PER_SECOND;
 use crate::dish::Dishwasher;
 use crate::draw::{Color, DrawList};
+use crate::filth::Filth;
 use crate::hydro::Bay;
 use crate::math::{PI, Rect, TAU, Vec2, clamp, lerp, vec2};
 
@@ -100,6 +101,12 @@ const BLANKET: Color = Color::rgb(0.19, 0.33, 0.47);
 const BLANKET_FOLD: Color = Color::rgb(0.31, 0.51, 0.66);
 const BLANKET_LOW: Color = Color::rgb(0.15, 0.25, 0.37);
 
+/// The broom: a composite pole and a head of stiff grey bristle. Warmer than
+/// anything else aboard except the food, because it is the one tool with a
+/// wooden ancestor.
+pub const BROOM_POLE: Color = Color::rgb(0.55, 0.44, 0.31);
+pub const BROOM_HEAD: Color = Color::rgb(0.72, 0.68, 0.58);
+
 pub const STEEL: Color = Color::rgb(0.78, 0.83, 0.87);
 pub const GRIP: Color = Color::rgb(0.12, 0.14, 0.17);
 
@@ -150,11 +157,125 @@ pub const HIT_TOILET: u32 = 4;
 pub const HIT_DOOR: u32 = 5;
 pub const HIT_DISHWASHER: u32 = 6;
 pub const HIT_HYDRO: u32 = 7;
+pub const HIT_LOCKER: u32 = 8;
+
+/// What is at a point, for the readout that names whatever the pointer is
+/// over.
+///
+/// A separate set from the `HIT_` codes above and deliberately so. Those
+/// answer "what would a click here act on", which is why they are few and why
+/// each rect is expanded a little — a near miss on a handle should still open
+/// the menu. These answer "what is this", which wants the opposite: everything
+/// aboard has a name, including the things no menu hangs off, and pointing a
+/// few pixels beside the pan should say deck rather than toilet.
+pub const SPOT_NOTHING: u32 = 0;
+pub const SPOT_DECK: u32 = 1;
+pub const SPOT_BULKHEAD: u32 = 2;
+pub const SPOT_WORKTOP: u32 = 3;
+pub const SPOT_BOARD: u32 = 4;
+pub const SPOT_FRIDGE: u32 = 5;
+pub const SPOT_HOB: u32 = 6;
+pub const SPOT_DISHWASHER: u32 = 7;
+pub const SPOT_TABLE: u32 = 8;
+pub const SPOT_CHAIR: u32 = 9;
+pub const SPOT_BUNK: u32 = 10;
+pub const SPOT_BAY: u32 = 11;
+pub const SPOT_TOILET: u32 = 12;
+pub const SPOT_BASIN: u32 = 13;
+pub const SPOT_DOOR: u32 = 14;
+pub const SPOT_HEADS_DECK: u32 = 15;
+pub const SPOT_LOCKER: u32 = 16;
+
+/// The chair, which is drawn from a centre and a size rather than kept as a
+/// rect. Written down once here so the readout and `draw_table` agree.
+const CHAIR_SIZE: Vec2 = vec2(62.0, 52.0);
+
+/// How many of each there are. One apiece: a Bim's bed and a Bim's chair are
+/// its own, and nothing hands one over.
+pub const BERTHS: usize = 2;
+pub const SEATS: usize = 2;
 
 /// How far the lower bunk sits down and to the right of the upper one. It is
 /// the only part of it you can see from above, so the whole thing reading as a
 /// bunk bed rather than a bed rests on this.
 const BUNK_DROP: Vec2 = vec2(10.0, 22.0);
+
+/// One bunk, and which side of it the deck is on.
+///
+/// There are two of them and they stand against opposite walls, so everything
+/// about a bed that has a handedness — where the ladder hangs, where the Bim
+/// stands to climb it, which way it turns to face the thing — is read off
+/// `side` rather than written into the drawing twice. `side` is +1 when the
+/// room is to the *right* of the bed (so the bed is against the left wall)
+/// and -1 when it is to the left.
+///
+/// A berth belongs to exactly one Bim. Nothing shares one: two Bims and two
+/// beds, and the pairing never moves.
+pub struct Berth {
+    pub frame: Rect,
+    side: f32,
+    /// 0 with the bed made, 1 with the blanket pulled up over a sleeper.
+    blanket: f32,
+    blanket_target: f32,
+}
+
+impl Berth {
+    fn new(frame: Rect, side: f32) -> Berth {
+        Berth {
+            frame,
+            side,
+            blanket: 0.0,
+            blanket_target: 0.0,
+        }
+    }
+
+    /// The upper bunk: the bed you can actually see, and the one the Bim
+    /// sleeps in. It sits at the top-left of the footprint, with the lower
+    /// bunk showing along the other two sides.
+    fn top_bunk(&self) -> Rect {
+        Rect::from_min_size(self.frame.min, self.frame.size() - BUNK_DROP)
+    }
+
+    /// Where the Bim stands to climb in: beside the ladder, which hangs on
+    /// whichever rail faces the room.
+    fn station(&self) -> Vec2 {
+        let top = self.top_bunk();
+        let rail = if self.side > 0.0 {
+            self.frame.max.x
+        } else {
+            self.frame.min.x
+        };
+        vec2(rail + self.side * 28.0, top.max.y - 34.0)
+    }
+
+    /// Which way the Bim turns to climb in — towards the bed, so it goes up
+    /// the ladder facing it rather than backwards.
+    fn facing(&self) -> f32 {
+        if self.side > 0.0 { PI } else { 0.0 }
+    }
+
+    /// Where the Bim lies once it is up, head towards the pillow. Everything
+    /// else on the bed is placed relative to this, so the head cannot drift
+    /// off the pillow when the bed moves.
+    fn lie_pos(&self) -> Vec2 {
+        let top = self.top_bunk();
+        vec2(top.center().x, top.min.y + 46.0)
+    }
+
+    fn pillow_pos(&self) -> Vec2 {
+        self.lie_pos() + vec2(0.0, -12.0)
+    }
+
+    /// The x the ladder hangs on: the outside of the rail that faces the room.
+    fn ladder_x(&self) -> f32 {
+        let top = self.top_bunk();
+        if self.side > 0.0 {
+            top.max.x - 2.0
+        } else {
+            top.min.x + 2.0
+        }
+    }
+}
 
 /// How long the hob will sit lit with nothing coming up to heat before it
 /// shuts itself off, in game minutes.
@@ -175,12 +296,29 @@ pub struct Room {
     pub board: Rect,
     pub drawer: Rect,
     pub table: Rect,
-    pub chair: Vec2,
-    pub bed: Rect,
+    /// One seat per Bim, on opposite sides of the table. A seat belongs to a
+    /// Bim the same way a berth does, so two of them can sit down to eat
+    /// without one taking the other's chair out from under it.
+    pub chairs: [Vec2; SEATS],
+    /// The two bunks, one per Bim. See [`Berth`].
+    pub beds: [Berth; BERTHS],
     /// The heads, which owns its own walls, door and fittings.
     pub bath: Bath,
     /// The galley dishwasher, which runs on the clock rather than on the Bim.
     pub dishwasher: Dishwasher,
+    /// The state of the deck, tile by tile: what has been spilt on it and
+    /// where. It lives here because the deck *is* the room — and because the
+    /// chains in `task.rs` have to be able to ask where the dirt is, and a
+    /// task is handed the room and nothing else.
+    /// The broom locker: a shallow door set into the port bulkhead, between
+    /// the foot of the first bunk and the hydroponic bay. Not a solid — it is
+    /// *in* the wall, and a body cannot get within its depth of the bulkhead
+    /// anyway, so the nav grid is untouched by it.
+    pub locker: Rect,
+    /// Whether the broom is out of it. Drawn, and nothing else: a broom in a
+    /// Bim's hands is not in the cupboard.
+    pub broom_out: bool,
+    pub filth: Filth,
     /// The hydroponic bay. It lives here because it is furniture — something
     /// to walk round, click on and draw — but the game drives its clock,
     /// because the target it works to is the manager's rather than the
@@ -222,11 +360,9 @@ pub struct Room {
 
     /// Plates in the world, carrying how full they are.
     pub plate_on_counter: Option<f32>,
-    pub plate_on_table: Option<f32>,
-
-    /// 0 with the bed made, 1 with the blanket pulled up over a sleeper.
-    blanket: f32,
-    blanket_target: f32,
+    /// One per seat: two Bims can be at the table at once, and a shared slot
+    /// would have the second one's plate land on top of the first one's.
+    pub plate_on_table: [Option<f32>; SEATS],
 
     /// Free-running clock for bubbling, steam and the burner flicker.
     time: f32,
@@ -249,16 +385,44 @@ impl Room {
         );
 
         let table = Rect::from_center_size(vec2(ROOM_W * 0.5, ROOM_H * 0.68), vec2(184.0, 116.0));
-        let chair = vec2(table.center().x, table.min.y - 30.0);
+        // The broom locker, set into the port bulkhead in the one stretch of
+        // it with nothing against it: below the foot of the first bunk and
+        // above the hydroponic bay. Shallow, because it is a door in a wall
+        // rather than a cupboard standing in the room — which is also why it
+        // is not a solid. A body cannot get within its depth of the bulkhead
+        // in any case, so the pathfinder never needs to know about it.
+        let locker = Rect::from_min_size(vec2(interior.min.x, 400.0), vec2(20.0, 72.0));
 
-        // Against the left wall and clear of the fridge above it, with the
-        // head end towards the top of the room and the ladder at the foot.
-        // This is the footprint of both bunks together, so the Bim cannot
-        // walk through the half of the lower one that sticks out.
-        let bed = Rect::from_min_size(
-            vec2(interior.min.x + 20.0, interior.min.y + 182.0),
-            vec2(84.0, 150.0) + BUNK_DROP,
-        );
+        // One chair each side of the table, facing in. Both sit clear of the
+        // table footprint so a Bim can stand on the spot before sitting down.
+        let chairs = [
+            vec2(table.center().x, table.min.y - 30.0),
+            vec2(table.center().x, table.max.y + 30.0),
+        ];
+
+        // Two bunks against opposite walls, each the footprint of both its
+        // decks together so a Bim cannot walk through the half of the lower
+        // one that sticks out.
+        //
+        // The first is against the left wall, clear of the fridge above it,
+        // head end towards the top of the room and ladder at the foot — where
+        // the only bunk aboard always stood. The second is in the top-right
+        // corner, the one other stretch of wall with nothing on it: the
+        // counter run ends short of it and the heads start well below.
+        let bunk = vec2(84.0, 150.0) + BUNK_DROP;
+        let beds = [
+            Berth::new(
+                Rect::from_min_size(vec2(interior.min.x + 20.0, interior.min.y + 182.0), bunk),
+                1.0,
+            ),
+            Berth::new(
+                Rect::from_min_size(
+                    vec2(interior.max.x - 20.0 - bunk.x, interior.min.y + 96.0),
+                    bunk,
+                ),
+                -1.0,
+            ),
+        ];
 
         Room {
             interior,
@@ -268,8 +432,11 @@ impl Room {
             board,
             drawer,
             table,
-            chair,
-            bed,
+            chairs,
+            beds,
+            locker,
+            broom_out: false,
+            filth: Filth::new(interior),
             bath: Bath::new(interior),
             dishwasher: Dishwasher::new(counter),
             bay: Bay::new(interior),
@@ -291,9 +458,7 @@ impl Room {
             veg: START_VEG,
             tofu: START_TOFU,
             plate_on_counter: None,
-            plate_on_table: None,
-            blanket: 0.0,
-            blanket_target: 0.0,
+            plate_on_table: [None; SEATS],
             time: 0.0,
         }
     }
@@ -320,6 +485,12 @@ impl Room {
 
     pub fn dishwasher_station(&self) -> Vec2 {
         self.station_at(self.dishwasher.face.center().x)
+    }
+
+    /// Where the Bim stands to open the broom locker: on the deck side of it,
+    /// since the locker itself is set into the port bulkhead.
+    pub fn locker_station(&self) -> Vec2 {
+        vec2(self.locker.max.x + STAND_OFF, self.locker.center().y)
     }
 
     /// The thing itself: where the Bim's hand has to end up.
@@ -407,45 +578,66 @@ impl Room {
         vec2(self.stove.min.x - 24.0, self.counter.min.y + 34.0)
     }
 
-    /// The upper bunk: the bed you can actually see, and the one the Bim
-    /// sleeps in. It sits at the top-left of the footprint, with the lower
-    /// bunk showing along the other two sides.
-    fn top_bunk(&self) -> Rect {
-        Rect::from_min_size(self.bed.min, self.bed.size() - BUNK_DROP)
+    /// Berth `who`, clamped, so an index that has wandered cannot panic in the
+    /// middle of a frame.
+    fn berth(&self, who: usize) -> &Berth {
+        &self.beds[who.min(BERTHS - 1)]
     }
 
-    /// Where the Bim stands to climb into the bed: beside the ladder, which
-    /// hangs on the right-hand rail at the foot end.
-    pub fn bed_station(&self) -> Vec2 {
-        vec2(self.bed.max.x + 28.0, self.top_bunk().max.y - 34.0)
+    /// Where Bim `who` stands to climb into its own bed.
+    pub fn bed_station(&self, who: usize) -> Vec2 {
+        self.berth(who).station()
     }
 
-    /// Where the Bim lies once it is up on the top bunk, head towards the
-    /// pillow. Everything else on the bed is placed relative to this, so the
-    /// head cannot drift off the pillow when the bed moves.
-    pub fn bed_lie_pos(&self) -> Vec2 {
-        let top = self.top_bunk();
-        vec2(top.center().x, top.min.y + 46.0)
+    /// Which way it turns to do it.
+    pub fn bed_facing(&self, who: usize) -> f32 {
+        self.berth(who).facing()
     }
 
-    fn pillow_pos(&self) -> Vec2 {
-        self.bed_lie_pos() + vec2(0.0, -12.0)
+    /// Where it lies once it is up there.
+    pub fn bed_lie_pos(&self, who: usize) -> Vec2 {
+        self.berth(who).lie_pos()
     }
 
-    pub fn table_plate_pos(&self) -> Vec2 {
-        vec2(self.table.center().x, self.table.min.y + 34.0)
+    /// Bim `who`'s seat at the table, and which way it faces once it is in it
+    /// — towards the table, which is the opposite way round for the two.
+    pub fn chair_at(&self, seat: usize) -> Vec2 {
+        self.chairs[seat.min(SEATS - 1)]
+    }
+
+    pub fn chair_facing(&self, seat: usize) -> f32 {
+        // The near chair sits above the table and faces down it; the far one
+        // sits below and faces back up.
+        if self.chair_at(seat).y < self.table.center().y {
+            PI * 0.5
+        } else {
+            -PI * 0.5
+        }
+    }
+
+    /// Where that seat's plate goes: in front of it, a little in from the
+    /// table edge, so two diners are not reaching into the same dish.
+    pub fn table_plate_pos(&self, seat: usize) -> Vec2 {
+        let near = self.chair_at(seat).y < self.table.center().y;
+        let y = if near {
+            self.table.min.y + 34.0
+        } else {
+            self.table.max.y - 34.0
+        };
+        vec2(self.table.center().x, y)
     }
 
     /// Everything fixed that the Bim has to walk around. The bathroom door is
     /// not in here: it comes and goes, and the pathfinder handles it
     /// separately through [`Room::closed_door`].
-    pub fn solids(&self) -> [Rect; 8] {
+    pub fn solids(&self) -> [Rect; 9] {
         let [north_left, north_right, west] = self.bath.solids();
         [
             self.counter,
             self.fridge,
             self.table,
-            self.bed,
+            self.beds[0].frame,
+            self.beds[1].frame,
             self.bay.frame,
             north_left,
             north_right,
@@ -467,13 +659,88 @@ impl Room {
             HIT_FRIDGE
         } else if self.dishwasher.face.expand(6.0).contains(p) {
             HIT_DISHWASHER
-        } else if self.bed.expand(4.0).contains(p) {
+        } else if self.beds.iter().any(|b| b.frame.expand(4.0).contains(p)) {
             HIT_BED
         } else if self.bay.frame.expand(6.0).contains(p) {
             HIT_HYDRO
+        } else if self.locker.expand(8.0).contains(p) {
+            HIT_LOCKER
         } else {
             self.bath.hit(p)
         }
+    }
+
+    /// What is at a point, in the `SPOT_` codes. Never `None`: everywhere the
+    /// pointer can be is *something*, even if that something is the hull.
+    ///
+    /// Order matters the same way it does in [`Room::hit`] — the hob and the
+    /// board both sit within the counter run, so they are tested before it —
+    /// and the heads are taken whole, because their bulkheads belong to them
+    /// rather than to the room around them.
+    pub fn spot(&self, p: Vec2) -> u32 {
+        if self.bath.shell.contains(p) {
+            return self.bath.spot(p);
+        }
+        if self.stove.contains(p) {
+            SPOT_HOB
+        } else if self.board.contains(p) {
+            SPOT_BOARD
+        } else if self.fridge.contains(p) {
+            SPOT_FRIDGE
+        } else if self.dishwasher.face.contains(p) {
+            SPOT_DISHWASHER
+        } else if self.counter.contains(p) {
+            SPOT_WORKTOP
+        } else if self.bay.frame.contains(p) {
+            SPOT_BAY
+        } else if self.locker.contains(p) {
+            SPOT_LOCKER
+        } else if self.beds.iter().any(|b| b.frame.contains(p)) {
+            SPOT_BUNK
+        } else if self
+            .chairs
+            .iter()
+            .any(|&c| Rect::from_center_size(c, CHAIR_SIZE).contains(p))
+        {
+            SPOT_CHAIR
+        } else if self.table.contains(p) {
+            SPOT_TABLE
+        } else if self.interior.contains(p) {
+            SPOT_DECK
+        } else if Rect::from_min_size(Vec2::ZERO, vec2(ROOM_W, ROOM_H)).contains(p) {
+            SPOT_BULKHEAD
+        } else {
+            SPOT_NOTHING
+        }
+    }
+
+    /// Where a `SPOT_` code *is*, for ringing it on the deck.
+    ///
+    /// The inverse of [`Room::spot`], and only defined for the things that are
+    /// one object in one place. Deck plating and bulkheads have no single
+    /// rect — they are everywhere the furniture is not — so they have no
+    /// answer here, and a panel that points at one gets nothing rather than a
+    /// ring round the whole room.
+    pub fn spot_rect(&self, spot: u32) -> Option<Rect> {
+        Some(match spot {
+            SPOT_WORKTOP => self.counter,
+            SPOT_BOARD => self.board,
+            SPOT_FRIDGE => self.fridge,
+            SPOT_HOB => self.stove,
+            SPOT_DISHWASHER => self.dishwasher.face,
+            SPOT_TABLE => self.table,
+            // Two of each, and one rect to ring. The first is the answer: a
+            // readout that names "Bunk" is naming the kind of thing, and
+            // ringing both would read as one enormous fixture.
+            SPOT_CHAIR => Rect::from_center_size(self.chairs[0], CHAIR_SIZE),
+            SPOT_BUNK => self.beds[0].frame,
+            SPOT_BAY => self.bay.frame,
+            SPOT_LOCKER => self.locker,
+            SPOT_TOILET => self.bath.toilet,
+            SPOT_BASIN => self.bath.sink,
+            SPOT_DOOR => self.bath.door,
+            _ => return None,
+        })
     }
 
     // --- state the player and the task both drive -----------------------
@@ -512,12 +779,17 @@ impl Room {
         self.pot_contents > 0.0 && self.pot_cooked < 1.0
     }
 
-    /// Pull the blanket up over a sleeper, or make the bed again.
-    pub fn set_bed_occupied(&mut self, occupied: bool) {
-        self.blanket_target = if occupied { 1.0 } else { 0.0 };
+    /// Pull one bed's blanket up over a sleeper, or make it again.
+    pub fn set_bed_occupied(&mut self, who: usize, occupied: bool) {
+        self.beds[who.min(BERTHS - 1)].blanket_target = if occupied { 1.0 } else { 0.0 };
     }
 
     /// Clear the worktop so a fresh cook does not inherit the last one's mess.
+    ///
+    /// The table is *not* cleared here. Only one Bim is ever in the galley at
+    /// a time — see `Game::galley_taken` — but the other may well be sitting
+    /// at the table eating what it cooked twenty minutes ago, and wiping the
+    /// plate out from under it would be the cook reaching across the room.
     pub fn reset_for_cooking(&mut self, dish: Dish) {
         self.board_veg = 0.0;
         self.board_slices = 0;
@@ -525,7 +797,6 @@ impl Room {
         self.board_tofu = dish == Dish::Bowl;
         self.dish = dish;
         self.plate_on_counter = None;
-        self.plate_on_table = None;
     }
 
     /// One trip to the fridge for `dish`, taking what that trip carries: a
@@ -574,7 +845,9 @@ impl Room {
         self.drawer_open += clamp(self.drawer_target - self.drawer_open, -step, step);
         // Slower than a drawer: a blanket is drawn up, not snapped.
         let pull = dt * 1.2;
-        self.blanket += clamp(self.blanket_target - self.blanket, -pull, pull);
+        for bed in &mut self.beds {
+            bed.blanket += clamp(bed.blanket_target - bed.blanket, -pull, pull);
+        }
 
         let want = if self.stove_on { 1.0 } else { 0.0 };
         // Heating up is slower than cooling down, as a real hob is.
@@ -607,7 +880,10 @@ impl Room {
         self.draw_stove(list);
         self.draw_fridge(list);
         self.draw_table(list);
-        self.draw_bunk(list);
+        self.draw_locker(list);
+        for bed in &self.beds {
+            self.draw_bunk(list, bed);
+        }
         self.bay.draw(list);
         self.bath.draw(list);
     }
@@ -618,7 +894,13 @@ impl Room {
     /// Drawn after the character, so climbing into bed actually puts the Bim
     /// under the covers.
     pub fn draw_over(&self, list: &mut DrawList) {
-        let top = self.top_bunk();
+        for bed in &self.beds {
+            self.draw_bedding_over(list, bed);
+        }
+    }
+
+    fn draw_bedding_over(&self, list: &mut DrawList, bed: &Berth) {
+        let top = bed.top_bunk();
         // The duvet reaches from just below the pillow to the foot of the
         // mattress whether the bed is made or slept in — pulled up to the chin
         // is where it ends up either way. What changes is the shape of it.
@@ -643,13 +925,13 @@ impl Room {
         );
         // The shape of whoever is under it, rising and falling as they
         // breathe. On an empty bed this fades away to nothing.
-        if self.blanket > 0.01 {
+        if bed.blanket > 0.01 {
             let breath = 1.0 + 0.03 * (self.time * 1.1).sin();
             list.ellipse(
                 vec2(top.center().x, head + 36.0),
                 vec2(46.0, 74.0 * breath),
                 0.0,
-                BLANKET_FOLD.alpha(0.33 * self.blanket),
+                BLANKET_FOLD.alpha(0.33 * bed.blanket),
             );
         }
         // Creases running down towards the foot.
@@ -678,7 +960,7 @@ impl Room {
             );
         }
 
-        self.draw_ladder(list);
+        self.draw_ladder(list, bed);
 
         // Corner posts, carrying on past the upper bunk towards the ceiling.
         // Seen from directly above they are the ends of four uprights.
@@ -701,8 +983,8 @@ impl Room {
     /// that the upper bunk covers the lower one almost completely, so the bed
     /// underneath is set down and to the right by `BUNK_DROP` and what you see
     /// of it is the band of mattress and bedding along two sides.
-    fn draw_bunk(&self, list: &mut DrawList) {
-        let top = self.top_bunk();
+    fn draw_bunk(&self, list: &mut DrawList, bed: &Berth) {
+        let top = bed.top_bunk();
         let low = Rect::from_min_size(top.min + BUNK_DROP, top.size());
 
         // The bed underneath, made up in its own bedding so the strip that
@@ -771,7 +1053,7 @@ impl Room {
 
         // Pillow at the head end, placed off the lying position so the Bim's
         // head always lands on it.
-        let pillow = self.pillow_pos();
+        let pillow = bed.pillow_pos();
         list.rect(pillow, vec2(top.width() - 34.0, 34.0), 0.0, 9.0, PILLOW);
         list.line(
             pillow + vec2(0.0, -12.0),
@@ -783,9 +1065,9 @@ impl Room {
 
     /// The ladder, hooked over the right-hand rail at the foot end — which is
     /// where the Bim stands when it climbs up.
-    fn draw_ladder(&self, list: &mut DrawList) {
-        let top = self.top_bunk();
-        let x = top.max.x - 2.0;
+    fn draw_ladder(&self, list: &mut DrawList, bed: &Berth) {
+        let top = bed.top_bunk();
+        let x = bed.ladder_x();
         let (head, foot) = (top.max.y - 66.0, top.max.y - 6.0);
         for side in [-1.0f32, 1.0] {
             list.rect(
@@ -1151,20 +1433,78 @@ impl Room {
         list.circle(hinge + dir * (len - 9.0), 8.0, HANDLE);
     }
 
-    fn draw_table(&self, list: &mut DrawList) {
-        // Chair first: the Bim sits on top of it, so it has to be wide enough
-        // that a seated Bim does not overhang the sides.
-        let ch = self.chair;
-        list.rect(ch, vec2(62.0, 52.0), 0.0, 9.0, CHAIR);
-        list.stroke_rect(ch, vec2(52.0, 42.0), 0.0, 7.0, 1.5, GLOW.alpha(0.28));
-        list.rect(ch - vec2(0.0, 24.0), vec2(64.0, 10.0), 0.0, 4.0, TABLE_EDGE);
+    /// The broom locker: a shallow door in the port bulkhead, with the head of
+    /// the broom showing through the vent when it is stowed and an empty
+    /// recess when it is out. Whether the Bim has it is the whole of what the
+    /// door says, which is as much as a cupboard seen from above can carry.
+    fn draw_locker(&self, list: &mut DrawList) {
+        let l = self.locker;
+        list.rect(l.center(), l.size(), 0.0, 3.0, PANEL);
+        list.stroke_rect(l.center(), l.size(), 0.0, 3.0, 1.5, PANEL_EDGE);
+        // A louvred vent down the door, which is what makes it a cupboard
+        // rather than a panel.
+        for i in 0..4 {
+            let y = lerp(l.min.y + 14.0, l.max.y - 14.0, i as f32 / 3.0);
+            list.rect(
+                vec2(l.center().x, y),
+                vec2(l.width() - 9.0, 2.0),
+                0.0,
+                1.0,
+                PANEL_EDGE.alpha(0.55),
+            );
+        }
+        // The broom behind it, or the dark of an empty cupboard.
+        if self.broom_out {
+            list.rect(
+                l.center(),
+                vec2(l.width() - 11.0, l.height() - 26.0),
+                0.0,
+                2.0,
+                HULL,
+            );
+        } else {
+            list.rect(
+                vec2(l.center().x, l.center().y),
+                vec2(3.5, l.height() - 24.0),
+                0.0,
+                1.5,
+                BROOM_POLE,
+            );
+            list.rect(
+                vec2(l.center().x, l.max.y - 17.0),
+                vec2(l.width() - 8.0, 12.0),
+                0.0,
+                2.0,
+                BROOM_HEAD,
+            );
+        }
+        // The handle, on the deck side.
         list.rect(
-            ch - vec2(0.0, 24.0),
-            vec2(40.0, 2.0),
+            vec2(l.max.x - 3.0, l.center().y),
+            vec2(2.5, 18.0),
             0.0,
             1.0,
-            GLOW.alpha(0.5),
+            HANDLE,
         );
+    }
+
+    fn draw_table(&self, list: &mut DrawList) {
+        // Chairs first: a Bim sits on top of one, so each has to be wide
+        // enough that a seated Bim does not overhang the sides. The backrest
+        // goes on the side away from the table, which is opposite ways round
+        // for the two of them.
+        for &ch in &self.chairs {
+            let back = if ch.y < self.table.center().y {
+                -1.0
+            } else {
+                1.0
+            };
+            let spine = ch + vec2(0.0, back * 24.0);
+            list.rect(ch, CHAIR_SIZE, 0.0, 9.0, CHAIR);
+            list.stroke_rect(ch, vec2(52.0, 42.0), 0.0, 7.0, 1.5, GLOW.alpha(0.28));
+            list.rect(spine, vec2(64.0, 10.0), 0.0, 4.0, TABLE_EDGE);
+            list.rect(spine, vec2(40.0, 2.0), 0.0, 1.0, GLOW.alpha(0.5));
+        }
 
         let t = self.table;
         list.rect(t.center(), t.size(), 0.0, 14.0, TABLE_EDGE);
@@ -1186,16 +1526,13 @@ impl Room {
             PANEL_EDGE.alpha(0.5),
         );
 
-        if let Some(fill) = self.plate_on_table {
-            draw_plate(
-                list,
-                self.table_plate_pos(),
-                fill,
-                self.pot_cooked,
-                self.dish,
-            );
+        for seat in 0..SEATS {
+            let Some(fill) = self.plate_on_table[seat] else {
+                continue;
+            };
+            let p = self.table_plate_pos(seat);
+            draw_plate(list, p, fill, self.pot_cooked, self.dish);
             // Cutlery laid either side of the plate.
-            let p = self.table_plate_pos();
             list.rect(p + vec2(-27.0, 0.0), vec2(4.0, 26.0), 0.0, 2.0, STEEL);
             list.rect(p + vec2(27.0, 0.0), vec2(4.0, 26.0), 0.0, 2.0, STEEL);
         }

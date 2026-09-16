@@ -1,0 +1,12 @@
+# The ship physics contract: what a ship weighs, what its engines do to it,
+# and how long a trip takes. Pure arithmetic and data — no ECS, no buildables,
+# no rendering — because the world generator needs it now to validate layouts
+# and the builder and the flight step will need the same answers later.
+[package]
+name = "physics"
+version = "0.1.0"
+edition = "2024"
+description = "Ship mass, engine thrust and travel time — pure functions over plain data"
+
+[dependencies]
+time = { path = "../time" }

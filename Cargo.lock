@@ -5,3 +5,25 @@ version = 4
 [[package]]
 name = "bims"
 version = "0.1.0"
+dependencies = [
+ "time",
+]
+
+[[package]]
+name = "physics"
+version = "0.1.0"
+dependencies = [
+ "time",
+]
+
+[[package]]
+name = "time"
+version = "0.1.0"
+
+[[package]]
+name = "worldgen"
+version = "0.1.0"
+dependencies = [
+ "physics",
+ "time",
+]

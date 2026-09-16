@@ -1,0 +1,8 @@
+# The one definition of how long a minute, an hour and a day are. Kept apart
+# from the game so the worldgen crate — which a native server will run — can
+# have it without dragging a cdylib's worth of simulation along.
+[package]
+name = "time"
+version = "0.1.0"
+edition = "2024"
+description = "The game's base time unit and day length, defined once"

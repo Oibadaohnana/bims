@@ -7,6 +7,7 @@ pkgs.mkShell {
     cargo
     lld        # nixpkgs rustc links wasm through the system lld
     rustfmt
-    python3    # only used by ./serve.sh
+    python3    # ./run and ./serve.sh
+    nodejs     # the harnesses in scratchpad/ — node --check, the stub DOM
   ];
 }

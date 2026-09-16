@@ -1,0 +1,13 @@
+# The world: a galaxy of stars, what is in each system, and the station
+# blueprints a later map-generation step will build interiors from. Shared
+# between the client — compiled to wasm — and the native server that will one
+# day be authoritative, so the same seed gives both the same world.
+[package]
+name = "worldgen"
+version = "0.1.0"
+edition = "2024"
+description = "Seeded galaxy, system contents and station blueprints"
+
+[dependencies]
+physics = { path = "../physics" }
+time = { path = "../time" }

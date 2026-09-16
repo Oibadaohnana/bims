@@ -96,7 +96,10 @@ pub struct Bay {
     trays: [Rect; SPOTS],
     spots: [Option<Plant>; SPOTS],
 
-    /// Whether the bay is following the manager's target at all.
+    /// Whether the bay is following the manager's target at all. On from the
+    /// start: a bay that has to be switched on is a bay that is off when the
+    /// player has not noticed it, and the target it works to is met at dawn
+    /// anyway, so it sits quietly until the store dips.
     automated: bool,
     /// A standing order from the player: fill every tray with this, target or
     /// no target. It overrides the demand and hibernation both — "plant this,
@@ -135,7 +138,7 @@ impl Bay {
             frame,
             trays,
             spots: [None; SPOTS],
-            automated: false,
+            automated: true,
             forced: None,
             hibernating: false,
             want: (0, 0),

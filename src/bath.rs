@@ -192,6 +192,24 @@ impl Bath {
         }
     }
 
+    /// What is at a point inside the compartment, for the readout. Unlike
+    /// [`Bath::hit`] this names everything rather than only the two things
+    /// worth a menu, and it never expands a rect: pointing at a tile of deck
+    /// beside the pan should say deck, not toilet.
+    pub fn spot(&self, p: Vec2) -> u32 {
+        if self.toilet.contains(p) {
+            crate::room::SPOT_TOILET
+        } else if self.sink.contains(p) {
+            crate::room::SPOT_BASIN
+        } else if self.door.contains(p) {
+            crate::room::SPOT_DOOR
+        } else if self.inner.contains(p) {
+            crate::room::SPOT_HEADS_DECK
+        } else {
+            crate::room::SPOT_BULKHEAD
+        }
+    }
+
     pub fn update(&mut self, dt: f32) {
         self.time += dt;
         let step = DOOR_RATE * dt;

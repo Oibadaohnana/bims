@@ -1,10 +1,18 @@
 //! Mess: what is on the deck, what is on the Bim, and what that does to it.
 //!
-//! The deck is scored tile by tile. A tile starts at [`BASELINE`] and only ever
-//! goes down — nothing cleans up yet — with an accident taking one straight to
-//! [`FOULED`], the worst there is. The Bim carries its own share of it around
-//! separately, because a Bim that soils itself takes the mess with it when it
-//! walks away.
+//! The deck is scored tile by tile. A tile starts at [`BASELINE`] and goes down
+//! as things happen on it, with an accident taking one straight to [`FOULED`],
+//! the worst there is. A broom is the one thing that puts it back — see
+//! [`Filth::sweep`], and the chain behind it in `task.rs`. The Bim carries its
+//! own share of it around separately, because a Bim that soils itself takes the
+//! mess with it when it walks away, and no broom reaches that.
+//!
+//! Mess spreads, by two routes. The dirty jobs — cooking, planting, lifting a
+//! crop — flick something onto the deck around the Bim as each step of them
+//! finishes ([`Filth::spatter`]). And boots carry what is already down from
+//! one tile to the next ([`Filth::track`]): a quarter of the crossings move a
+//! quarter of the tile, so a trail thins fast and dies out rather than
+//! working its way across the ship.
 //!
 //! The cleanliness *need* is not a clock like hunger. It follows two things at
 //! once: the average of the tiles within [`REACH`] of where the Bim is standing,
@@ -55,6 +63,43 @@ const OWN_GRIND: f32 = GRIND * 5.0;
 /// Clean surroundings and clean hands put it back, four hours to full. Nothing
 /// scrubs the Bim itself yet, so this only runs once it is clean again.
 const FRESHEN: f32 = 1.0 / (4.0 * 60.0);
+
+/// How far below spotless a tile has to be before it is worth getting the
+/// broom out. Small: the only things that mark the deck take it a long way
+/// down, so in practice this separates "somebody was sick here" from
+/// "nothing has happened here" rather than grading dirt.
+const WORTH_SWEEPING: f32 = 1.0;
+
+/// What a dirty job flicks onto a tile beside it, and how often a finished
+/// step of one does it at all.
+///
+/// Well short of an accident: a single spatter reads as a stain rather than a
+/// ruined tile, and it takes a good many of them in one place before the
+/// cleanliness need takes any notice. It is comfortably past
+/// [`WORTH_SWEEPING`], though, so the broom has something to come out for —
+/// the galley and the bay go grubby on their own now, which is the first
+/// mess aboard that nobody had an accident to make.
+const GRIME_COST: f32 = 14.0;
+pub const JOB_MESSES: f32 = 0.35;
+
+/// Walking it about. A boot crossing a dirty tile has [`SPREAD_CHANCE`] of
+/// taking [`SPREAD_SHARE`] of what is on it onto the tile it steps to.
+///
+/// The dirt *moves*: the tile behind loses exactly what the tile ahead gains.
+/// Copying it would let a Bim pacing the galley multiply the deck's filth
+/// without limit; moving it means a trail thins as it lengthens — a quarter,
+/// then a sixteenth — and falls under [`WORTH_SWEEPING`] on its own after
+/// three or four steps, which is what stops a single accident eventually
+/// reaching every tile aboard.
+const SPREAD_CHANCE: f32 = 0.25;
+const SPREAD_SHARE: f32 = 0.25;
+
+/// How much a pixel of walking counts against a tile when choosing which to
+/// sweep next, in units of the 0-to-1 dirt score. At this rate the width of
+/// the compartment is worth about a third of a tile's filthiness — enough
+/// that the Bim works outwards from where it is standing rather than crossing
+/// the room for the single worst tile every time.
+const DISTANCE_TELLS: f32 = 0.0004;
 
 /// Game minutes at the extreme urge before the Bim stops holding it.
 const HOLDS_FOR: f32 = HOUR;
@@ -125,6 +170,39 @@ impl Discomfort {
     }
 }
 
+/// What is on a tile, as against how bad it is.
+///
+/// The score is one number and always will be: everything the simulation does
+/// with a tile — the average around the Bim, how fast that grinds it down,
+/// which way it walks to get clear — reads that number and nothing else. But a
+/// player pointing at a tile is asking a different question, and "-65" is no
+/// answer to it. So the worst thing that has landed on each tile is remembered
+/// beside the score, for the readout and for nothing else.
+///
+/// They are ordered worst-last on purpose, because a tile keeps the worst it
+/// has had rather than the latest: [`Filth::soil`] takes the greater of the
+/// two, so grime tracked over a fouled tile does not talk it back down to
+/// grime.
+///
+/// [`Mess::Grime`] is the one that is not an accident. Cooking, planting and
+/// lifting all flick something onto the deck around them, and boots carry it
+/// on from there — see [`Filth::spatter`] and [`Filth::track`].
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Mess {
+    None,
+    Grime,
+    Wet,
+    Soiled,
+    Sick,
+}
+
+impl Mess {
+    /// 0 clean, then one per kind. The host names them.
+    pub fn code(self) -> u32 {
+        self as u32
+    }
+}
+
 /// What a mess did this frame. The game applies these — it is the only thing
 /// that knows where the Bim is standing and what its needs are.
 #[derive(Default, Clone, Copy)]
@@ -137,19 +215,118 @@ pub struct Mishap {
     pub sick: bool,
 }
 
-pub struct Filth {
-    cols: usize,
-    rows: usize,
-    origin: Vec2,
-    /// One score per tile, [`FOULED`] to [`BASELINE`].
-    tiles: Vec<f32>,
-
+/// How long *one Bim* has been going without, and what that is about to cost
+/// it.
+///
+/// These are clocks on a body, not on the deck, and keeping them apart from
+/// [`Filth`] matters: the deck is shared and there is one of it, while every
+/// Bim holds on for its own hour and stands in the mess for its own two. They
+/// lived on `Filth` when there was one Bim aboard and it made no difference.
+/// With two it made every difference — `Filth::update` ran once per crew
+/// member per frame on the same object, so whichever Bim was comfortable
+/// zeroed the other's clock on the way past and the hour was never reached.
+/// Nobody ever had an accident, and nobody was ever sick.
+pub struct Ordeal {
     /// Game minutes the restroom need has been at nothing, and the same for
     /// the cleanliness need. Both start the clock the moment they empty.
     bursting_for: f32,
     filthy_for: f32,
     /// Game minutes since the last bout of sickness.
     since_sick: f32,
+}
+
+impl Ordeal {
+    pub fn new() -> Ordeal {
+        Ordeal {
+            bursting_for: 0.0,
+            filthy_for: 0.0,
+            since_sick: 0.0,
+        }
+    }
+
+    /// Run the clocks and say what, if anything, happened.
+    ///
+    /// `restroom` and `cleanliness` are this Bim's two levels as they stand.
+    /// Both clocks are held at nothing while their need is not empty, so
+    /// seeing to either one puts the Bim back to the beginning of it.
+    pub fn update(
+        &mut self,
+        minutes: f32,
+        restroom: f32,
+        cleanliness: f32,
+        urge_extreme: bool,
+        urge_medium: bool,
+        rng: &mut Rng,
+    ) -> Mishap {
+        let mut out = Mishap::default();
+
+        // The heads, or the deck. Holding on is a matter of how long it has
+        // been at nothing rather than of the level, which cannot go lower.
+        if urge_extreme {
+            self.bursting_for += minutes;
+            if self.bursting_for >= HOLDS_FOR {
+                self.bursting_for = 0.0;
+                out.fouled = true;
+            }
+        } else {
+            self.bursting_for = 0.0;
+            // One in ten an hour, at the middle urge: not every trip that is
+            // left too late ends badly, but enough of them do.
+            if urge_medium && rng.chance(minutes / HOUR * WETS_PER_HOUR) {
+                out.wet = true;
+            }
+        }
+        let _ = restroom;
+
+        // Standing in it. The three stages are an hour apart, and the clock
+        // only runs while the need is at nothing.
+        if cleanliness <= 0.0 {
+            self.filthy_for += minutes;
+        } else {
+            self.filthy_for = 0.0;
+            self.since_sick = 0.0;
+        }
+        if self.discomfort().sickens() {
+            self.since_sick += minutes;
+            if self.since_sick >= SICK_EVERY {
+                self.since_sick = 0.0;
+                out.sick = true;
+            }
+        }
+
+        out
+    }
+
+    pub fn discomfort(&self) -> Discomfort {
+        if self.filthy_for <= 0.0 {
+            Discomfort::None
+        } else if self.filthy_for < HOUR {
+            Discomfort::Mild
+        } else if self.filthy_for < 2.0 * HOUR {
+            Discomfort::Uncomfortable
+        } else {
+            Discomfort::Extreme
+        }
+    }
+
+    /// Game minutes this Bim has been holding on at the extreme urge. For the
+    /// probes, which need to see the clock actually running rather than infer
+    /// it from an accident that may be an hour off.
+    #[allow(dead_code)]
+    pub fn bursting_for(&self) -> f32 {
+        self.bursting_for
+    }
+}
+
+pub struct Filth {
+    cols: usize,
+    rows: usize,
+    origin: Vec2,
+    /// One score per tile, [`FOULED`] to [`BASELINE`].
+    tiles: Vec<f32>,
+    /// The worst thing that has landed on each tile, beside its score. Nothing
+    /// in the simulation reads this — see [`Mess`].
+    kinds: Vec<Mess>,
 }
 
 impl Filth {
@@ -161,9 +338,7 @@ impl Filth {
             rows,
             origin: interior.min,
             tiles: vec![BASELINE; cols * rows],
-            bursting_for: 0.0,
-            filthy_for: 0.0,
-            since_sick: 0.0,
+            kinds: vec![Mess::None; cols * rows],
         }
     }
 
@@ -194,12 +369,164 @@ impl Filth {
         self.index(c, r).map_or(BASELINE, |i| self.tiles[i])
     }
 
-    /// Take `cost` off the tile under `at`, never past the worst there is.
-    pub fn soil(&mut self, at: Vec2, cost: f32) {
+    /// What is on the tile under `at`. Only the readout asks.
+    pub fn kind_at(&self, at: Vec2) -> Mess {
+        let (c, r) = self.cell(at);
+        self.index(c, r).map_or(Mess::None, |i| self.kinds[i])
+    }
+
+    /// How far down the tile under `at` has been taken, 0 clean to 1 fouled.
+    /// The score said as a fraction, which is what a readout wants.
+    pub fn depth_at(&self, at: Vec2) -> f32 {
+        ((BASELINE - self.at(at)) / (BASELINE - FOULED)).clamp(0.0, 1.0)
+    }
+
+    /// Put one tile back the way it was.
+    ///
+    /// All the way, in one go: a tile is swept or it is not, and a broom that
+    /// left a tile half fouled would mean the Bim coming back to the same spot
+    /// over and over while the need it is trying to mend barely moves. The
+    /// *time* it takes is the chain's business — see `Step::Sweep` — not a
+    /// matter of chipping away at the score.
+    ///
+    /// The kind goes with it. A tile that has been swept has nothing on it, so
+    /// the readout must not still be calling it vomit.
+    pub fn sweep(&mut self, at: Vec2) {
+        let (c, r) = self.cell(at);
+        if let Some(i) = self.index(c, r) {
+            self.tiles[i] = BASELINE;
+            self.kinds[i] = Mess::None;
+        }
+    }
+
+    /// The tile most worth sweeping from where the Bim is standing, or `None`
+    /// when there is nothing it can get to.
+    ///
+    /// Worst first, but not *only* worst: a tile twice as bad on the far side
+    /// of the compartment is not worth the walk when there is one underfoot,
+    /// so distance counts against a tile at a rate that lets a merely grubby
+    /// one nearby win over a fouled one a room away.
+    ///
+    /// `can_get_to` is what keeps the whole errand from spinning. Some of the
+    /// deck is deck and still out of reach — the corner past the end of the
+    /// counter, hemmed in by the bunk — and a mess there would be picked as
+    /// the worst tile for ever, with the Bim fetching the broom, failing the
+    /// walk, giving up and starting again. `Filth` has no idea where a body
+    /// fits, so the question is asked of whoever does.
+    pub fn worst_tile(&self, from: Vec2, can_get_to: impl Fn(Vec2) -> bool) -> Option<Vec2> {
+        let mut best: Option<(f32, Vec2)> = None;
+        for r in 0..self.rows as i32 {
+            for c in 0..self.cols as i32 {
+                let Some(i) = self.index(c, r) else { continue };
+                if self.tiles[i] >= BASELINE - WORTH_SWEEPING {
+                    continue;
+                }
+                let at = self.centre(c, r);
+                let dirt = (BASELINE - self.tiles[i]) / (BASELINE - FOULED);
+                let away = (at - from).len();
+                let score = dirt - away * DISTANCE_TELLS;
+                if best.is_some_and(|(had, _)| score <= had) {
+                    continue;
+                }
+                // Asked last, because it is the expensive one.
+                if can_get_to(at) {
+                    best = Some((score, at));
+                }
+            }
+        }
+        best.map(|(_, at)| at)
+    }
+
+    /// How many tiles are dirty enough to be worth a broom.
+    pub fn dirty_tiles(&self) -> u32 {
+        self.tiles
+            .iter()
+            .filter(|&&t| t < BASELINE - WORTH_SWEEPING)
+            .count() as u32
+    }
+
+    /// Take `cost` off the tile under `at`, never past the worst there is, and
+    /// remember what did it.
+    ///
+    /// A tile keeps the worst it has had rather than the latest: being sick on
+    /// one already wet does not make it a wet one, and the score has gone to
+    /// the bottom of the scale either way.
+    pub fn soil(&mut self, at: Vec2, cost: f32, what: Mess) {
         let (c, r) = self.cell(at);
         if let Some(i) = self.index(c, r) {
             self.tiles[i] = (self.tiles[i] - cost).max(FOULED);
+            self.kinds[i] = self.kinds[i].max(what);
         }
+    }
+
+    /// Flick something onto one of the nine tiles around `at`.
+    ///
+    /// The *job* is dirty, not one exact spot, so what lands goes on a tile
+    /// picked out of the block around the Bim rather than always underfoot: a
+    /// week of cooking spreads a patch across the galley instead of wearing
+    /// one hole in the deck in front of the stove.
+    ///
+    /// `can_get_to` is the same question [`Filth::worst_tile`] asks, and it is
+    /// here for the same reason. Parts of the deck are deck and still out of
+    /// reach — under the lip of the counter, the corner past the bunk — and a
+    /// stain flicked into one of those is a stain the broom never gets to and
+    /// the deck keeps for good. Nothing is put anywhere a body cannot go.
+    ///
+    /// Says whether anything landed, which is all a probe needs.
+    pub fn spatter(&mut self, at: Vec2, rng: &mut Rng, can_get_to: impl Fn(Vec2) -> bool) -> bool {
+        let (c0, r0) = self.cell(at);
+        let mut choices = [vec2(0.0, 0.0); 9];
+        let mut found = 0;
+        for dr in -1..=1 {
+            for dc in -1..=1 {
+                if self.index(c0 + dc, r0 + dr).is_none() {
+                    continue;
+                }
+                let tile = self.centre(c0 + dc, r0 + dr);
+                if !can_get_to(tile) {
+                    continue;
+                }
+                choices[found] = tile;
+                found += 1;
+            }
+        }
+        if found == 0 {
+            return false;
+        }
+        let tile = choices[rng.below(found as u32) as usize];
+        self.soil(tile, GRIME_COST, Mess::Grime);
+        true
+    }
+
+    /// Walk dirt from the tile a Bim was on onto the tile it has stepped to.
+    ///
+    /// Handed where a body was at the top of the frame and where it is now.
+    /// Nothing happens at all unless that step crossed a tile boundary *and*
+    /// the tile behind had something on it worth carrying — which is what
+    /// keeps a clean deck from drawing anything from `rng`, and a clean deck
+    /// is what most of the probes run on.
+    ///
+    /// What comes with it is a share of the score and the name that goes with
+    /// it: a boot out of a fouled tile leaves a smear of the same thing, not
+    /// a fresh kind of mess.
+    pub fn track(&mut self, from: Vec2, to: Vec2, rng: &mut Rng) -> bool {
+        let (fc, fr) = self.cell(from);
+        let (tc, tr) = self.cell(to);
+        if (fc, fr) == (tc, tr) {
+            return false;
+        }
+        let (Some(behind), Some(ahead)) = (self.index(fc, fr), self.index(tc, tr)) else {
+            return false;
+        };
+        let dirt = BASELINE - self.tiles[behind];
+        if dirt < WORTH_SWEEPING || !rng.chance(SPREAD_CHANCE) {
+            return false;
+        }
+        let moved = dirt * SPREAD_SHARE;
+        self.tiles[behind] += moved;
+        self.tiles[ahead] = (self.tiles[ahead] - moved).max(FOULED);
+        self.kinds[ahead] = self.kinds[ahead].max(self.kinds[behind]);
+        true
     }
 
     /// The average score of the tiles within `REACH` of `at`, the block clipped
@@ -285,82 +612,17 @@ impl Filth {
         }
     }
 
-    /// Run the clocks and say what, if anything, happened.
-    ///
-    /// `restroom` and `cleanliness` are the two levels as they stand. Both
-    /// clocks are held at nothing while their need is not empty, so seeing to
-    /// either one puts the Bim back to the beginning of it.
-    pub fn update(
-        &mut self,
-        minutes: f32,
-        restroom: f32,
-        cleanliness: f32,
-        urge_extreme: bool,
-        urge_medium: bool,
-        rng: &mut Rng,
-    ) -> Mishap {
-        let mut out = Mishap::default();
-
-        // The heads, or the deck. Holding on is a matter of how long it has
-        // been at nothing rather than of the level, which cannot go lower.
-        if urge_extreme {
-            self.bursting_for += minutes;
-            if self.bursting_for >= HOLDS_FOR {
-                self.bursting_for = 0.0;
-                out.fouled = true;
-            }
-        } else {
-            self.bursting_for = 0.0;
-            // One in ten an hour, at the middle urge: not every trip that is
-            // left too late ends badly, but enough of them do.
-            if urge_medium && rng.chance(minutes / HOUR * WETS_PER_HOUR) {
-                out.wet = true;
-            }
-        }
-        let _ = restroom;
-
-        // Standing in it. The three stages are an hour apart, and the clock
-        // only runs while the need is at nothing.
-        if cleanliness <= 0.0 {
-            self.filthy_for += minutes;
-        } else {
-            self.filthy_for = 0.0;
-            self.since_sick = 0.0;
-        }
-        if self.discomfort().sickens() {
-            self.since_sick += minutes;
-            if self.since_sick >= SICK_EVERY {
-                self.since_sick = 0.0;
-                out.sick = true;
-            }
-        }
-
-        out
-    }
-
-    pub fn discomfort(&self) -> Discomfort {
-        if self.filthy_for <= 0.0 {
-            Discomfort::None
-        } else if self.filthy_for < HOUR {
-            Discomfort::Mild
-        } else if self.filthy_for < 2.0 * HOUR {
-            Discomfort::Uncomfortable
-        } else {
-            Discomfort::Extreme
-        }
-    }
-
     // --- what each mishap costs ------------------------------------------
 
     /// Wetting itself: the tile, the Bim, and what it puts the need back to.
     pub fn wet(&mut self, at: Vec2) -> (f32, f32) {
-        self.soil(at, WET_COST);
+        self.soil(at, WET_COST, Mess::Wet);
         (WET_ON_BIM, WET_RELIEF)
     }
 
     /// The worst of it: the tile goes straight to the bottom of the scale.
     pub fn foul(&mut self, at: Vec2) -> (f32, f32) {
-        self.soil(at, RUINED);
+        self.soil(at, RUINED, Mess::Soiled);
         (FOULED_ON_BIM, FOULED_RELIEF)
     }
 
@@ -368,7 +630,7 @@ impl Filth {
     /// the one mess the Bim makes over and over, so a Bim at the worst stage
     /// leaves a trail of fouled tiles behind it as it moves away from each.
     pub fn sick_on(&mut self, at: Vec2) {
-        self.soil(at, RUINED);
+        self.soil(at, RUINED, Mess::Sick);
     }
 
     // --- drawing ----------------------------------------------------------
@@ -382,8 +644,20 @@ impl Filth {
                 if score >= BASELINE {
                     continue;
                 }
-                // Nothing to full, from the baseline down to the worst.
-                let deep = ((BASELINE - score) / (BASELINE - FOULED)).clamp(0.0, 1.0);
+                // Nothing to full, from the baseline down to the worst — and
+                // then square-rooted, which is the difference between seeing
+                // the deck go grubby and not.
+                //
+                // The score is linear and has to stay that way; what a stain
+                // *looks* like is another question. A dirty job takes 14 off a
+                // tile out of a possible 110, and at a flat eighth of the
+                // alpha a fouled tile gets, that is a shade nobody can see
+                // against the deck. The curve keeps the order — a fouled tile
+                // is still much darker than a smear — while giving the faint
+                // end of the range somewhere to be.
+                let deep = ((BASELINE - score) / (BASELINE - FOULED))
+                    .clamp(0.0, 1.0)
+                    .sqrt();
                 let at = self.centre(c, r);
                 list.rect(
                     at,

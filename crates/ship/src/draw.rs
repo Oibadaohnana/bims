@@ -62,6 +62,36 @@ impl DrawList {
         self.data.as_ptr()
     }
 
+    /// The shapes as the host will read them.
+    pub fn shapes(&self) -> &[f32] {
+        &self.data
+    }
+
+    /// Every shape of `shapes` — this format, any buffer — re-emitted with
+    /// its centre measured from `centre`, turned about it by `angle`, and its
+    /// own rotation added to. What draws a picture made in the ship's own
+    /// frame turned to the ship's heading: the ship's tiles, the room aboard.
+    pub fn append_turned(&mut self, shapes: &[f32], centre: (f32, f32), angle: f32) {
+        let (s, c) = (angle.sin(), angle.cos());
+        for shape in shapes.chunks_exact(STRIDE) {
+            let (x, y) = (shape[1] - centre.0, shape[2] - centre.1);
+            self.data.extend_from_slice(&[
+                shape[0],
+                x * c - y * s,
+                x * s + y * c,
+                shape[3],
+                shape[4],
+                shape[5] + angle,
+                shape[6],
+                shape[7],
+                shape[8],
+                shape[9],
+                shape[10],
+                shape[11],
+            ]);
+        }
+    }
+
     /// Turn every shape pushed since the buffer was `from` floats long about
     /// the origin, by `angle` in the screen's sense: each centre goes through
     /// the rotation and each `rot` has it added. What the game view does to

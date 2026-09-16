@@ -29,6 +29,7 @@ pub mod camera;
 pub mod draw;
 pub mod editor;
 pub mod game;
+pub mod hull;
 pub mod paint;
 pub mod starfield;
 pub mod view;
@@ -381,6 +382,7 @@ pub extern "C" fn ship_render() {
             // The room aboard draws itself once a frame, here, and not once
             // a step: at 24x that is one picture rather than twenty-four.
             game.world.aboard.render();
+            game.frame = game.frame.wrapping_add(1);
             world_paint::paint(game, list())
         }
         None => paint::paint(editor(), list()),

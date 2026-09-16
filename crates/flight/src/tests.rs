@@ -16,7 +16,8 @@ use crate::angle;
 use crate::data;
 use crate::dynamics::{Dynamics, dynamics};
 use crate::plan::{
-    Phase, Plan, PlanError, Spin, Target, abort, fuel_burned_at, plan_trip, state_at,
+    Effort, Phase, Plan, PlanError, Spin, Target, abort, effort_at, fuel_burned_at, plan_trip,
+    state_at,
 };
 
 /// Square roots and trigonometry throughout, so nothing is compared with
@@ -692,4 +693,93 @@ fn what_the_fixture_actually_flies_like() {
         time::days(plan.duration()),
         plan.fuel_required,
     );
+}
+
+// --- what the ship is doing to itself --------------------------------------
+
+/// The effort is the plan read a second way, and it has to agree with the
+/// first: the engines are lit exactly while the speed is changing, the
+/// thrusters push exactly while the rate is, and the sign of the push is the
+/// sign of the change. A picture of the exhaust is built on this and nothing
+/// else would notice it drifting.
+#[test]
+fn the_effort_is_the_derivative_of_the_state() {
+    let d = dynamics(&flyer(4), 4).unwrap();
+    // Off at a right angle, so there is a real turn to align and a flip
+    // to brake with — the flyer has no backward engine.
+    let plan = plan_trip(
+        &d,
+        DVec2::ZERO,
+        0.0,
+        Target::Point(dvec2(400_000.0, 0.0)),
+        dvec2(400_000.0, 0.0),
+        FLYER_FUEL as f64,
+    )
+    .expect("the flyer should fly there");
+
+    let mut seen_engines = false;
+    let mut seen_thrusters = false;
+    let mut begun = 0.0;
+    for segment in &plan.segments {
+        // Well inside the segment, and either side of a swing's halfway
+        // point rather than on it: the derivative is read across a short
+        // gap, and a gap over an edge reads as nothing in particular.
+        let gap = (segment.duration * 0.02).min(0.05);
+        for share in [0.1, 0.3, 0.45, 0.55, 0.7, 0.9] {
+            let t = begun + segment.duration * share;
+            let effort = effort_at(&plan, t);
+            let before = state_at(&plan, t - gap);
+            let after = state_at(&plan, t + gap);
+            let speed_change = after.speed - before.speed;
+            assert_eq!(
+                effort.engines > 0,
+                speed_change.abs() > 1e-9,
+                "at {t}: engines {} while the speed moved by {speed_change}",
+                effort.engines,
+            );
+            if effort.engines > 0 {
+                assert!(
+                    effort.accel * speed_change > 0.0,
+                    "at {t}: pushing the wrong way"
+                );
+                seen_engines = true;
+            } else {
+                assert_eq!(effort.accel, 0.0);
+            }
+            let rate_change = plan_rate(&plan, t + gap) - plan_rate(&plan, t - gap);
+            assert_eq!(
+                effort.alpha != 0.0,
+                rate_change.abs() > 1e-12,
+                "at {t}: alpha {} while the rate moved by {rate_change}",
+                effort.alpha,
+            );
+            if effort.alpha != 0.0 {
+                assert!(
+                    effort.alpha * rate_change > 0.0,
+                    "at {t}: turning the wrong way"
+                );
+                seen_thrusters = true;
+            }
+        }
+        begun += segment.duration;
+    }
+    assert!(
+        seen_engines && seen_thrusters,
+        "the trip should have both burnt and turned"
+    );
+    assert_eq!(effort_at(&plan, begun + 1.0), Effort::NONE);
+    assert_eq!(effort_at(&plan, -1.0), Effort::NONE);
+}
+
+/// The angular rate `minutes` into a plan, read off the segments the way
+/// `state_at` reads the heading.
+fn plan_rate(plan: &Plan, minutes: f64) -> f64 {
+    let mut left = minutes;
+    for segment in &plan.segments {
+        if left < segment.duration {
+            return segment.spin.rate_at(left);
+        }
+        left -= segment.duration;
+    }
+    0.0
 }

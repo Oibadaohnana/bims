@@ -501,14 +501,21 @@ station charges the same; what bounds a purchase is the money and the hold.
 ### The two views
 
 **Ship** is the live ship at tile scale, drawn turned to its heading, with the
-starfield sliding the other way behind it. **System map** is the star, what the
-crew have found, the ring the scanner reaches to, the route, and a marker
-pointing where the ship is pointing.
+starfield sliding the other way behind it. The hull is plated, with running
+lights to port and starboard and a strobe at the bow; the engines burn while
+the ship is under them — through the burn, and again through the brake once
+it has flipped — and the thrusters puff on the corners that turn it the way
+it is turning. What fires is read off the same plan the ship's position is,
+so the flame is where the ship is at any speed. **System map** is the star,
+what the crew have found, the ring the scanner reaches to, the route, and a
+little hull pointing where the ship is pointing.
 
-The camera is **north-up in both, always**. It is the ship that turns on
+The camera is **north-up in both by default**. It is the ship that turns on
 screen. A camera that followed the heading would make a flip legible and every
 other moment unreadable — you could not tell which way you were going, because
-"which way" would always look the same.
+"which way" would always look the same. **Head up** (the View panel, or `N`)
+is the other choice: the ship held square to the window and the sky and the
+map turned round it instead.
 
 ### The two crates behind that
 

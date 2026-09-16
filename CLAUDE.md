@@ -1368,6 +1368,52 @@ the ship rather than the window when head up, or the corners go bare after
 the turn; and a view setting is not a `Command` — it is this browser's own
 and crosses no seam. `ship-layout.mjs headup` and `... mapup` are the pictures.
 
+## The ship is drawn in its own frame, and the exhaust is read off the plan
+
+`paint_ship` builds the whole ship — rim, exhaust, tiles, the hull's
+pictures, the lights, the hover ring — into a ship-space `DrawList` in
+design units and turns it once with `DrawList::append_turned`; the room's
+buffer goes through the same call after it. A picture made of many shapes
+only has to be right the once, and `crates/ship/src/hull.rs`, where the
+pictures of the plating, the engines, the thrusters, the airlock and the
+array live, has never heard of a heading. Anything new drawn *on* the ship
+goes into that list; anything drawn because it is out there does not.
+
+**What fires is `hull::Firing`, and it comes from `flight::effort_at`** —
+the plan read a second way, beside `state_at`, and pinned against it by
+`the_effort_is_the_derivative_of_the_state`. Nothing in the picture keeps
+its own idea of whether the engines are on, because a flame that lagged the
+ship at 24x or after a catch-up would say the ship was in two places. Four
+rules that fall out of it:
+
+- **A forward engine burns through the burn *and* through a flip brake**;
+  a backward one through a brake without a flip; a sideways one never — the
+  autopilot does not fly it. `Firing::of` is the arithmetic (the nose
+  against the plan's line, times the sign of the acceleration), and
+  `the_exhaust_follows_the_plan` in `crates/ship/src/tests.rs` drives a
+  real trip through every phase and checks it.
+- **A thruster's nozzle is every side of it that faces open space, and the
+  one that fires is worked out from where the thruster is** — exhaust
+  pushes the ship the other way, that push turns it about the centre of
+  mass, and the nozzle whose turn matches the plan's is lit. The dynamics
+  never look at placement; the picture does, because a corner thruster
+  puffing into the hull is a picture of a broken ship.
+- **The exhaust is drawn under the hull, and a plume starts where it
+  clears the skin.** The playtest ship's engine sits inside the hull, and a
+  flame from its bell was a dim smudge at the stern with the bright end
+  under the deck; `plume` walks the tiles aft until one holds nothing and
+  begins there. An engine flush with the stern is unchanged.
+- **The flicker and the running lights run off `Game::frame`**, a picture
+  clock counted in `ship_render` and read by nothing that decides anything
+  — never the RNG, which is the simulation's, and never `world.steps`,
+  which stops at a pause. Hash it; do not draw from the stream.
+
+`ship-layout.mjs turn` and `... burn` are the pictures, both head up so a
+puff into the hull or a flame over the deck is obvious. The map marker is
+`hull::marker` — three rectangles, and `FIN_LEAN` is pinned by
+`the_map_is_north_up_whatever_the_ship_is_doing`, which knows the marker is
+the only thing on the map that turns.
+
 ## "Is it finished" is one export, not three
 
 `ship_phase()` and nothing else. "Is it finished", "may I still edit" and

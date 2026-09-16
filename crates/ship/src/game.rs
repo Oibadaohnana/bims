@@ -90,6 +90,11 @@ pub struct Game {
     /// and nothing that decides anything reads this. Off by default, because
     /// a fixed sky is what makes a flip legible; see `camera.rs`.
     pub head_up: bool,
+    /// Frames drawn. What the exhaust flickers and the running lights blink
+    /// off — a picture clock, counted by the render and by nothing that
+    /// decides anything. It does not stop at a pause, which is right: a
+    /// paused flame still burns.
+    pub frame: u32,
     pub stars: Starfield,
 }
 
@@ -125,6 +130,7 @@ impl Game {
             aimed: None,
             hover: None,
             head_up: false,
+            frame: 0,
             stars: Starfield::new(seed),
         };
         game.fit_ship();
@@ -174,6 +180,19 @@ impl Game {
     /// camera has turned to keep it upright.
     pub fn ship_turn(&self) -> f64 {
         self.world.ship.heading + self.camera_turn()
+    }
+
+    /// What is lit this frame: the plan's effort read against the heading.
+    /// Nothing while docked or holding.
+    pub fn firing(&self) -> crate::hull::Firing {
+        match self.world.plan() {
+            Some(plan) => crate::hull::Firing::of(
+                self.world.effort(),
+                self.world.ship.heading,
+                plan.direction,
+            ),
+            None => crate::hull::Firing::NONE,
+        }
     }
 
     pub fn set_mode(&mut self, mode: ViewMode) {

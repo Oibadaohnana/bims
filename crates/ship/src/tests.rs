@@ -327,16 +327,30 @@ fn the_map_is_north_up_whatever_the_ship_is_doing() {
     };
     let at_rest = rotations_at(&mut game, 0.0);
     let turned = rotations_at(&mut game, 2.4);
-    let moved: Vec<f32> = turned
+    let mut moved: Vec<f32> = turned
         .iter()
         .copied()
         .filter(|a| !at_rest.iter().any(|r| (a - r).abs() < 1e-6))
         .collect();
+    // The marker is a hull and two fins: three rectangles, at the heading
+    // and leaning out either side of it. Nothing else moved.
+    moved.sort_by(|a, b| a.total_cmp(b));
+    let marker = [
+        2.4 - crate::hull::FIN_LEAN,
+        2.4,
+        2.4 + crate::hull::FIN_LEAN,
+    ];
     assert_eq!(
-        moved,
-        vec![2.4],
-        "only the ship marker should have turned with the ship"
+        moved.len(),
+        3,
+        "only the ship marker should have turned: {moved:?}"
     );
+    for (a, b) in moved.iter().zip(marker) {
+        assert!(
+            (a - b).abs() < 1e-5,
+            "the marker turned to {moved:?}, not {marker:?}"
+        );
+    }
 }
 
 /// The camera is centred on the ship, in both views, with or without a pan.
@@ -373,4 +387,103 @@ fn a_click_on_the_map_is_a_place_or_a_thing() {
     assert!(game.pick(4.0, 4.0, 20.0).is_none());
     let point = game.point_at(4.0, 4.0);
     assert!(point.distance(game.world.ship.position()) > 0.0);
+}
+
+/// What is lit follows the plan through every phase: nothing at the dock,
+/// the thrusters through the turn, the forward engines through the burn,
+/// nothing through the flip, the *same* forward engines through the brake —
+/// the flyer has no backward engine, so it turns round to stop — and nothing
+/// once it has arrived. And the picture says so: there is exhaust in the
+/// buffer exactly when something is lit.
+#[test]
+fn the_exhaust_follows_the_plan() {
+    use flight::{Phase, Target};
+    use world::world::Command;
+
+    let mut game = game();
+    // Somewhere off to one side, so there is a real turn to make first.
+    let here = game.world.ship.position();
+    game.send(Command::Confirm {
+        slot: 0,
+        target: Target::Point(dvec2(here.x + 30_000.0, here.y + 7_000.0)),
+    });
+
+    // The exhaust on its own, rather than the whole frame: the room and the
+    // starfield both change from one frame to the next, so a count of
+    // everything says nothing about the flame.
+    let exhaust = |game: &Game| -> usize {
+        let design = &game.world.ship.design;
+        let centre = game.world.ship.dynamics.centre_of_mass;
+        let mut list = crate::draw::DrawList::default();
+        crate::hull::exhaust(
+            &mut list,
+            design,
+            &design.grid(),
+            game.firing(),
+            (centre.x as f32, centre.y as f32),
+            game.frame,
+        );
+        list.len() / crate::draw::STRIDE
+    };
+    assert_eq!(game.firing(), crate::hull::Firing::NONE);
+    assert_eq!(exhaust(&game), 0, "nothing burns at the dock");
+
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..400_000 {
+        game.step();
+        let Some(state) = game.world.trip_state() else {
+            break;
+        };
+        let firing = game.firing();
+        match state.phase {
+            Phase::Align => {
+                assert!(
+                    !firing.forward && !firing.backward,
+                    "no engine while aligning"
+                );
+                assert!(firing.alpha != 0.0, "the thrusters push through a turn");
+            }
+            Phase::Burn => {
+                assert!(
+                    firing.forward && !firing.backward,
+                    "the forward engines burn"
+                );
+                assert_eq!(firing.alpha, 0.0);
+            }
+            Phase::Flip => {
+                assert!(!firing.forward && !firing.backward, "a flip is a coast");
+            }
+            Phase::Brake => {
+                assert!(
+                    firing.forward && !firing.backward,
+                    "the brake after a flip is the forward engines again"
+                );
+                assert_eq!(firing.alpha, 0.0);
+            }
+            Phase::Arrived => {}
+        }
+        if seen.insert(state.phase.code()) {
+            // The first frame of each phase: the picture has exhaust in it
+            // exactly when something is lit. A flip coasts, so it draws
+            // what the dock draws — the ship and nothing behind it.
+            let lit = firing.forward || firing.backward || firing.alpha != 0.0;
+            let drawn = exhaust(&game);
+            assert_eq!(
+                drawn > 0,
+                lit,
+                "phase {:?}: {drawn} shapes of exhaust, lit {lit}",
+                state.phase,
+            );
+        }
+    }
+    assert!(
+        seen.len() >= 4,
+        "the trip should have aligned, burnt, flipped and braked: {seen:?}"
+    );
+    assert!(
+        game.world.trip_state().is_none(),
+        "the trip should have ended"
+    );
+    assert_eq!(game.firing(), crate::hull::Firing::NONE);
+    assert_eq!(exhaust(&game), 0, "nothing burns once it is there");
 }

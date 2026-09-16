@@ -872,6 +872,18 @@ impl World {
         }
     }
 
+    /// What the ship is doing to itself — the engines lit and the thrusters
+    /// pushing — for a caller that wants to draw the exhaust. Nothing while
+    /// docked or holding.
+    pub fn effort(&self) -> flight::Effort {
+        match &self.ship.state {
+            ShipState::Travelling { plan, departed } => {
+                flight::effort_at(plan, self.clock_minutes - departed)
+            }
+            _ => flight::Effort::NONE,
+        }
+    }
+
     pub fn plan(&self) -> Option<&Plan> {
         match &self.ship.state {
             ShipState::Travelling { plan, .. } => Some(plan),

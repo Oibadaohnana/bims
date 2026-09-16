@@ -259,6 +259,83 @@ impl Spin {
             }
         }
     }
+
+    /// The angular acceleration `t` minutes in — which way the thrusters are
+    /// pushing, and how hard. Signed the same way as `delta`: positive is the
+    /// heading climbing. A swing pushes one way for its first half and the
+    /// other for its second; a halt pushes against the rate the whole way.
+    ///
+    /// Read by the picture and by nothing that decides anything: the sweep
+    /// and the rate above are the plan, and this is the derivative of the
+    /// rate written down beside it so the two cannot drift apart.
+    pub fn alpha_at(self, t: f64) -> f64 {
+        match self {
+            Spin::Still => 0.0,
+            Spin::Swing { delta, duration } => {
+                let half = duration / 2.0;
+                // The peak rate over the time it takes to reach it.
+                let alpha = 2.0 * delta / duration / half;
+                if t < 0.0 || t > duration {
+                    0.0
+                } else if t < half {
+                    alpha
+                } else {
+                    -alpha
+                }
+            }
+            Spin::Halt { delta, duration } => {
+                if t < 0.0 || t > duration {
+                    0.0
+                } else {
+                    -2.0 * delta / duration / duration
+                }
+            }
+        }
+    }
+}
+
+/// What the ship is doing to itself at one moment of a plan: the engines lit
+/// and the thrusters pushing. Read off the segments the same way
+/// [`state_at`] reads the position, so a picture of the exhaust agrees with
+/// the ship it is behind at any speed and after any catch-up.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Effort {
+    /// Acceleration along the plan's line, signed. Nothing while coasting or
+    /// turning.
+    pub accel: f64,
+    /// Engines burning. Nothing while turning, and never the thrusters.
+    pub engines: u32,
+    /// Angular acceleration, signed: positive is the heading climbing.
+    /// Nothing while the ship is not turning or is coasting through a flip.
+    pub alpha: f64,
+}
+
+impl Effort {
+    pub const NONE: Effort = Effort {
+        accel: 0.0,
+        engines: 0,
+        alpha: 0.0,
+    };
+}
+
+/// What the ship is doing to itself `minutes` after the plan began. Nothing
+/// at all once the plan is over.
+pub fn effort_at(plan: &Plan, minutes: f64) -> Effort {
+    if minutes < 0.0 {
+        return Effort::NONE;
+    }
+    let mut left = minutes;
+    for segment in &plan.segments {
+        if left < segment.duration {
+            return Effort {
+                accel: segment.accel,
+                engines: segment.engines,
+                alpha: segment.spin.alpha_at(left),
+            };
+        }
+        left -= segment.duration;
+    }
+    Effort::NONE
 }
 
 /// One stretch of a trip during which nothing changes rate.

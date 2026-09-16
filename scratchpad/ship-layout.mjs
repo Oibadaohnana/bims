@@ -17,6 +17,8 @@
 //   node scratchpad/ship-layout.mjs given    > /tmp/ship.svg
 //   node scratchpad/ship-layout.mjs headup   > /tmp/ship.svg
 //   node scratchpad/ship-layout.mjs mapup    > /tmp/ship.svg
+//   node scratchpad/ship-layout.mjs turn     > /tmp/ship.svg
+//   node scratchpad/ship-layout.mjs burn     > /tmp/ship.svg
 //
 // `game` and `map` are the game, and they are the ones worth the thirty
 // seconds: the ship is drawn **turned** and the sky behind it is not, and
@@ -26,7 +28,10 @@
 // `headup` and `mapup` are the same two moments with the view head up:
 // the hull square to the window and the sky and the map turned round it —
 // and a corner of the window the turned starfield no longer reaches is the
-// thing to look for there.
+// thing to look for there. `turn` and `burn` catch the exhaust: the ship
+// mid-align with the thrusters puffing, and under the engines with the
+// plume out of the stern. A puff going *into* the hull, or a flame over the
+// deck, is what to look for.
 //
 // It writes the SVG to stdout and a line about what it caught to stderr, so a
 // redirect gives a clean file.
@@ -124,7 +129,7 @@ if (WHEN === "given") {
   caught =
     "a hull with a hole in it — every tile the outside can see into, tinted, " +
     "including through the internal wall";
-} else if (["game", "map", "headup", "mapup"].includes(WHEN)) {
+} else if (["game", "map", "headup", "mapup", "turn", "burn"].includes(WHEN)) {
   // A ship a trip can actually be planned for: everything `buildShip` puts
   // down, plus what flying wants — thrusters, an airlock, an array, a tank
   // and something to burn.
@@ -148,6 +153,24 @@ if (WHEN === "given") {
       ? "the system map turned round the ship, with the marker straight up"
       : "the system map — the star, what has been found, the ring the scanner " +
         "reaches to, and the ship pointing where it is pointing";
+  } else if (WHEN === "turn" || WHEN === "burn") {
+    // Head up, so the exhaust is read against a hull that is square: a puff
+    // from the wrong nozzle is a puff into the ship, and that is easier to
+    // see when the ship is not also turned.
+    wasm.ship_set_head_up(1);
+    wasm.ship_cmd_confirm_point(0, wasm.ship_world_x() + 400000, wasm.ship_world_y() + 90000);
+    wasm.ship_cmd_speed(0, 4);
+    // Phase codes are `flight::Phase`: 0 aligning, 1 burning.
+    const want = WHEN === "turn" ? 0 : 1;
+    // A little way into the phase rather than its first frame, so the turn
+    // has a rate to show and the burn a flame that has flickered.
+    let budget = 20000;
+    while (budget-- > 0 && wasm.ship_trip_phase() !== want) page.step(1);
+    for (let i = 0; i < 90; i++) page.step(1);
+    caught =
+      WHEN === "turn"
+        ? "the ship turning to its bearing, thrusters puffing on the corners that turn it that way"
+        : "the ship under its engines, with the plume out of the stern and nothing over the deck";
   } else {
     // Turned, on purpose. A hull drawn mirrored, or a starfield that turns
     // with the ship, is obvious here and invisible in every assertion.

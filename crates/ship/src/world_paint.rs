@@ -44,6 +44,7 @@ use worldgen::{BodyKind, Node, StationKind};
 
 use crate::draw::{Color, DrawList};
 use crate::game::{Game, ViewMode};
+use crate::hull;
 use crate::paint::PART_COLORS;
 use crate::starfield::{FIELD, Starfield};
 
@@ -122,23 +123,41 @@ fn paint_ship(game: &Game, list: &mut DrawList) {
     local_node(game, list);
     list.turn_from(out_there, game.camera_turn() as f32);
 
-    let heading = game.ship_turn();
+    // The ship, drawn in its own frame — design units about the design's
+    // origin, the grid it was laid out in — and turned with it at the end.
+    // One turn for the whole picture, so a picture made of many shapes only
+    // has to be right the once.
+    let design = &game.world.ship.design;
+    let grid = design.grid();
+    let firing = game.firing();
     let centre = game.world.ship.dynamics.centre_of_mass;
-    let tile = TILE as f32;
+    let centre = (centre.x as f32, centre.y as f32);
+    let mut ship = DrawList::default();
+
+    // Under everything: the rim that makes the hull a body against the
+    // stars, and the exhaust, which shows where it clears the stern and
+    // never over the deck.
+    hull::shadow(&mut ship, design, &grid);
+    hull::exhaust(&mut ship, design, &grid, firing, centre, game.frame);
 
     // Frame, then deck, then what is standing on them — the same order the
     // design phase paints in, so the two views read as one ship. The parts
     // the room aboard draws for itself — the galley, the heads, the table,
     // the bunks, the bay, the locker — are left to it: it has the pictures.
-    let rooms = bims::aboard::drawn_by_room(&game.world.ship.design);
+    // The hull's own working parts have pictures of their own in `hull`.
+    let rooms = bims::aboard::drawn_by_room(design);
+    let tile = TILE as f32;
     for layer in [
         Layer::Structure,
         Layer::Floor,
         Layer::Object,
         Layer::Utility,
     ] {
-        for part in &game.world.ship.design.parts {
+        for part in &design.parts {
             if part.layer() != layer || rooms.contains(&part.id) {
+                continue;
+            }
+            if layer == Layer::Object && hull::part(&mut ship, part, &grid, firing) {
                 continue;
             }
             let color = match layer {
@@ -148,14 +167,14 @@ fn paint_ship(game: &Game, list: &mut DrawList) {
             };
             let inset = if layer == Layer::Object { 3.0 } else { 0.0 };
             for (x, y) in part.tiles() {
-                let (sx, sy) = on_screen(tile_middle(x, y), centre, heading);
-                list.push(
+                let m = tile_middle(x, y);
+                ship.push(
                     crate::draw::KIND_RECT,
-                    sx,
-                    sy,
+                    m.x as f32,
+                    m.y as f32,
                     tile - inset,
                     tile - inset,
-                    heading as f32,
+                    0.0,
                     if layer == Layer::Object { 4.0 } else { 0.0 },
                     0.0,
                     color,
@@ -163,58 +182,36 @@ fn paint_ship(game: &Game, list: &mut DrawList) {
             }
         }
     }
+    hull::lights(&mut ship, design, &grid, game.frame);
 
-    // The room aboard — its fixtures, the deck's mess, the crew and what
-    // they are carrying — as the room drew it, turned with the ship. The
-    // room draws in design units about the design's origin, which is the
-    // frame every tile above was placed in, so a shape's centre goes through
-    // the same turn as a tile's and its own rotation gets the heading added.
-    room_aboard(game, list);
-
-    // The tile under the pointer, rung. Turned with the ship, because it is
-    // part of the ship.
+    // The tile under the pointer, rung. Part of the ship, so turned with it.
     if let Some((x, y)) = game.hover
-        && game.world.ship.design.holds((x, y))
+        && design.holds((x, y))
     {
-        let (sx, sy) = on_screen(tile_middle(x as u32, y as u32), centre, heading);
-        list.push(
+        let m = tile_middle(x as u32, y as u32);
+        ship.push(
             crate::draw::KIND_RECT,
-            sx,
-            sy,
+            m.x as f32,
+            m.y as f32,
             tile,
             tile,
-            heading as f32,
+            0.0,
             3.0,
             2.0,
             GLOW,
         );
     }
-}
 
-// --- the room aboard ---------------------------------------------------------
-
-/// Every shape the room drew this step, turned with the ship. The room's
-/// draw buffer is the same twelve floats a shape as this one — the format
-/// is shared across all three cdylibs — so it is walked with the room's own
-/// stride and re-emitted with its position turned and its rotation added to.
-fn room_aboard(game: &Game, list: &mut DrawList) {
-    let centre = game.world.ship.dynamics.centre_of_mass;
-    let heading = game.ship_turn();
-    let stride = bims::draw::STRIDE;
-    for shape in game.world.aboard.room.shapes().chunks_exact(stride) {
-        let (sx, sy) = on_screen(dvec2(shape[1] as f64, shape[2] as f64), centre, heading);
-        list.push(
-            shape[0],
-            sx,
-            sy,
-            shape[3],
-            shape[4],
-            shape[5] + heading as f32,
-            shape[6],
-            shape[7],
-            Color::rgba(shape[8], shape[9], shape[10], shape[11]),
-        );
-    }
+    let turn = game.ship_turn() as f32;
+    list.append_turned(ship.shapes(), centre, turn);
+    // The room aboard — its fixtures, the deck's mess, the crew and what
+    // they are carrying — as the room drew it, over the hull and turned the
+    // same way. The room's draw buffer is the same twelve floats a shape as
+    // this one, since the format is shared across all three cdylibs. Over
+    // the ship's picture rather than in it because it is a separate buffer;
+    // over the lights and the hover ring too, which touches nothing the
+    // room draws.
+    list.append_turned(game.world.aboard.room.shapes(), centre, turn);
 }
 
 /// The three parallax layers.
@@ -718,23 +715,10 @@ fn paint_map(game: &Game, list: &mut DrawList) {
 
     list.turn_from(out_there, game.camera_turn() as f32);
 
-    // The ship, pointing where it is pointing. A rectangle turned to the
-    // heading, because the draw format has no triangle and a dot says nothing
-    // about which way round anybody is. Head up, that is straight up, and it
-    // is the map that says where north went.
-    let heading = game.ship_turn() as f32;
-    let long = (16.0 / scale) as f32;
-    list.push(
-        crate::draw::KIND_RECT,
-        0.0,
-        0.0,
-        long * 0.35,
-        long,
-        heading,
-        0.0,
-        0.0,
-        GLOW,
-    );
+    // The ship, pointing where it is pointing — a little hull with fins, so
+    // it says which way round it is and that it is the ship. Head up, that
+    // is straight up, and it is the map that says where north went.
+    hull::marker(list, game.ship_turn() as f32, (18.0 / scale) as f32, GLOW);
 }
 
 fn body_color(kind: Option<BodyKind>) -> Color {

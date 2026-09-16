@@ -34,8 +34,8 @@ pub mod plan;
 
 pub use dynamics::{Dynamics, DynamicsError, dynamics};
 pub use plan::{
-    Phase, Plan, PlanError, Segment, Spin, State, Target, abort, fuel_burned_at, plan_trip,
-    state_at,
+    Effort, Phase, Plan, PlanError, Segment, Spin, State, Target, abort, effort_at, fuel_burned_at,
+    plan_trip, state_at,
 };
 
 #[cfg(test)]

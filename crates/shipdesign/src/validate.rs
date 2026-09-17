@@ -39,8 +39,8 @@
 
 use physics::{Facing, ResourceId};
 
-use crate::design::{Grid, ShipDesign};
-use crate::parts::{Layer, PartKind};
+use crate::design::{Grid, PlacedPart, ShipDesign};
+use crate::parts::{Layer, PartKind, Rotation, any_side_will_do};
 
 /// Whether an issue stops the design being accepted.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -113,6 +113,25 @@ pub enum IssueCode {
     /// No fuel aboard. The engines have nothing to burn, so no trip can be
     /// confirmed — however many engines there are.
     NoFuelAboard = 30,
+    /// There is an airlock, and no side of it opens onto space: it stands
+    /// on the deck with hull or parts all round it, a door to nowhere. A
+    /// ship docks by an airlock in its skin — `crate::dock::port` — and
+    /// this ship has none, so like [`IssueCode::NoAirlock`] it can only
+    /// hold beside a station.
+    AirlockSealedIn = 31,
+    /// An engine with something of the ship behind its bell. The exhaust
+    /// goes aft — grid-down for a part at `Rotation::R0` — and every tile
+    /// straight behind the engine has to be open space, or the engine is
+    /// firing into a room. An error, not a warning: a ship that would cook
+    /// its own crew the first time the helm was touched is not a ship to
+    /// accept. [`exhaust_tiles`] is which tiles, for the painter as well.
+    ExhaustBlocked = 32,
+    /// A consumer with no live conduit under it — see [`crate::power`].
+    /// The parts are the consumers and the tiles their footprints.
+    Unpowered = 33,
+    /// A network drawing more than its reactors make. One issue per such
+    /// network; the parts are everything on it and the tiles its conduit.
+    PowerShort = 34,
 }
 
 impl IssueCode {
@@ -203,9 +222,63 @@ pub fn validate(design: &ShipDesign, crew_count: u32) -> Vec<Issue> {
         reachability(design, &grid, &mut issues);
     }
     engines(design, &mut issues);
+    exhausts(design, &grid, &mut issues);
     comforts(design, &mut issues);
+    power(design, &mut issues);
 
     issues
+}
+
+/// The tiles an engine's exhaust wants clear: the row straight behind its
+/// bell, one tile deep, as wide as the engine. Aft is the way the engine
+/// does **not** push — grid-down at `Rotation::R0`, since a part at R0
+/// pushes forward, which is grid-up (`Rotation::facing`).
+pub fn exhaust_tiles(part: &PlacedPart) -> Vec<(i32, i32)> {
+    if !part.kind.def().pushes() {
+        return Vec::new();
+    }
+    let aft = match part.rotation {
+        Rotation::R0 => (0, 1),
+        Rotation::R90 => (-1, 0),
+        Rotation::R180 => (0, -1),
+        Rotation::R270 => (1, 0),
+    };
+    let tiles = part.tiles();
+    tiles
+        .iter()
+        .map(|&(x, y)| (x as i32 + aft.0, y as i32 + aft.1))
+        .filter(|t| !tiles.iter().any(|&(x, y)| (x as i32, y as i32) == *t))
+        .collect()
+}
+
+/// Whether anything of the ship stands in an engine's exhaust: a tile
+/// behind it that holds frame. Off the build area is open space.
+pub fn exhaust_blocked(part: &PlacedPart, grid: &Grid) -> bool {
+    exhaust_tiles(part)
+        .into_iter()
+        .any(|t| grid.inside(t) && grid.get(Layer::Structure, t) != 0)
+}
+
+/// Every engine has to fire into space. See [`IssueCode::ExhaustBlocked`].
+fn exhausts(design: &ShipDesign, grid: &Grid, issues: &mut Vec<Issue>) {
+    let mut parts = Vec::new();
+    let mut tiles = Vec::new();
+    for part in &design.parts {
+        if !exhaust_blocked(part, grid) {
+            continue;
+        }
+        parts.push(part.id);
+        tiles.extend(
+            exhaust_tiles(part)
+                .into_iter()
+                .filter(|&t| grid.inside(t) && grid.get(Layer::Structure, t) != 0)
+                .map(|(x, y)| (x as u32, y as u32)),
+        );
+    }
+    if parts.is_empty() {
+        return;
+    }
+    issues.push(Issue::error(IssueCode::ExhaustBlocked, parts, tiles));
 }
 
 /// Where the outside can see in.
@@ -476,12 +549,24 @@ fn required(design: &ShipDesign, issues: &mut Vec<Issue>) {
     }
 }
 
-/// Every use spot has to be deck a body can stand on. Returns whether any
-/// were not, which is what holds the reachability check back.
+/// Every use spot has to be deck a body can stand on — or, for a part used
+/// from any side (`any_side_will_do`), at least one of them. Returns
+/// whether any were not, which is what holds the reachability check back.
 fn use_spots(design: &ShipDesign, grid: &Grid, issues: &mut Vec<Issue>) -> bool {
     let mut parts = Vec::new();
     let mut tiles = Vec::new();
     for part in &design.parts {
+        if any_side_will_do(part.kind) {
+            let standable = part
+                .use_spots()
+                .iter()
+                .any(|&spot| grid.inside(spot) && walkable(design, grid, spot));
+            if !standable {
+                parts.push(part.id);
+                tiles.extend(part.tiles());
+            }
+            continue;
+        }
         for spot in part.use_spots() {
             if grid.inside(spot) && walkable(design, grid, spot) {
                 continue;
@@ -508,12 +593,18 @@ fn use_spots(design: &ShipDesign, grid: &Grid, issues: &mut Vec<Issue>) -> bool 
 /// Everywhere a Bim has to stand has to be walkable to from everywhere else
 /// it has to stand. Doors are walkable, so a route through one counts.
 fn reachability(design: &ShipDesign, grid: &Grid, issues: &mut Vec<Issue>) {
-    let mut spots: Vec<((u32, u32), u32)> = Vec::new();
+    // `use_spots` above has already established these are in bounds and
+    // walkable; this only runs when it found nothing wrong. A part used from
+    // any side brings only the spots a body can stand on, and is reached if
+    // any one of them is.
+    let mut spots: Vec<((u32, u32), u32, bool)> = Vec::new();
     for part in &design.parts {
+        let any = any_side_will_do(part.kind);
         for spot in part.use_spots() {
-            // `use_spots` above has already established these are in bounds
-            // and walkable; this only runs when it found nothing wrong.
-            spots.push(((spot.0 as u32, spot.1 as u32), part.id));
+            if any && !(grid.inside(spot) && walkable(design, grid, spot)) {
+                continue;
+            }
+            spots.push(((spot.0 as u32, spot.1 as u32), part.id, any));
         }
     }
     if spots.len() < 2 {
@@ -526,8 +617,15 @@ fn reachability(design: &ShipDesign, grid: &Grid, issues: &mut Vec<Issue>) {
 
     let mut parts = Vec::new();
     let mut tiles = Vec::new();
-    for (spot, id) in spots.into_iter().skip(1) {
+    for (spot, id, any) in spots.iter().copied().skip(1) {
         if reached.contains(&spot) {
+            continue;
+        }
+        if any
+            && spots
+                .iter()
+                .any(|&(other, other_id, _)| other_id == id && reached.contains(&other))
+        {
             continue;
         }
         if !parts.contains(&id) {
@@ -556,7 +654,7 @@ fn engines(design: &ShipDesign, issues: &mut Vec<Issue>) {
     let engines: Vec<&crate::design::PlacedPart> = design
         .parts
         .iter()
-        .filter(|p| p.kind == PartKind::Engine)
+        .filter(|p| p.kind.def().pushes())
         .collect();
     if engines.is_empty() {
         issues.push(Issue::warning(IssueCode::NoEngine));
@@ -576,6 +674,8 @@ fn engines(design: &ShipDesign, issues: &mut Vec<Issue>) {
     }
     if design.count(PartKind::Airlock) == 0 {
         issues.push(Issue::warning(IssueCode::NoAirlock));
+    } else if crate::dock::port(design).is_none() {
+        issues.push(Issue::warning(IssueCode::AirlockSealedIn));
     }
     if design.count(PartKind::SensorArray) == 0 {
         issues.push(Issue::warning(IssueCode::NoSensorArray));
@@ -598,5 +698,41 @@ fn comforts(design: &ShipDesign, issues: &mut Vec<Issue>) {
     let food = design.carrying(ResourceId::Vegetable) + design.carrying(ResourceId::Tofu);
     if food == 0 {
         issues.push(Issue::warning(IssueCode::NoFoodAboard));
+    }
+}
+
+/// What is wired and what is not. Two warnings, like the flight ones and
+/// for the same reason: a ship that cannot run its cold store is still a
+/// ship you can live on, for a while, and refusing it would be the design
+/// phase having an opinion about how to play.
+///
+/// Unpowered consumers are one issue with every one of them in it, so the
+/// deck shows them all at once; a short network is one issue each, because
+/// the fix is on that run.
+fn power(design: &ShipDesign, issues: &mut Vec<Issue>) {
+    let dark = crate::power::unpowered(design);
+    if !dark.is_empty() {
+        let mut tiles: Vec<(u32, u32)> = Vec::new();
+        for &id in &dark {
+            if let Some(part) = design.part(id) {
+                tiles.extend(part.tiles());
+            }
+        }
+        issues.push(Issue {
+            severity: Severity::Warning,
+            code: IssueCode::Unpowered.code(),
+            parts: dark,
+            tiles,
+        });
+    }
+    for net in crate::power::networks(design) {
+        if net.live() && net.short() {
+            issues.push(Issue {
+                severity: Severity::Warning,
+                code: IssueCode::PowerShort.code(),
+                parts: net.parts,
+                tiles: net.tiles,
+            });
+        }
     }
 }

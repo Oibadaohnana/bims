@@ -39,24 +39,32 @@
 //!
 //! # What is deliberately absent
 //!
-//! Networking, interstellar travel, moving bodies, gravity, collisions, power,
-//! oxygen, station interiors, prices that differ by where you are, manual
-//! flight, and any speed above [`data::TOP_SPEED`].
+//! Networking, interstellar travel, moving bodies, gravity, oxygen,
+//! prices that differ by where you are, manual flight, and any speed above
+//! [`data::TOP_SPEED`]. Stations have interiors now — [`station`] — and the
+//! ship docks beside one rather than inside it and, docked, shares a room
+//! with it ([`docking`]); but a station is still not a solid a trip has to
+//! fly round.
 
 pub mod checksum;
 pub mod crew;
 pub mod data;
+pub mod docking;
 pub mod event;
 pub mod fixture;
 pub mod frame;
 pub mod speed;
+pub mod station;
 pub mod world;
 
 pub use checksum::world_checksum;
 pub use event::{Refusal, WorldEvent};
 pub use frame::Frame;
 pub use speed::Speed;
-pub use world::{Command, Preview, Ship, ShipState, StartError, World, spawn};
+pub use station::{Berth, Station};
+pub use world::{
+    Command, Power, Preview, Ship, ShipState, StartError, World, spawn, spawn_anywhere,
+};
 
 // The three things a caller of this crate wants from the ones underneath it,
 // re-exported so it does not have to depend on all four for the sake of a

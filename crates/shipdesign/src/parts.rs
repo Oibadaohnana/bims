@@ -58,6 +58,18 @@ use physics::ResourceId;
 /// navigation grid over hand-placed furniture. A ship is tiles.
 pub const TILE: u32 = 52;
 
+/// What one reactor makes, in units a minute. Placeholder, pinned to one
+/// outcome: the playtest ship's eight consumers — six systems, the smelter
+/// and the workbench — draw a hundred and twelve between them, so one
+/// reactor runs the ship as it comes and a third bench is a second reactor
+/// or a brownout.
+pub const REACTOR_OUTPUT: f64 = 120.0;
+
+/// What one battery holds: half an hour of a reactor's output. Enough to
+/// ride out a reactor going down between two stations and not enough to
+/// run a ship on.
+pub const BATTERY_CHARGE: f64 = 30.0 * REACTOR_OUTPUT;
+
 /// Which of a tile's four slots a part sits in.
 ///
 /// A tile holds at most one of each. Walls are `Object` rather than a layer
@@ -141,12 +153,43 @@ pub enum PartKind {
     /// does — the main engines push through the centre of mass and never spin
     /// it.
     Thruster = 27,
+    /// The big main engine: five times the push of an [`PartKind::Engine`]
+    /// for three and a half times the weight, and a fuel bill to match. What
+    /// moves a heavy ship in reasonable time; on a light one it is mostly
+    /// engine.
+    HeavyEngine = 28,
+    /// A plain wall cut across the corner of its tile: a right-angled
+    /// triangle filling the half of the tile its [`Rotation`] names — see
+    /// [`solid_corner`]. What lets a bulkhead turn a corner at forty-five
+    /// degrees, the way the hull pieces of every spacecraft in every game of
+    /// this kind do. It fills the whole tile as far as the rules are
+    /// concerned: one object a tile, a body cannot pass, and nothing else
+    /// stands there. Only the picture is a triangle.
+    DiagonalWall = 29,
+    /// The same cut across the hull: an [`PartKind::OutsideWall`] as a
+    /// triangle, so a ship can have a pointed bow and chamfered corners and
+    /// still keep the radiation out. It seals its whole tile — the
+    /// exposure fill is four-neighbour, and a staircase of these touching
+    /// corner to corner is as tight as a straight run.
+    DiagonalOutsideWall = 30,
+    /// Two ore in, one metal out, the slag vented. The first workstation,
+    /// and the one that draws most — see [`crate::recipes`].
+    Smelter = 31,
+    /// Metal into components, and metal, components and galvum into an
+    /// emitter. See [`crate::recipes`].
+    Workbench = 32,
+    /// Where the pressure suits hang: the locker class of storage, two of
+    /// them. Where a walk outside starts and ends.
+    SuitLocker = 33,
+    /// A bench and a locker in one: where handguns, vests and medkits are
+    /// made — [`crate::recipes`] — and where they are kept, four of them.
+    Armoury = 34,
 }
 
 impl PartKind {
     /// Every kind, in discriminant order. `ALL[k as usize] == k`, which
     /// [`PartKind::def`] relies on and [`defs_are_sound`] checks.
-    pub const ALL: [PartKind; 28] = [
+    pub const ALL: [PartKind; 35] = [
         PartKind::Floor,
         PartKind::Wall,
         PartKind::Door,
@@ -175,6 +218,13 @@ impl PartKind {
         PartKind::Shelf,
         PartKind::Shower,
         PartKind::Thruster,
+        PartKind::HeavyEngine,
+        PartKind::DiagonalWall,
+        PartKind::DiagonalOutsideWall,
+        PartKind::Smelter,
+        PartKind::Workbench,
+        PartKind::SuitLocker,
+        PartKind::Armoury,
     ];
 
     /// The number that crosses the wasm boundary. No strings do.
@@ -284,17 +334,19 @@ pub struct PartDef {
     /// many units of it. `None` for everything that is not a container.
     pub capacity: Option<(Storage, u32)>,
     /// What the part is **made of**: units of each material, and nothing
-    /// else. Never empty, and only [`ResourceId::Metal`] and
-    /// [`ResourceId::Components`] — ore is what metal is refined from, fuel
-    /// is burnt and the food is eaten, so none of the four belongs in a
-    /// wall.
+    /// else. Never empty, and only [`ResourceId::Metal`],
+    /// [`ResourceId::Components`] and [`ResourceId::Emitter`] — ore and
+    /// galvum are what those are made from, fuel is burnt and the food is
+    /// eaten, so none of them belongs in a wall.
     ///
     /// There is no separate mass. [`part_mass`] adds the recipe up, so a
     /// part weighs exactly what went into it and building one moves mass
     /// from the hold into the hull without changing the total — see the
     /// contract in [`crate::materials`].
     pub recipe: &'static [(ResourceId, u32)],
-    /// Greater than zero for [`PartKind::Engine`] and nothing else.
+    /// Greater than zero for the main engines — [`PartKind::Engine`] and
+    /// [`PartKind::HeavyEngine`] — and nothing else. [`PartDef::pushes`] is
+    /// the question to ask; nothing should list the kinds.
     ///
     /// A main engine's push goes through the ship's **centre of mass**
     /// whatever tile it is bolted to, so it produces no torque. That is a
@@ -302,7 +354,8 @@ pub struct PartDef {
     /// would otherwise spin a ship that a player laid out symmetrically to the
     /// eye and not to the gram, and there is nothing they could do about it.
     pub thrust: f64,
-    /// Greater than zero for [`PartKind::Thruster`] and nothing else.
+    /// Greater than zero for [`PartKind::Thruster`] and nothing else;
+    /// [`PartDef::turns`] asks it.
     ///
     /// Force, not torque: what it becomes depends on how far the thruster is
     /// from the centre of mass, which is `flight::dynamics`'s arithmetic and
@@ -310,6 +363,54 @@ pub struct PartDef {
     /// one of them turns the ship in both directions and four of them turn it
     /// faster; there is no left thruster and no right one.
     pub torque_thrust: f64,
+    /// Power, in units a minute: **positive** on the reactor, which makes
+    /// it, **negative** on what draws it, and nought on everything else.
+    /// [`PartDef::supplies`] and [`PartDef::draws`] are the questions;
+    /// nothing should list the kinds. A part is powered when a tile of it
+    /// carries conduit on a network with a reactor — see [`crate::power`].
+    ///
+    /// A consumer's draw is constant whether or not anybody is using it.
+    /// Placeholder, like the rest: a hob that only drew while lit is a
+    /// draw the world would have to ask the room about every step.
+    pub power: f64,
+    /// What the part can hold in power, in units — a minute of a one-unit
+    /// draw is one unit. Greater than nought on the battery and nothing
+    /// else; [`PartDef::stores`] asks it.
+    pub charge: f64,
+}
+
+impl PartDef {
+    /// Whether this makes power: the reactor. The play phase's brownout
+    /// rule and the validator's network both ask this.
+    pub fn supplies(&self) -> bool {
+        self.power > 0.0
+    }
+
+    /// Whether this draws power, and so is something that can be
+    /// unpowered.
+    pub fn draws(&self) -> bool {
+        self.power < 0.0
+    }
+
+    /// Whether this holds power: the battery.
+    pub fn stores(&self) -> bool {
+        self.charge > 0.0
+    }
+
+    /// Whether this is a main engine — something the autopilot burns along
+    /// the start–arrival line. There are two sizes of them, and everything
+    /// that wants "the engines" — the validator, the dynamics, the fuel
+    /// bill, the painter — asks this rather than naming either kind, so a
+    /// third size is one row in the table.
+    pub fn pushes(&self) -> bool {
+        self.thrust > 0.0
+    }
+
+    /// Whether this is a manoeuvring thruster. The other half of the
+    /// exclusive pair; see [`PartDef::torque_thrust`].
+    pub fn turns(&self) -> bool {
+        self.torque_thrust > 0.0
+    }
 }
 
 /// The table. Placeholder numbers throughout; see the module note.
@@ -318,7 +419,7 @@ pub struct PartDef {
 /// told about how a part is approached — [`crate::validate`] already insists
 /// every one of them is floor a body can stand on and that they can all reach
 /// each other, so a design that passes here is one the crew can work.
-pub static PARTS: [PartDef; 28] = [
+pub static PARTS: [PartDef; 35] = [
     PartDef {
         kind: PartKind::Floor,
         footprint: (1, 1),
@@ -332,6 +433,8 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 1)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: 0.0,
+        charge: 0.0,
     },
     PartDef {
         kind: PartKind::Wall,
@@ -349,10 +452,18 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 2)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: 0.0,
+        charge: 0.0,
     },
     PartDef {
         kind: PartKind::Door,
-        footprint: (1, 1),
+        // Two tiles along the bulkhead, one deep, like the airlock: a
+        // doorway the room's navigation can walk (a one-tile gap it cannot;
+        // see the crate's module note), and one part for it rather than two
+        // doors side by side. Which way it runs is its rotation — `R0`
+        // stands in a bulkhead running north–south, `R90` in one running
+        // east–west — and nothing reads the neighbours to guess.
+        footprint: (1, 2),
         layer: Layer::Object,
         blocks_movement: false,
         requires: Some(Layer::Floor),
@@ -365,6 +476,8 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 2), (ResourceId::Components, 2)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: -1.0,
+        charge: 0.0,
     },
     PartDef {
         kind: PartKind::Engine,
@@ -379,8 +492,10 @@ pub static PARTS: [PartDef; 28] = [
         shields: true,
         capacity: None,
         recipe: &[(ResourceId::Metal, 40), (ResourceId::Components, 40)],
-        thrust: 500.0,
+        thrust: 2_000.0,
         torque_thrust: 0.0,
+        power: 0.0,
+        charge: 0.0,
     },
     PartDef {
         kind: PartKind::Bunk,
@@ -395,6 +510,8 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 3), (ResourceId::Components, 2)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: 0.0,
+        charge: 0.0,
     },
     PartDef {
         kind: PartKind::ColdStore,
@@ -409,6 +526,8 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 6), (ResourceId::Components, 6)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: -5.0,
+        charge: 0.0,
     },
     PartDef {
         kind: PartKind::Worktop,
@@ -423,6 +542,8 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 3)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: 0.0,
+        charge: 0.0,
     },
     PartDef {
         kind: PartKind::Hob,
@@ -437,6 +558,8 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 3), (ResourceId::Components, 3)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: 0.0,
+        charge: 0.0,
     },
     PartDef {
         kind: PartKind::Dishwasher,
@@ -451,6 +574,8 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 5), (ResourceId::Components, 3)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: 0.0,
+        charge: 0.0,
     },
     PartDef {
         kind: PartKind::Table,
@@ -468,6 +593,8 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 2)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: 0.0,
+        charge: 0.0,
     },
     PartDef {
         kind: PartKind::Chair,
@@ -485,6 +612,8 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 1)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: 0.0,
+        charge: 0.0,
     },
     PartDef {
         kind: PartKind::Toilet,
@@ -499,6 +628,8 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 3), (ResourceId::Components, 1)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: 0.0,
+        charge: 0.0,
     },
     PartDef {
         kind: PartKind::Basin,
@@ -513,20 +644,27 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 2)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: 0.0,
+        charge: 0.0,
     },
     PartDef {
         kind: PartKind::HydroBay,
-        footprint: (2, 2),
+        // A run of six trays, one a tile, worked from the row above them —
+        // the room's bay has six trays and stands the Bim along one side,
+        // and each tile of this is one of them.
+        footprint: (6, 1),
         layer: Layer::Object,
         blocks_movement: true,
         requires: Some(Layer::Floor),
-        use_spots: &[(0, 2)],
+        use_spots: &[(0, -1), (1, -1), (2, -1), (3, -1), (4, -1), (5, -1)],
         price: 4_000,
         shields: false,
         capacity: None,
-        recipe: &[(ResourceId::Metal, 8), (ResourceId::Components, 8)],
+        recipe: &[(ResourceId::Metal, 12), (ResourceId::Components, 12)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: -15.0,
+        charge: 0.0,
     },
     PartDef {
         kind: PartKind::BroomLocker,
@@ -541,6 +679,8 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 1), (ResourceId::Components, 1)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: 0.0,
+        charge: 0.0,
     },
     // --- the frame, and the hull on it ------------------------------------
     PartDef {
@@ -559,6 +699,8 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 2)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: 0.0,
+        charge: 0.0,
     },
     PartDef {
         kind: PartKind::OutsideWall,
@@ -575,6 +717,8 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 4), (ResourceId::Components, 1)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: 0.0,
+        charge: 0.0,
     },
     // --- systems -----------------------------------------------------------
     PartDef {
@@ -592,6 +736,8 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 4), (ResourceId::Components, 20)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: -5.0,
+        charge: 0.0,
     },
     PartDef {
         kind: PartKind::Reactor,
@@ -599,9 +745,9 @@ pub static PARTS: [PartDef; 28] = [
         layer: Layer::Object,
         blocks_movement: true,
         requires: Some(Layer::Floor),
-        // Nobody works a reactor by hand. There is no power simulation yet
-        // and no chain walks to one, so it has nowhere to stand and wants
-        // none.
+        // Nobody works a reactor by hand: it makes power the moment it is
+        // on a network — `crate::power` — and no chain walks to one, so it
+        // has nowhere to stand and wants none.
         use_spots: &[],
         price: 12_000,
         shields: false,
@@ -609,6 +755,8 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 30), (ResourceId::Components, 30)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: REACTOR_OUTPUT,
+        charge: 0.0,
     },
     PartDef {
         kind: PartKind::PowerConduit,
@@ -623,6 +771,8 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 1)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: 0.0,
+        charge: 0.0,
     },
     PartDef {
         kind: PartKind::Battery,
@@ -637,6 +787,8 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 4), (ResourceId::Components, 10)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: 0.0,
+        charge: BATTERY_CHARGE,
     },
     PartDef {
         kind: PartKind::FuelTank,
@@ -653,6 +805,8 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 10)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: 0.0,
+        charge: 0.0,
     },
     PartDef {
         kind: PartKind::LifeSupport,
@@ -667,6 +821,8 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 8), (ResourceId::Components, 12)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: -20.0,
+        charge: 0.0,
     },
     PartDef {
         kind: PartKind::Airlock,
@@ -683,6 +839,8 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 8), (ResourceId::Components, 6)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: 0.0,
+        charge: 0.0,
     },
     PartDef {
         kind: PartKind::SensorArray,
@@ -698,6 +856,8 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 3), (ResourceId::Components, 12)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: -10.0,
+        charge: 0.0,
     },
     // --- crew ---------------------------------------------------------------
     PartDef {
@@ -713,6 +873,8 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 2)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: 0.0,
+        charge: 0.0,
     },
     PartDef {
         kind: PartKind::Shower,
@@ -727,6 +889,8 @@ pub static PARTS: [PartDef; 28] = [
         recipe: &[(ResourceId::Metal, 3), (ResourceId::Components, 2)],
         thrust: 0.0,
         torque_thrust: 0.0,
+        power: 0.0,
+        charge: 0.0,
     },
     PartDef {
         kind: PartKind::Thruster,
@@ -754,8 +918,174 @@ pub static PARTS: [PartDef; 28] = [
         // what pins it, and `what_the_fixture_actually_flies_like` beside it
         // prints the numbers for whoever has to move this next.
         torque_thrust: 1_000.0,
+        power: 0.0,
+        charge: 0.0,
+    },
+    PartDef {
+        kind: PartKind::HeavyEngine,
+        footprint: (3, 4),
+        layer: Layer::Object,
+        blocks_movement: true,
+        requires: Some(Layer::Floor),
+        // Beside the middle of the left-hand side, as the small one is.
+        use_spots: &[(-1, 1)],
+        price: 75_000,
+        shields: true,
+        capacity: None,
+        // Three and a half times an `Engine` for five times the push, so it
+        // is the better engine *per tonne* — which is the point of it: a
+        // ship heavy enough to want one has hull and cargo to move, and a
+        // small engine on a big hull crawls. The fuel bill is per unit of
+        // thrust (`flight::data::FUEL_PER_THRUST_MINUTE`), so it also burns
+        // five times as much a minute, and a fast trip is a dear one.
+        recipe: &[(ResourceId::Metal, 150), (ResourceId::Components, 100)],
+        thrust: 10_000.0,
+        torque_thrust: 0.0,
+        power: 0.0,
+        charge: 0.0,
+    },
+    // --- the corners ---------------------------------------------------------
+    PartDef {
+        kind: PartKind::DiagonalWall,
+        footprint: (1, 1),
+        layer: Layer::Object,
+        blocks_movement: true,
+        // Hull like the straight wall: it stands on the frame with no deck
+        // needed, so a bulkhead can be drawn before the deck is laid.
+        requires: Some(Layer::Structure),
+        use_spots: &[],
+        price: 100,
+        shields: false,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 2)],
+        thrust: 0.0,
+        torque_thrust: 0.0,
+        power: 0.0,
+        charge: 0.0,
+    },
+    PartDef {
+        kind: PartKind::DiagonalOutsideWall,
+        footprint: (1, 1),
+        layer: Layer::Object,
+        blocks_movement: true,
+        requires: Some(Layer::Structure),
+        use_spots: &[],
+        price: 200,
+        shields: true,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 4), (ResourceId::Components, 1)],
+        thrust: 0.0,
+        torque_thrust: 0.0,
+        power: 0.0,
+        charge: 0.0,
+    },
+    // --- workstations -------------------------------------------------------
+    //
+    // Worked from the tile below, like the galley, and each is a bench the
+    // room's craft chain stands a Bim at — `bims::room::Bench`. Both draw,
+    // so both want conduit under them, and both stop in a brownout.
+    PartDef {
+        kind: PartKind::Smelter,
+        footprint: (2, 2),
+        layer: Layer::Object,
+        blocks_movement: true,
+        requires: Some(Layer::Floor),
+        use_spots: &[(0, 2)],
+        price: 8_000,
+        shields: false,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 20), (ResourceId::Components, 10)],
+        thrust: 0.0,
+        torque_thrust: 0.0,
+        power: -40.0,
+        charge: 0.0,
+    },
+    PartDef {
+        kind: PartKind::Workbench,
+        footprint: (2, 1),
+        layer: Layer::Object,
+        blocks_movement: true,
+        requires: Some(Layer::Floor),
+        use_spots: &[(0, 1)],
+        price: 3_000,
+        shields: false,
+        capacity: None,
+        recipe: &[(ResourceId::Metal, 6), (ResourceId::Components, 4)],
+        thrust: 0.0,
+        torque_thrust: 0.0,
+        power: -15.0,
+        charge: 0.0,
+    },
+    PartDef {
+        kind: PartKind::SuitLocker,
+        footprint: (1, 1),
+        layer: Layer::Object,
+        blocks_movement: true,
+        requires: Some(Layer::Floor),
+        use_spots: &[(0, 1)],
+        price: 1_500,
+        shields: false,
+        capacity: Some((Storage::Locker, 2)),
+        recipe: &[(ResourceId::Metal, 3), (ResourceId::Components, 2)],
+        thrust: 0.0,
+        torque_thrust: 0.0,
+        power: 0.0,
+        charge: 0.0,
+    },
+    PartDef {
+        kind: PartKind::Armoury,
+        footprint: (2, 1),
+        layer: Layer::Object,
+        blocks_movement: true,
+        requires: Some(Layer::Floor),
+        use_spots: &[(0, 1)],
+        price: 6_000,
+        shields: false,
+        capacity: Some((Storage::Locker, 4)),
+        recipe: &[(ResourceId::Metal, 10), (ResourceId::Components, 8)],
+        thrust: 0.0,
+        torque_thrust: 0.0,
+        power: -10.0,
+        charge: 0.0,
     },
 ];
+
+/// Whether a part is one of the two cut across its tile. What the painters
+/// and the drag vocabulary ask, so a third kind of corner is one row here.
+pub fn is_diagonal(kind: PartKind) -> bool {
+    matches!(kind, PartKind::DiagonalWall | PartKind::DiagonalOutsideWall)
+}
+
+/// Which corner of its tile a diagonal wall's right angle is in, as a step
+/// in each axis with `y` down: [`Rotation::R0`] is the **south-west** corner
+/// and the rest follow clockwise, the way [`Rotation::next`] turns. The
+/// solid half of the tile is the half that corner is in; the hypotenuse
+/// faces the corner opposite, and the two sides of the tile that touch the
+/// right angle are the two the wall runs the full length of.
+///
+/// This is the whole of what "which way round" means for a corner piece.
+/// Everything that draws one reads it, so a chamfer that was meant to face
+/// the bow cannot be drawn facing the stern by one painter and not another.
+pub fn solid_corner(rotation: Rotation) -> (i32, i32) {
+    match rotation {
+        Rotation::R0 => (-1, 1),
+        Rotation::R90 => (-1, -1),
+        Rotation::R180 => (1, -1),
+        Rotation::R270 => (1, 1),
+    }
+}
+
+/// Which way a door's leaves slide: along `x` when it stands in a bulkhead
+/// running east–west, along `y` in one running north–south. It is the long
+/// side of the turned footprint and nothing else — a door is two tiles
+/// along the bulkhead and one deep, so the rotation says which — and the
+/// room and the painter both read it here rather than guessing off the
+/// neighbours, which is how a door in a doorway of nothing came to be drawn
+/// one way and walked the other.
+pub fn door_slides_along_x(rotation: Rotation) -> bool {
+    let (w, h) = footprint(PartKind::Door, rotation);
+    w > h
+}
 
 /// What a part weighs: its recipe, added up.
 ///
@@ -824,12 +1154,52 @@ pub fn covered(kind: PartKind, rotation: Rotation) -> Vec<(u32, u32)> {
 
 /// Where a Bim stands to use the part, as offsets from its origin, once
 /// turned. Signed: most of them are outside the footprint.
+///
+/// A main engine is the exception: it is worked on from **any** side, so
+/// its spots are every tile ringing its footprint (corners left out — you
+/// cannot reach the housing from a corner), and the rules ask for *one* of
+/// them to be standable rather than all of them. See
+/// [`any_side_will_do`]. Everything else stands where its table row says.
 pub fn use_spots(kind: PartKind, rotation: Rotation) -> Vec<(i32, i32)> {
     let def = kind.def();
+    if any_side_will_do(kind) {
+        let (w, h) = (def.footprint.0 as i32, def.footprint.1 as i32);
+        let mut ring = Vec::with_capacity(2 * (w + h) as usize);
+        for y in 0..h {
+            ring.push((-1, y));
+            ring.push((w, y));
+        }
+        for x in 0..w {
+            ring.push((x, -1));
+            ring.push((x, h));
+        }
+        return ring
+            .into_iter()
+            .map(|spot| turn(spot, def.footprint, rotation))
+            .collect();
+    }
     def.use_spots
         .iter()
         .map(|&spot| turn(spot, def.footprint, rotation))
         .collect()
+}
+
+/// Whether a part is used from whichever side a body can get at, rather
+/// than from the spots its table row names: the main engines, which are
+/// bolted to the stern with hull round three sides of them and worked on
+/// from whatever side is left. The validator wants **one** of the ring's
+/// tiles to be deck for such a part, not all of them.
+pub fn any_side_will_do(kind: PartKind) -> bool {
+    kind.def().pushes()
+}
+
+/// Whether a consumer keeps running on what the reactor makes when the
+/// battery is flat: life support, and the doors. Everything else that
+/// draws stops in a brownout. A part named here has to draw, which
+/// [`defs_are_sound`] checks, because an essential that drew nothing would
+/// be a list that means nothing.
+pub fn essential(kind: PartKind) -> bool {
+    matches!(kind, PartKind::LifeSupport | PartKind::Door)
 }
 
 /// Whether one recipe holds together: something in it, only materials, a
@@ -838,7 +1208,10 @@ pub fn use_spots(kind: PartKind, rotation: Rotation) -> Vec<(i32, i32)> {
 fn recipe_is_sound(recipe: &'static [(ResourceId, u32)]) -> bool {
     !recipe.is_empty()
         && recipe.iter().enumerate().all(|(i, &(id, units))| {
-            let material = id == ResourceId::Metal || id == ResourceId::Components;
+            let material = matches!(
+                id,
+                ResourceId::Metal | ResourceId::Components | ResourceId::Emitter
+            );
             let once = !recipe[..i].iter().any(|&(seen, _)| seen == id);
             material && units > 0 && once
         })
@@ -856,7 +1229,7 @@ pub fn defs_are_sound() -> bool {
     }
     PartKind::ALL.iter().enumerate().all(|(i, &kind)| {
         let def = &PARTS[i];
-        let engine = kind == PartKind::Engine;
+        let engine = matches!(kind, PartKind::Engine | PartKind::HeavyEngine);
         let thruster = kind == PartKind::Thruster;
         def.kind == kind
             && recipe_is_sound(def.recipe)
@@ -864,13 +1237,23 @@ pub fn defs_are_sound() -> bool {
             && part_mass(kind).is_finite()
             && def.thrust.is_finite()
             && def.thrust >= 0.0
-            && (def.thrust > 0.0) == engine
+            && def.pushes() == engine
             // The two are exclusive on purpose. A part that both pushed and
             // turned would make "which engines are burning" — and therefore
             // the fuel bill — a different question for every design.
             && def.torque_thrust.is_finite()
             && def.torque_thrust >= 0.0
-            && (def.torque_thrust > 0.0) == thruster
+            && def.turns() == thruster
+            // Power is the same shape: made by the reactor, held by the
+            // battery, drawn by what `essential` names among others, and
+            // never two of those on one part.
+            && def.power.is_finite()
+            && def.supplies() == (kind == PartKind::Reactor)
+            && def.charge.is_finite()
+            && def.charge >= 0.0
+            && def.stores() == (kind == PartKind::Battery)
+            && !(def.supplies() && def.stores())
+            && (!essential(kind) || def.draws())
             && def.footprint.0 > 0
             && def.footprint.1 > 0
             && (def.layer == Layer::Floor) == (kind == PartKind::Floor)

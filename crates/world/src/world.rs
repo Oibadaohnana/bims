@@ -42,15 +42,16 @@ use economy::{Money, Storage, storage, trade_value};
 use flight::{Dynamics, Phase, Plan, PlanError, Target, angle};
 use physics::ResourceId;
 use shipdesign::parts::PartKind;
-use shipdesign::{ShipDesign, design_hash};
+use shipdesign::{CARGO_SLOTS, ShipDesign, design_hash};
 use worldgen::math::DVec2;
 use worldgen::{Galaxy, GalaxyType, Node, StarSystem};
 
-use crate::crew::Aboard;
+use crate::crew::{Aboard, Residents};
 use crate::data;
 use crate::event::{Refusal, WorldEvent};
 use crate::frame::{self, Frame};
 use crate::speed::{self, Speed};
+use crate::station::{Berth, Station};
 
 /// What a player can ask the world to do.
 ///
@@ -84,6 +85,14 @@ pub enum Command {
         resource: ResourceId,
         units: u32,
     },
+    /// Keep so many of `resource` made — see [`World::set_craft_target`].
+    /// A command rather than a setting because the benches work to it and
+    /// two players' ships have to agree about what the benches are doing.
+    SetCraftTarget {
+        slot: u32,
+        resource: ResourceId,
+        units: u32,
+    },
 }
 
 /// What the ship is doing.
@@ -99,6 +108,35 @@ pub enum ShipState {
     /// clock reading it began at — the two of them together are the ship's
     /// position at any moment, worked out rather than accumulated.
     Travelling { plan: Plan, departed: f64 },
+    /// A trip confirmed at a station. The ship is still at its berth with
+    /// the rooms joined, the station's people are going ashore and its own
+    /// coming back aboard, and it casts off once they have — or once
+    /// [`data::CASTING_OFF_LIMIT`] has gone by since `since`, whoever is
+    /// still on the wrong side. `Ship::pending` is where it is going.
+    CastingOff { station: u32, since: f64 },
+    /// Pushing off the berth, straight out of the station's door: from
+    /// `from`, `along` the way the door opens, for
+    /// [`data::UNDOCK_MINUTES`] from `began`. The trip is planned once the
+    /// ship is clear, from where it has got to, so the turn towards the
+    /// target is the plan's own align phase.
+    Undocking {
+        station: u32,
+        from: DVec2,
+        along: DVec2,
+        began: f64,
+    },
+    /// Coming alongside, over [`data::DOCK_MINUTES`] from `began`: from
+    /// where the trip ended to `hold`, the point in front of the station's
+    /// door the push-off ends at, turning onto the berth's heading on the
+    /// way; then straight in along the door's line to the berth, and
+    /// tied up at the end of it.
+    Docking {
+        station: u32,
+        from: DVec2,
+        from_heading: f64,
+        hold: DVec2,
+        began: f64,
+    },
 }
 
 impl ShipState {
@@ -108,8 +146,40 @@ impl ShipState {
             ShipState::Docked { .. } => 0,
             ShipState::Holding => 1,
             ShipState::Travelling { .. } => 2,
+            ShipState::CastingOff { .. } => 3,
+            ShipState::Undocking { .. } => 4,
+            ShipState::Docking { .. } => 5,
         }
     }
+
+    /// The station the ship is tied up at with the rooms joined — docked,
+    /// or casting off and not yet clear of the berth. What the painter
+    /// draws the airlocks mated for.
+    pub fn alongside(&self) -> Option<u32> {
+        match self {
+            ShipState::Docked { station } | ShipState::CastingOff { station, .. } => Some(*station),
+            _ => None,
+        }
+    }
+
+    /// The station the ship is at, tied up or on its way on or off the
+    /// berth. What the local frame and the residents' room are about.
+    pub fn station(&self) -> Option<u32> {
+        match self {
+            ShipState::Docked { station }
+            | ShipState::CastingOff { station, .. }
+            | ShipState::Undocking { station, .. }
+            | ShipState::Docking { station, .. } => Some(*station),
+            _ => None,
+        }
+    }
+}
+
+/// Nought to one, with no jolt at either end: how far along a push-off or
+/// a docking the ship is at `t` of `over` minutes.
+fn eased(t: f64, over: f64) -> f64 {
+    let t = (t / over).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// The ship: the design, where it is, and what it is doing.
@@ -135,9 +205,14 @@ pub struct Ship {
     /// colour, which is the whole of what it is for.
     pub destination_set_by: Option<u32>,
     pub frame: Frame,
-    /// Where a redirect is going once the ship has stopped. Only ever the
-    /// **latest** confirmed target: two Confirms in one step leave one.
+    /// Where a redirect is going once the ship has stopped, or where a
+    /// departure is going once the ship is clear of its berth. Only ever
+    /// the **latest** confirmed target: two Confirms in one step leave one.
     pub pending: Option<(u32, Target)>,
+    /// What is in the batteries, in power units — never more than what
+    /// the wired batteries hold. Full when the world opens, and moved by
+    /// [`World::run_power`] alone; see [`Power`].
+    pub charge: f64,
 }
 
 impl Ship {
@@ -211,9 +286,33 @@ pub struct World {
     /// simulation, laid out on this ship, one Bim per player at their own
     /// bunk from the moment the world opened. See [`crate::crew`].
     pub aboard: Aboard,
+    /// Every station of the system as a place: a hull on a grid at a
+    /// position, with a door the ship docks by. Built once, in id order.
+    /// See [`crate::station`].
+    pub stations: Vec<Station>,
+    /// The station the ship is near, if it is near one, as a room: the
+    /// room's whole simulation again, laid out on that station with the
+    /// people who live there in it, opened when the ship comes within
+    /// [`data::RESIDENTS_RANGE`] of the hull and closed when it leaves. One
+    /// at a time — the nearest. A derelict's room has nobody in it. See
+    /// [`crate::crew`].
+    pub residents: Option<Residents>,
     /// What the crew have seen, shared between all of them and never
     /// forgotten. Sorted, so a checksum over it means something.
     pub discovered: Vec<Node>,
+    /// How many of each resource the crew are to keep made, by
+    /// `ResourceId` — the player's standing instruction to the benches,
+    /// the way the manager's stew target is to the galley. A recipe is on
+    /// offer while the hold has fewer of its output than this. Nought until
+    /// somebody asks: a workshop that started the game smelting the ore
+    /// down would move every probe that pins the first morning.
+    pub craft_targets: [u32; CARGO_SLOTS],
+    /// Each crew member's body, by slot — `crates/health`: the dose and
+    /// what it has done. Stage 8 of the step. Only the suit doses anybody
+    /// yet: a walk outside is exposure at [`data::SUIT_INTENSITY`], and
+    /// under cover the dose comes off. The room's own hunger and sleep are
+    /// not in here; see the crate's note.
+    pub health: Vec<health::HealthState>,
     /// One per player, in slot order. The world runs at the slowest of them.
     pub speed_requests: Vec<Speed>,
 }
@@ -240,13 +339,15 @@ impl World {
         let players = players.max(1);
         let galaxy = Galaxy::new(seed, galaxy_type);
         let system = galaxy.system(star_id).ok_or(StartError::NoSuchStation)?;
-        let at = system
-            .absolute_position(Node::Station(station_id))
-            .ok_or(StartError::NoSuchStation)?;
+        let stations = Station::all_of(&system);
+        if !stations.iter().any(|s| s.id == station_id) {
+            return Err(StartError::NoSuchStation);
+        }
 
         let dynamics = flight::dynamics(&design, players).map_err(StartError::NotAShip)?;
         let aboard = Aboard::new(&design, players, seed);
-        let mut ship = Ship {
+        let design_for_charge = design.clone();
+        let ship = Ship {
             design,
             crew_count: players,
             dynamics,
@@ -259,8 +360,9 @@ impl World {
             destination_set_by: None,
             frame: Frame::Local(Node::Station(station_id)),
             pending: None,
+            // Full: the ship has been sitting at a station's dock.
+            charge: shipdesign::power_budget(&design_for_charge).storage,
         };
-        ship.set_position(at);
 
         let mut world = World {
             clock_minutes: 0.0,
@@ -272,7 +374,11 @@ impl World {
             money,
             ship,
             aboard,
+            stations,
+            residents: None,
             discovered: Vec::new(),
+            craft_targets: [0; CARGO_SLOTS],
+            health: vec![health::HealthState::new(); players as usize],
             // Everybody starts at real time. Anything else would have the
             // world already moving before the first player had looked at it.
             speed_requests: vec![Speed::Real; players as usize],
@@ -286,6 +392,10 @@ impl World {
         // is a way there, and anything a sweep turns up on the way.
         world.discovered = world.system.nodes();
         world.discovered.sort_by_key(node_key);
+        // Alongside from the first step: the ship at the station's door, and
+        // whoever lives there already up and about.
+        world.dock_at(station_id);
+        world.settle_residents();
         Ok(world)
     }
 
@@ -325,27 +435,68 @@ impl World {
         self.clock_minutes += data::STEP_MINUTES;
         self.steps += 1;
 
-        // 3. Flight.
+        // 3. Flight — and the two moves either side of a trip that are not
+        //    flown: pushing off the berth and coming alongside.
         let was = self.ship.position();
         self.fly(&mut events);
+        self.cast_off(&mut events);
+        self.come_alongside(&mut events);
         let now = self.ship.position();
 
         // 4. What that brought into range.
         self.discover_along(was, now, &mut events);
         self.settle_frame(&mut events);
+        self.settle_residents();
 
         // 5. Crew: the room's own update, aboard, on this clock. Bims live
         //    in ship-design coordinates and the ship's position, rotation and
         //    acceleration do not reach them. See `crates/world/src/crew.rs`.
+        //    The station's residents, when the ship is near one, are the
+        //    same room again on the same clock.
+        //
+        //    Away from a berth the ship wants somebody at the helm, and the
+        //    room offers that as a job. Not while casting off: the crew are
+        //    being walked home then, and the helm can wait until the ship is
+        //    clear. Docked, the post the job set is lifted.
+        let wants_helm = !matches!(
+            self.ship.state,
+            ShipState::Docked { .. } | ShipState::CastingOff { .. }
+        );
+        let seat = if wants_helm { self.helm_spot() } else { None };
+        self.aboard.set_helm(seat);
+        //    And what the benches are wanted for, worked out fresh from the
+        //    hold, the targets and the power; then, after the step, what
+        //    they finished, moved through the hold.
+        let orders = self.craft_orders();
+        self.aboard.room.set_craft_orders(orders);
+        let eva = self.eva_offer();
+        self.aboard.room.set_eva(eva);
         self.aboard.step();
+        if let Some(residents) = &mut self.residents {
+            residents.aboard.step();
+        }
+        for recipe in self.aboard.room.take_crafted() {
+            self.finish_craft(recipe, &mut events);
+        }
+        for _ in 0..self.aboard.room.take_walks() {
+            self.finish_walk(&mut events);
+        }
 
-        // 6. Construction. Also empty. What goes here builds and pulls apart
+        // 6. Power: what the reactors made this step against what the
+        //    wired consumers drew, into or out of the batteries. What is
+        //    running in a brownout is `World::powered`, read by whatever
+        //    draws — nothing aboard reads it yet.
+        self.run_power();
+
+        // 7. Construction. Empty. What goes here builds and pulls apart
         //    through `shipdesign::materials`, out of what is aboard, and asks
         //    `World::can_modify_part` before it touches anything.
 
-        // 7. Health and radiation. Also empty. The design's exposure map —
-        //    `shipdesign::exposure` — is the radiation input, and
-        //    `crates/health` is the body it goes into.
+        // 8. Health and radiation: each crew member's body, dosed while it
+        //    is outside in a suit and sheltered otherwise. The design's
+        //    exposure map — `shipdesign::exposure` — is the other input
+        //    and is not wired yet.
+        self.run_health(&mut events);
 
         events
     }
@@ -358,7 +509,8 @@ impl World {
             | Command::Abort { slot }
             | Command::SetSpeed { slot, .. }
             | Command::Buy { slot, .. }
-            | Command::Sell { slot, .. } => slot,
+            | Command::Sell { slot, .. }
+            | Command::SetCraftTarget { slot, .. } => slot,
         };
 
         match command {
@@ -386,6 +538,9 @@ impl World {
             Command::Sell {
                 resource, units, ..
             } => self.sell(slot, resource, units, events),
+            Command::SetCraftTarget {
+                resource, units, ..
+            } => self.set_craft_target(resource, units),
         }
     }
 
@@ -430,17 +585,24 @@ impl World {
             })
             .flatten();
 
-        self.ship.state = match station {
-            Some(id) => ShipState::Docked { station: id },
-            None => ShipState::Holding,
+        // The approach ends a station radius short of the berth, and going
+        // alongside closes the gap — a slide and a turn over
+        // `DOCK_MINUTES`, ending airlock to airlock. A station with no door
+        // to dock by is simply where the ship is put.
+        let hold = station.and_then(|id| self.hold_point(id));
+        self.ship.state = match (station, hold) {
+            (Some(id), Some(hold)) => ShipState::Docking {
+                station: id,
+                from: self.ship.position(),
+                from_heading: self.ship.heading,
+                hold,
+                began: self.clock_minutes,
+            },
+            (Some(id), None) => ShipState::Docked { station: id },
+            (None, _) => ShipState::Holding,
         };
-        // Docking is the one place the ship is *put* somewhere rather than
-        // flown there: the approach ends a station radius short, and going
-        // alongside closes the gap.
-        if let Some(id) = station
-            && let Some(at) = self.system.absolute_position(Node::Station(id))
-        {
-            self.ship.set_position(at);
+        if let ShipState::Docked { station: id } = self.ship.state {
+            self.dock_at(id);
         }
         if plan.aborting {
             self.ship.destination_set_by = None;
@@ -453,9 +615,103 @@ impl World {
                 self.set_off(slot, target, events);
                 return;
             }
+        } else if let ShipState::Docking { station, .. } = self.ship.state {
+            events.push(WorldEvent::Docking { station });
         } else {
             events.push(WorldEvent::Arrived { station });
         }
+    }
+
+    /// The two halves of leaving a station. Waiting at the berth for
+    /// everybody to be on their own side of the airlock — the station's
+    /// people are sent ashore and the crew called back every step, and
+    /// nobody is teleported — and then the push-off, read off the clock.
+    /// The trip is planned from wherever the push-off ends; a plan that
+    /// will not go leaves the ship holding there, as it would anywhere.
+    fn cast_off(&mut self, events: &mut Vec<WorldEvent>) {
+        match self.ship.state.clone() {
+            ShipState::CastingOff { station, since } => {
+                self.aboard.send_everybody_home(&self.ship.design);
+                let overdue = self.clock_minutes - since >= data::CASTING_OFF_LIMIT;
+                if !self.aboard.everybody_home(&self.ship.design) && !overdue {
+                    return;
+                }
+                let from = self.ship.position();
+                let along = self.way_out(station).unwrap_or(DVec2 { x: 0.0, y: 1.0 });
+                self.unjoin_rooms();
+                self.ship.state = ShipState::Undocking {
+                    station,
+                    from,
+                    along,
+                    began: self.clock_minutes,
+                };
+                let slot = self.ship.pending.map(|(slot, _)| slot).unwrap_or(0);
+                events.push(WorldEvent::Undocking { slot });
+            }
+            ShipState::Undocking {
+                from, along, began, ..
+            } => {
+                let t = self.clock_minutes - began;
+                let reach = self.undock_distance() * eased(t, data::UNDOCK_MINUTES);
+                self.ship.set_position(from.add(along.scale(reach)));
+                if t < data::UNDOCK_MINUTES {
+                    return;
+                }
+                self.ship.state = ShipState::Holding;
+                match self.ship.pending.take() {
+                    Some((slot, target)) => self.set_off(slot, target, events),
+                    None => self.ship.destination_set_by = None,
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// How far the ship pushes off before it turns: its own span, so a
+    /// turn in place clears the station's hull whichever way it goes.
+    fn undock_distance(&self) -> f64 {
+        self.ship.design.build_area as f64 * shipdesign::TILE as f64
+    }
+
+    /// The last stretch of a trip to a station, read off the clock, in two
+    /// halves of [`data::DOCK_MINUTES`]: to the hold point in front of the
+    /// door, turning onto the berth's heading on the way, and then straight
+    /// in along the door's line — the push-off backwards. Tied up at the
+    /// end: `dock_at` sets the ship down exactly and joins the rooms.
+    fn come_alongside(&mut self, events: &mut Vec<WorldEvent>) {
+        let ShipState::Docking {
+            station,
+            from,
+            from_heading,
+            hold,
+            began,
+        } = self.ship.state.clone()
+        else {
+            return;
+        };
+        let t = self.clock_minutes - began;
+        let half = data::DOCK_MINUTES / 2.0;
+        if let Some(berth) = self.berth_at(station) {
+            if t < half {
+                let f = eased(t, half);
+                let turn = angle::shortest(from_heading, berth.heading);
+                self.ship.heading = angle::wrap(from_heading + turn * f);
+                self.ship.set_position(from.add(hold.sub(from).scale(f)));
+            } else {
+                let f = eased(t - half, half);
+                self.ship.heading = berth.heading;
+                self.ship
+                    .set_position(hold.add(berth.position.sub(hold).scale(f)));
+            }
+        }
+        if t < data::DOCK_MINUTES {
+            return;
+        }
+        self.ship.state = ShipState::Docked { station };
+        self.dock_at(station);
+        events.push(WorldEvent::Arrived {
+            station: Some(station),
+        });
     }
 
     /// A Confirm. From rest it is a departure; under way it is a redirect,
@@ -471,12 +727,8 @@ impl World {
             return;
         }
 
-        let under_way = match &self.ship.state {
-            ShipState::Travelling { plan, departed } => Some((plan.clone(), *departed)),
-            _ => None,
-        };
-        match under_way {
-            Some((plan, departed)) => {
+        match self.ship.state.clone() {
+            ShipState::Travelling { plan, departed } => {
                 self.ship.pending = Some((slot, target));
                 self.ship.destination_set_by = Some(slot);
                 if plan.aborting {
@@ -487,14 +739,53 @@ impl World {
                 self.begin_abort(&plan, self.clock_minutes - departed);
                 events.push(WorldEvent::Aborted { slot });
             }
-            None => self.set_off(slot, target, events),
+            ShipState::Docked { station } => {
+                // Refused now rather than after everybody has been sent
+                // ashore for nothing: what would not fly from the berth
+                // will not fly from a ship's length outside it either.
+                if let Err(error) = self.plan_from_here(target) {
+                    events.push(WorldEvent::PlanFailed { slot, error });
+                    return;
+                }
+                self.ship.pending = Some((slot, target));
+                self.ship.destination_set_by = Some(slot);
+                self.ship.state = ShipState::CastingOff {
+                    station,
+                    since: self.clock_minutes,
+                };
+                events.push(WorldEvent::CastingOff { slot });
+            }
+            // Still leaving: only where to is changed.
+            ShipState::CastingOff { .. } | ShipState::Undocking { .. } => {
+                self.ship.pending = Some((slot, target));
+                self.ship.destination_set_by = Some(slot);
+            }
+            ShipState::Docking { .. } => {
+                events.push(refused(slot, Refusal::ComingAlongside));
+            }
+            ShipState::Holding => self.set_off(slot, target, events),
         }
     }
 
-    /// An Abort. Unlike a redirect it leaves nothing pending.
+    /// An Abort. Unlike a redirect it leaves nothing pending. At the berth
+    /// it is the departure called off — the ship stays tied up; pushing
+    /// off, the push-off finishes and the ship holds there.
     fn give_up(&mut self, slot: u32, events: &mut Vec<WorldEvent>) {
         let under_way = match &self.ship.state {
             ShipState::Travelling { plan, departed } => Some((plan.clone(), *departed)),
+            ShipState::CastingOff { station, .. } => {
+                self.ship.state = ShipState::Docked { station: *station };
+                self.ship.pending = None;
+                self.ship.destination_set_by = None;
+                events.push(WorldEvent::Aborted { slot });
+                return;
+            }
+            ShipState::Undocking { .. } => {
+                self.ship.pending = None;
+                self.ship.destination_set_by = None;
+                events.push(WorldEvent::Aborted { slot });
+                return;
+            }
             _ => None,
         };
         let Some((plan, departed)) = under_way else {
@@ -531,6 +822,7 @@ impl World {
                     plan,
                     departed: self.clock_minutes,
                 };
+                self.unjoin_rooms();
                 events.push(WorldEvent::Departed { slot });
             }
             Err(error) => {
@@ -562,7 +854,181 @@ impl World {
     pub fn target_position(&self, target: Target) -> Option<DVec2> {
         match target {
             Target::Point(at) => Some(at),
+            // A station is flown to by its door, not by its middle: the
+            // trip is aimed at the hold point in front of it and ends a
+            // station radius short of that, and coming alongside covers
+            // the rest — so the ship never comes to rest inside a station.
+            Target::Station(id) => self
+                .hold_point(id)
+                .or_else(|| self.system.absolute_position(Node::Station(id))),
             other => self.system.absolute_position(other.node()?),
+        }
+    }
+
+    // --- stations ------------------------------------------------------------
+
+    pub fn station(&self, id: u32) -> Option<&Station> {
+        self.stations.iter().find(|s| s.id == id)
+    }
+
+    /// Where this ship docks at that station: airlock to airlock, outside
+    /// its hull. `None` for a station that is not there or has no door.
+    pub fn berth_at(&self, id: u32) -> Option<Berth> {
+        self.station(id)?
+            .berth(&self.ship.design, self.ship.dynamics.centre_of_mass)
+    }
+
+    /// The point in front of that station's door where a push-off ends and
+    /// a docking begins its last straight run: the berth, a ship's span out
+    /// along the way the door opens. `None` where there is no berth.
+    pub fn hold_point(&self, id: u32) -> Option<DVec2> {
+        let berth = self.berth_at(id)?;
+        let out = self.way_out(id)?;
+        Some(berth.position.add(out.scale(self.undock_distance())))
+    }
+
+    /// The way out of that station's door: the way the door opens, or, for
+    /// a station with no door, straight away from its middle.
+    fn way_out(&self, id: u32) -> Option<DVec2> {
+        let station = self.station(id)?;
+        if let Some((_, out)) = station.face() {
+            return Some(out);
+        }
+        let away = self.ship.position().sub(station.centre());
+        let len = away.length();
+        (len > 0.0).then(|| away.scale(1.0 / len))
+    }
+
+    /// Put the ship at its berth: the one place, with [`World::start`], that
+    /// it is set down rather than flown. Heading first, because the position
+    /// is worked out through it.
+    fn dock_at(&mut self, id: u32) {
+        let Some(berth) = self.berth_at(id) else {
+            if let Some(at) = self.system.absolute_position(Node::Station(id)) {
+                self.ship.set_position(at);
+            }
+            return;
+        };
+        self.ship.heading = berth.heading;
+        self.ship.set_position(berth.position);
+        self.join_rooms(id, berth);
+    }
+
+    /// Docked: the ship's room and the station's become one, so the crew
+    /// can walk through the airlocks. See [`crate::docking`]. The station
+    /// keeps a room of its own with nobody in it, for its pictures — the
+    /// joined room draws the ship's fixtures and everybody's bunks, and the
+    /// station's galley is only furniture in it.
+    fn join_rooms(&mut self, id: u32, berth: Berth) {
+        let Some(station) = self.station(id) else {
+            return;
+        };
+        let Some(joined) = crate::docking::join(
+            &self.ship.design,
+            self.ship.dynamics.centre_of_mass,
+            station,
+            &berth,
+        ) else {
+            return;
+        };
+        let (design, count, seed) = (
+            station.design.clone(),
+            station.residents(),
+            station.map_seed,
+        );
+        // The residents: out of the station's room if it is open, or fresh
+        // at their bunks if the ship arrived faster than the room opened.
+        let residents = match self.residents.take() {
+            Some(residents) if residents.station == id => residents.take(),
+            _ => Residents::open(id, &design, count, seed, self.clock_minutes).take(),
+        };
+        let ship_seed = self.galaxy_seed ^ self.steps;
+        let crew = std::mem::replace(&mut self.aboard, Aboard::new(&self.ship.design, 1, 0))
+            .room
+            .take_crew();
+        self.aboard = Aboard::joined(
+            joined,
+            &self.ship.design,
+            &design,
+            crew,
+            residents,
+            ship_seed,
+            self.clock_minutes,
+        );
+        let mut kept = Residents::open(id, &design, 0, seed, self.clock_minutes);
+        // Its doors are the joined room's to draw — those are the ones with
+        // people walking through them, and a second picture of each in a
+        // state of its own would be a door in two states at once.
+        kept.aboard.room.set_doors_drawn(false);
+        self.residents = Some(kept);
+    }
+
+    /// Under way again: the ship's room is the ship's alone. The residents
+    /// are let go — the station's room reopens with them at their bunks
+    /// while the ship is still within range, which is the same forgetting
+    /// as flying out of range and back.
+    fn unjoin_rooms(&mut self) {
+        if !self.aboard.is_joined() {
+            return;
+        }
+        let seed = self.galaxy_seed ^ self.steps;
+        let old = std::mem::replace(&mut self.aboard, Aboard::new(&self.ship.design, 1, 0));
+        let (aboard, _residents) = old.unjoined(&self.ship.design, seed, self.clock_minutes);
+        self.aboard = aboard;
+        self.residents = None;
+    }
+
+    /// The nearest station, and how far the ship is from its hull.
+    fn nearest_station(&self) -> Option<(&Station, f64)> {
+        let here = self.ship.position();
+        self.stations
+            .iter()
+            .map(|s| (s, s.clearance(here)))
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+    }
+
+    /// Open the station's room when the ship comes within range of its hull,
+    /// and close it when the ship leaves. Every station gets one — a
+    /// derelict's has nobody in it, and is opened all the same because the
+    /// room is what has the pictures of the fixtures. The way out is
+    /// further than the way in, the same hysteresis as the local frame and
+    /// for the same reason: a ship holding on the line must not open and
+    /// close a whole room every step.
+    fn settle_residents(&mut self) {
+        // Docked, the station is in the ship's room and its own room is the
+        // one `join_rooms` left for its pictures. Nothing to settle — and
+        // not while the ship is casting off either, since the rooms are
+        // still one until it does.
+        if matches!(
+            self.ship.state,
+            ShipState::Docked { .. } | ShipState::CastingOff { .. }
+        ) {
+            return;
+        }
+        let near = self
+            .nearest_station()
+            .map(|(s, clearance)| (s.id, clearance, s.residents(), s.map_seed));
+        if let Some(residents) = &self.residents {
+            let same = near.filter(|&(id, _, _, _)| id == residents.station);
+            let keep = same.is_some_and(|(_, clearance, _, _)| {
+                clearance <= data::RESIDENTS_RANGE * data::LOCAL_HYSTERESIS
+            });
+            if keep {
+                return;
+            }
+            self.residents = None;
+        }
+        if let Some((id, clearance, count, seed)) = near
+            && clearance <= data::RESIDENTS_RANGE
+            && let Some(station) = self.station(id)
+        {
+            self.residents = Some(Residents::open(
+                id,
+                &station.design,
+                count,
+                seed,
+                self.clock_minutes,
+            ));
         }
     }
 
@@ -627,6 +1093,232 @@ impl World {
         if let Ok(dynamics) = flight::dynamics(&self.ship.design, self.ship.crew_count) {
             self.ship.dynamics = dynamics;
         }
+        // A battery taken off takes what was in it; one put on arrives
+        // empty. Either way the charge cannot exceed what is there to hold
+        // it.
+        let storage = shipdesign::power_budget(&self.ship.design).storage;
+        if self.ship.charge > storage {
+            self.ship.charge = storage;
+        }
+    }
+
+    /// Stage 6 of [`World::step`]: the reactors' output less the wired
+    /// consumers' draw, over one step, into the batteries and clamped to
+    /// what they hold. Closed form off the step length, so a browser at
+    /// 24x and a server catching up land on the same charge.
+    ///
+    /// The draw is charged in full whether or not the ship is browned
+    /// out: what stops in a brownout is the consumers, and what they would
+    /// have drawn was never there to take. The clamp at nought *is* the
+    /// brownout.
+    fn run_power(&mut self) {
+        let budget = shipdesign::power_budget(&self.ship.design);
+        let net = (budget.supply - budget.draw) * data::STEP_MINUTES;
+        self.ship.charge = (self.ship.charge + net).clamp(0.0, budget.storage);
+    }
+
+    // --- making things -------------------------------------------------------
+
+    /// Set what the crew are to keep made of `resource`. Clamped to what the
+    /// shelf could hold, since a target past that is one the benches would
+    /// never reach.
+    pub fn set_craft_target(&mut self, resource: ResourceId, units: u32) {
+        let most = self.ship.design.capacity(storage(resource));
+        self.craft_targets[resource as usize] = units.min(most);
+    }
+
+    pub fn craft_target(&self, resource: ResourceId) -> u32 {
+        self.craft_targets[resource as usize]
+    }
+
+    /// Whether one of `recipe` could be made out of the hold right now:
+    /// every input aboard, and room in the output's class for the output
+    /// once the inputs are out of it.
+    fn can_make(&self, recipe: &shipdesign::Recipe) -> bool {
+        let design = &self.ship.design;
+        let inputs_aboard = recipe
+            .inputs
+            .iter()
+            .all(|&(id, units)| design.carrying(id) >= units);
+        let class = storage(recipe.output.0);
+        let freed: u32 = recipe
+            .inputs
+            .iter()
+            .filter(|&&(id, _)| storage(id) == class)
+            .map(|&(_, units)| units)
+            .sum();
+        let after = design
+            .stored(class)
+            .saturating_sub(freed)
+            .saturating_add(recipe.output.1);
+        inputs_aboard && after <= design.capacity(class)
+    }
+
+    /// Every recipe the benches are wanted for this step, one order per
+    /// bench of its station: the hold short of the target, one makeable,
+    /// the station wired and running. In recipe order, which is what the
+    /// room picks from.
+    pub fn craft_orders(&self) -> Vec<bims::game::Order> {
+        let mut orders = Vec::new();
+        for (i, recipe) in shipdesign::RECIPES.iter().enumerate() {
+            let (output, units) = recipe.output;
+            // What is aboard plus what is on the bench: a chain already
+            // making one counts, or the target would be overshot by one
+            // for every step the first one took.
+            let coming = self.aboard.room.crafts_under_way(i as u32) * units;
+            if self.ship.design.carrying(output) + coming >= self.craft_targets[output as usize] {
+                continue;
+            }
+            if !self.can_make(recipe) || !self.powered(recipe.station) {
+                continue;
+            }
+            for (bench, b) in self.aboard.room.benches().iter().enumerate() {
+                if b.kind == recipe.station.code() {
+                    orders.push(bims::game::Order {
+                        recipe: i as u32,
+                        bench,
+                        minutes: recipe.minutes as f32,
+                    });
+                }
+            }
+        }
+        orders
+    }
+
+    /// A Bim finished `recipe`: the inputs out of the hold and the output
+    /// in, if the hold still allows it — the ore may have been sold while
+    /// the Bim stood at the smelter — and an event either way. The mass
+    /// moves with the cargo; `on_ship_changed` is what notices.
+    fn finish_craft(&mut self, recipe: u32, events: &mut Vec<WorldEvent>) {
+        let Some(r) = shipdesign::RECIPES.get(recipe as usize) else {
+            return;
+        };
+        if !self.can_make(r) {
+            events.push(WorldEvent::CraftLost { recipe });
+            return;
+        }
+        for &(id, units) in r.inputs {
+            self.ship.design.cargo[id as usize] -= units;
+        }
+        self.ship.design.cargo[r.output.0 as usize] += r.output.1;
+        self.on_ship_changed();
+        events.push(WorldEvent::Crafted { recipe });
+    }
+
+    // --- a walk outside ------------------------------------------------------
+
+    /// The belt the ship is holding at, if it is: at rest in the local
+    /// frame of a body of that kind.
+    fn belt_alongside(&self) -> Option<&worldgen::Body> {
+        if self.ship.state != ShipState::Holding {
+            return None;
+        }
+        let Frame::Local(Node::Body(id)) = self.ship.frame else {
+            return None;
+        };
+        self.system
+            .body(id)
+            .filter(|b| b.kind == worldgen::BodyKind::AsteroidBelt)
+    }
+
+    /// Whether the crew may walk outside this step, and who: holding at a
+    /// belt, a port to go out by, a suit in the locker, room on the shelf
+    /// for what comes back, and each Bim's dose under the limit.
+    pub fn eva_offer(&self) -> Option<bims::game::Eva> {
+        self.belt_alongside()?;
+        shipdesign::dock::port(&self.ship.design)?;
+        if self.ship.design.carrying(ResourceId::Suit) == 0 {
+            return None;
+        }
+        let design = &self.ship.design;
+        if design.stored(Storage::Shelf) >= design.capacity(Storage::Shelf) {
+            return None;
+        }
+        Some(bims::game::Eva {
+            minutes: data::EVA_MINUTES as f32,
+            allowed: self
+                .health
+                .iter()
+                .map(|h| !h.dead && h.dose < data::EVA_DOSE_LIMIT)
+                .collect(),
+        })
+    }
+
+    /// A walk came back: what the belt yields, onto the shelf, as much of
+    /// it as fits. The belt is read now rather than when the walk began,
+    /// since a ship that set off mid-walk would have brought the walker in
+    /// through `abandon` and counted no walk.
+    fn finish_walk(&mut self, events: &mut Vec<WorldEvent>) {
+        let Some(belt) = self.belt_alongside() else {
+            events.push(WorldEvent::Mined { ore: 0, galvum: 0 });
+            return;
+        };
+        let yield_ = worldgen::belt_yield(self.galaxy_seed, self.star_id, belt.id, belt.kind);
+        let design = &mut self.ship.design;
+        let room = design
+            .capacity(Storage::Shelf)
+            .saturating_sub(design.stored(Storage::Shelf));
+        let ore = yield_.ore.min(room);
+        design.cargo[ResourceId::Ore as usize] += ore;
+        let galvum = if yield_.galvum && room > ore { 1 } else { 0 };
+        design.cargo[ResourceId::Galvum as usize] += galvum;
+        self.on_ship_changed();
+        events.push(WorldEvent::Mined { ore, galvum });
+    }
+
+    /// Stage 8: each body, one step on, exposed while outside in the suit
+    /// and sheltered otherwise. Closed form in the health crate, so a
+    /// server catching up on an hour lands where a browser did.
+    fn run_health(&mut self, events: &mut Vec<WorldEvent>) {
+        for who in 0..self.health.len() {
+            let exposure = if self.aboard.room.is_outside(who) {
+                health::Exposure::Exposed {
+                    intensity: data::SUIT_INTENSITY,
+                }
+            } else {
+                health::Exposure::Shielded
+            };
+            for event in health::update(&mut self.health[who], data::STEP_MINUTES, exposure) {
+                events.push(WorldEvent::Health {
+                    who: who as u32,
+                    event,
+                });
+            }
+        }
+    }
+
+    /// The ship's power, as the crew would read it off a panel.
+    pub fn power(&self) -> Power {
+        let budget = shipdesign::power_budget(&self.ship.design);
+        Power {
+            supply: budget.supply,
+            draw: budget.draw,
+            storage: budget.storage,
+            charge: self.ship.charge,
+        }
+    }
+
+    /// Whether a consumer of this kind is running: some part of that kind
+    /// is on a live network, and either the ship is not browned out or the
+    /// kind is one of the essentials, which run off the reactor's own
+    /// output when the batteries are flat. A kind that draws nothing is
+    /// running by definition; a kind that draws and is not aboard is not.
+    ///
+    /// Asked per **kind** rather than per part, because what asks it is a
+    /// chain deciding whether the smelter works, and a chain has a kind in
+    /// hand and not an id.
+    pub fn powered(&self, kind: PartKind) -> bool {
+        let def = kind.def();
+        if !def.draws() {
+            return true;
+        }
+        let wired = self
+            .ship
+            .design
+            .parts
+            .iter()
+            .any(|p| p.kind == kind && shipdesign::is_powered(&self.ship.design, p.id));
+        wired && (!self.power().brownout() || shipdesign::essential(kind))
     }
 
     /// Whether the construction step may touch a part of this kind.
@@ -638,7 +1330,7 @@ impl World {
     /// with nowhere to sit.
     pub fn can_modify_part(&self, kind: PartKind) -> bool {
         let travelling = matches!(self.ship.state, ShipState::Travelling { .. });
-        if travelling && matches!(kind, PartKind::Engine | PartKind::Thruster) {
+        if travelling && (kind.def().pushes() || kind.def().turns()) {
             return false;
         }
         if let Some((Storage::FuelTank, units)) = kind.def().capacity {
@@ -654,21 +1346,84 @@ impl World {
         true
     }
 
-    /// Whether this player may give the ship an order.
-    ///
-    /// **Always true in this step**, and it is a function rather than nothing
-    /// at all because it is the single place a later step will require that
-    /// player's Bim to be standing at a Helm use spot. Confirm and Abort ask
-    /// it; speed and trading deliberately do not.
+    /// Whether this player may give the ship an order: their crew member
+    /// has to be standing at the helm. Confirm and Abort ask it; speed and
+    /// trading deliberately do not.
     pub fn can_command(&self, slot: u32) -> bool {
-        slot < self.speed_requests.len() as u32
+        slot < self.speed_requests.len() as u32 && self.at_the_helm(slot)
+    }
+
+    /// The seat at the helm: the middle of the first helm's use spot, in
+    /// the ship's design units. `None` for a ship with no helm, which
+    /// nobody can fly from anywhere.
+    pub fn helm_spot(&self) -> Option<DVec2> {
+        let helm = self
+            .ship
+            .design
+            .parts
+            .iter()
+            .filter(|p| p.kind == PartKind::Helm)
+            .min_by_key(|p| p.id)?;
+        let &(x, y) = helm.use_spots().first()?;
+        let t = shipdesign::TILE as f64;
+        Some(DVec2 {
+            x: (x as f64 + 0.5) * t,
+            y: (y as f64 + 0.5) * t,
+        })
+    }
+
+    /// Whether that player's crew member is at the helm: within
+    /// [`data::HELM_REACH`] of the seat. Slot *i* is Bim *i*, the same
+    /// pairing as the bunks.
+    pub fn at_the_helm(&self, slot: u32) -> bool {
+        if slot >= self.aboard.crew_count() {
+            return false;
+        }
+        self.helm_spot()
+            .is_some_and(|seat| self.aboard.position(slot).distance(seat) <= data::HELM_REACH)
+    }
+
+    /// Send that player's crew member to the helm, to stand there until
+    /// sent elsewhere. A room order like any other, not a command: it
+    /// crosses no seam and lands on nobody else's screen. False when there
+    /// is no helm or no way to it.
+    pub fn order_to_helm(&mut self, slot: u32) -> bool {
+        if slot >= self.aboard.crew_count() {
+            return false;
+        }
+        let Some(seat) = self.helm_spot() else {
+            return false;
+        };
+        let at = seat.add(self.aboard.offset);
+        self.aboard
+            .room
+            .send_to(slot as usize, bims::math::vec2(at.x as f32, at.y as f32))
+    }
+
+    /// Stand that player's crew member at the helm this instant. For the
+    /// probes: a test of a trip is not a test of the walk to the seat.
+    pub fn man_the_helm_for_probe(&mut self, slot: u32) {
+        let Some(seat) = self.helm_spot() else {
+            return;
+        };
+        let at = seat.add(self.aboard.offset);
+        self.aboard
+            .room
+            .post_for_probe(slot as usize, bims::math::vec2(at.x as f32, at.y as f32));
     }
 
     // --- trading ------------------------------------------------------------
 
     fn buy(&mut self, slot: u32, resource: ResourceId, units: u32, events: &mut Vec<WorldEvent>) {
-        if !matches!(self.ship.state, ShipState::Docked { .. }) {
+        let ShipState::Docked { station } = self.ship.state else {
             events.push(refused(slot, Refusal::NotDocked));
+            return;
+        };
+        if !self
+            .station(station)
+            .is_some_and(|s| s.kind.sells(resource))
+        {
+            events.push(refused(slot, Refusal::NotSoldHere));
             return;
         }
         let Ok(value) = trade_value(resource, units) else {
@@ -777,7 +1532,10 @@ impl World {
     /// Which node the view is about, if it is about one at all.
     fn frame_candidate(&self) -> Option<(Node, f64, f64)> {
         let node = match &self.ship.state {
-            ShipState::Docked { station } => Node::Station(*station),
+            ShipState::Docked { station }
+            | ShipState::CastingOff { station, .. }
+            | ShipState::Undocking { station, .. }
+            | ShipState::Docking { station, .. } => Node::Station(*station),
             ShipState::Holding => self.nearest_discovered()?,
             ShipState::Travelling { plan, departed } => {
                 // The last leg of a trip aimed at somewhere, and only that.
@@ -926,11 +1684,37 @@ impl World {
         self.ship.set_position(at);
     }
 
+    /// Let go of the dock without flying anywhere: holding, with the ship's
+    /// room its own again. For probes of what happens away from a station.
+    pub fn undock_for_probe(&mut self) {
+        self.ship.state = ShipState::Holding;
+        self.unjoin_rooms();
+    }
+
     /// Settle the local frame, for a probe that has just moved the ship.
     pub fn settle_frame_for_probe(&mut self) -> Vec<WorldEvent> {
         let mut events = Vec::new();
         self.settle_frame(&mut events);
         events
+    }
+}
+
+/// The ship's power at this instant: units a minute in and out, and what
+/// the batteries hold and have.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Power {
+    pub supply: f64,
+    pub draw: f64,
+    pub storage: f64,
+    pub charge: f64,
+}
+
+impl Power {
+    /// Whether the optional consumers have stopped: more drawn than made,
+    /// and nothing left in the batteries to cover the difference. A ship
+    /// with no batteries and a short network is browned out for good.
+    pub fn brownout(&self) -> bool {
+        self.draw > self.supply && self.charge <= 0.0
     }
 }
 
@@ -988,8 +1772,39 @@ fn segment_distance(from: DVec2, to: DVec2, point: DVec2) -> f64 {
     from.add(along.scale(t)).distance(point)
 }
 
-/// Where the **simulation** starts: the lowest star id with a station in its
-/// system, and the lowest station id in that system.
+/// Any dock somebody lives on, anywhere in the galaxy: the `pick`-th of
+/// them, in star then station order, wrapping round. For `nix run .#test`,
+/// which wants a *different* place each time and a place a crew can live —
+/// so a random roll from the page turns into a random system, and the same
+/// roll into the same one.
+///
+/// Every system is generated to answer it, which is what the lobby's World
+/// tab does too; a galaxy is a few hundred stars and it takes a moment.
+pub fn spawn_anywhere(galaxy: &Galaxy, pick: u64) -> Option<(u32, u32)> {
+    let docks: Vec<(u32, u32)> = galaxy
+        .every_system()
+        .iter()
+        .flat_map(|system| {
+            system
+                .stations
+                .iter()
+                .filter(|s| crate::station::residents_of(s.kind) > 0)
+                .map(move |s| (system.star_id, s.id))
+        })
+        .collect();
+    if docks.is_empty() {
+        return None;
+    }
+    Some(docks[(pick % docks.len() as u64) as usize])
+}
+
+/// Where the **simulation** starts: the lowest star id with a station
+/// somebody lives on, and the lowest such station in that system.
+///
+/// Somebody lives on it, because a crew that opens docked at a derelict
+/// opens beside a wreck with nobody aboard — which is a place to salvage,
+/// not a place to start from. `crate::station::residents_of` is what says
+/// who lives where.
 ///
 /// The game proper starts where the lobby's World tab said, and that pair
 /// comes into [`World::start`] from outside. This is for `nix run
@@ -1000,7 +1815,13 @@ pub fn spawn(galaxy: &Galaxy) -> Option<(u32, u32)> {
         let Some(system) = galaxy.system(star.id) else {
             continue;
         };
-        if let Some(station) = system.stations.iter().map(|s| s.id).min() {
+        if let Some(station) = system
+            .stations
+            .iter()
+            .filter(|s| crate::station::residents_of(s.kind) > 0)
+            .map(|s| s.id)
+            .min()
+        {
             return Some((star.id, station));
         }
     }

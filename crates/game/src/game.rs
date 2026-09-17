@@ -5,11 +5,12 @@ use crate::bim::{Bim, CREW, PLAYER, TALKS_ABOUT, TRAIL_LIFE};
 use crate::character::{ACCENT, Action, BODY_MARGIN, Held};
 use crate::clock::MINUTES_PER_SECOND;
 use crate::clock::{self, Clock};
+use crate::door;
 use crate::draw::{Color, DrawList};
 use crate::filth;
 use crate::health::Malnutrition;
 use crate::hydro;
-use crate::manager::Manager;
+use crate::manager::{Manager, Stock};
 use crate::math::{Rect, Vec2, vec2};
 use crate::memory::What;
 use crate::nav::Maps;
@@ -49,6 +50,11 @@ const DOOR_CLEARANCE: f32 = 16.0;
 /// under two body margins: shoulder to shoulder in the gangway beside the
 /// table, not merely in the same half of the room.
 const CREW_CLEARANCE: f32 = 2.0 * BODY_MARGIN - 8.0;
+
+/// How far off its post a Bim may drift before it walks back: about half a
+/// cell of the nav grid, which is as close as a route can be relied on to
+/// leave it, plus a shove from a shipmate squeezing past.
+const POST_SLACK: f32 = 20.0;
 
 /// How long one of them holds the floor before the other gets a word in, in
 /// game minutes. Read off the ship's clock rather than off either chain, so
@@ -97,6 +103,23 @@ const FLEE_LOOK: i32 = 4;
 const NAP_MINUTES: f32 = 15.0;
 const NAP_EVERY: f32 = 45.0;
 
+/// The galley, for judging what comes out of it: every tile within two of
+/// the hob, and for each of them with a mess on it — as bad as a wetting,
+/// see `filth::SPOILS_FOOD` — a one-in-five chance the meal is bad. Rolled once per meal, the moment the pot finishes
+/// cooking — a reheated stew included, since it is the hob it is warmed on
+/// — or a bowl is filled off the board.
+const GALLEY_REACH: i32 = 2;
+const BAD_FOOD_PER_DIRTY_TILE: f32 = 0.20;
+/// What a bad meal does, and for how long: the restroom need runs three
+/// times as fast, and reaching nothing is the accident at once — there is
+/// no holding on. Two days to get over it.
+const POISONING_LASTS: f32 = 2.0 * clock::DAY;
+const POISONED_PURGE: f32 = 3.0;
+
+/// How far off the helm's seat a post still counts as the helm: a route is
+/// snapped to the nearest free cell, and the world's own reach is a tile.
+const HELM_SLACK: f32 = 52.0;
+
 /// What the Bim is doing, as plain codes the host turns into words. A nap and
 /// a full sleep are the same chain but read differently, so they count as two.
 pub const JOB_MEAL: u32 = 1;
@@ -113,11 +136,18 @@ pub const JOB_TEND: u32 = 11;
 pub const JOB_LEFTOVERS: u32 = 12;
 pub const JOB_CLEAN: u32 = 13;
 pub const JOB_CHAT: u32 = 14;
+pub const JOB_STEW: u32 = 15;
+pub const JOB_REHEAT: u32 = 16;
+pub const JOB_SHOWER: u32 = 17;
+pub const JOB_CRAFT: u32 = 18;
+pub const JOB_EVA: u32 = 19;
 
 fn job_code(kind: Kind, rest_minutes: f32) -> u32 {
     match kind {
         Kind::Meal(Dish::Stew) => JOB_MEAL,
         Kind::Meal(Dish::Bowl) => JOB_BOWL,
+        Kind::Batch => JOB_STEW,
+        Kind::Reheat => JOB_REHEAT,
         Kind::Rest if rest_minutes >= SLEEP_MINUTES => JOB_SLEEP,
         Kind::Rest => JOB_NAP,
         Kind::Heads => JOB_HEADS,
@@ -125,11 +155,17 @@ fn job_code(kind: Kind, rest_minutes: f32) -> u32 {
         Kind::Switch(Switch::FridgeDoor) => JOB_FRIDGE,
         Kind::Switch(Switch::BathDoor(_)) => JOB_BATH_DOOR,
         Kind::Switch(Switch::BathLock(_)) => JOB_BATH_LOCK,
+        // A ship's door is worked the same two ways, and named the same.
+        Kind::Switch(Switch::Door(_, door::Order::Open | door::Order::Close)) => JOB_BATH_DOOR,
+        Kind::Switch(Switch::Door(_, door::Order::Lock | door::Order::Unlock)) => JOB_BATH_LOCK,
         Kind::Switch(Switch::Dishwasher) => JOB_DISHWASHER,
         Kind::Tend(_) => JOB_TEND,
         Kind::Leftovers => JOB_LEFTOVERS,
         Kind::Clean => JOB_CLEAN,
         Kind::Chat => JOB_CHAT,
+        Kind::Shower => JOB_SHOWER,
+        Kind::Craft { .. } => JOB_CRAFT,
+        Kind::Eva => JOB_EVA,
     }
 }
 
@@ -146,6 +182,29 @@ struct Marker {
     /// A place the Bim cannot get to. Drawn in the one warm colour the room
     /// keeps for things worth noticing, so a refused order is not silent.
     bad: bool,
+}
+
+/// One recipe the world would like made, at one bench: what the room's
+/// craft job is offered off. The world hands the room a fresh list every
+/// step — see `Game::set_craft_orders` — worked out from the hold, the
+/// player's targets and the power; the room decides only who goes and
+/// whether the bench is free. `minutes` is how long the recipe takes,
+/// carried because the room has no recipe table.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Order {
+    pub recipe: u32,
+    pub bench: usize,
+    pub minutes: f32,
+}
+
+/// What the world says about a walk outside, this step: how long one is,
+/// and who may go — a Bim whose dose is already high may not. `None` when
+/// there is nowhere to walk to: not at a belt, no suit aboard, no room for
+/// the ore. See `Game::set_eva`.
+#[derive(Clone, PartialEq)]
+pub struct Eva {
+    pub minutes: f32,
+    pub allowed: Vec<bool>,
 }
 
 /// A part of the ship only one Bim can be using at a time.
@@ -172,12 +231,23 @@ enum Exclusive {
     /// The broom. There is one of it, so one Bim sweeps at a time — the other
     /// would otherwise set off for the same tile with the same broom.
     Broom,
+    /// The shower. One cubicle, one body in it.
+    Shower,
+    /// One workstation, by its index in `Room::benches`. One pair of hands
+    /// on a bench; a second bench of the same kind is another one of these.
+    Bench(usize),
+    /// The airlock, for a walk outside. One body out at a time — the suit
+    /// is counted by the world and not taken out of the hold, so this is
+    /// what keeps two Bims from wearing one suit.
+    Airlock,
 }
 
 /// What a chain needs to itself, or `None` when it treads on nothing.
 fn exclusive(kind: Kind) -> Option<Exclusive> {
     match kind {
-        Kind::Meal(_) | Kind::Leftovers | Kind::Tend(_) => Some(Exclusive::Galley),
+        Kind::Meal(_) | Kind::Batch | Kind::Reheat | Kind::Leftovers | Kind::Tend(_) => {
+            Some(Exclusive::Galley)
+        }
         Kind::Switch(Switch::Hob | Switch::FridgeDoor | Switch::Dishwasher) => {
             Some(Exclusive::Galley)
         }
@@ -185,10 +255,15 @@ fn exclusive(kind: Kind) -> Option<Exclusive> {
             Some(Exclusive::Heads)
         }
         Kind::Clean => Some(Exclusive::Broom),
+        Kind::Shower => Some(Exclusive::Shower),
+        Kind::Craft { bench, .. } => Some(Exclusive::Bench(bench)),
+        Kind::Eva => Some(Exclusive::Airlock),
         // A berth apiece, so going to bed treads on nobody. And a
         // conversation is the one errand that *wants* the other Bim doing the
         // same thing at the same time, so it can hardly reserve anything.
-        Kind::Rest | Kind::Chat => None,
+        // A ship's door has a panel each side and takes a moment: nobody
+        // needs to wait for it.
+        Kind::Rest | Kind::Chat | Kind::Switch(Switch::Door(..)) => None,
     }
 }
 
@@ -213,6 +288,16 @@ pub struct Game {
     /// behind on — routing, which cannot, goes through `maps` instead.
     blockers: Vec<Rect>,
     door_was_shut: bool,
+    /// How many of the ship's powered doors were locked, and how many of
+    /// those stood shut, last frame. A change to the first rebuilds the
+    /// navigation grids — a locked door is the one thing about a powered
+    /// door a route has to be planned round — and to the second, the
+    /// blockers.
+    doors_locked: usize,
+    doors_shut: usize,
+    /// The ship's door a click last landed on, for the host to ask after
+    /// `hit_at` has said it was one.
+    hit_door: usize,
     /// Which side of the bathroom bulkhead the Bim was on last frame, and how
     /// long the door has left to stand open after it crossed.
     bim_was_inside: bool,
@@ -238,6 +323,20 @@ pub struct Game {
     /// The order the player wants the work done in. One list for the ship,
     /// like the timetable: both crew work to it. See `work.rs`.
     priorities: Priorities,
+    /// The helm's seat, in room units, while the ship wants somebody at it;
+    /// `None` at a berth and in a room with no helm. The world sets it every
+    /// step — see [`Game::set_helm`] — and `Job::Helm` is offered off it.
+    helm: Option<Vec2>,
+    /// What the world wants made right now. See [`Order`]. Empty in the
+    /// classic room, which has no benches and no world.
+    orders: Vec<Order>,
+    /// Whether a walk outside is on, and for whom. See [`Eva`]. Never in
+    /// the classic room.
+    eva: Option<Eva>,
+    /// Whoever the helm job posted at the seat, so the post can be taken
+    /// away again when the ship no longer wants it. The player's own "take
+    /// the helm" is a post like any other and is not recorded here.
+    helmsman: Option<usize>,
     autonomous: bool,
     /// A `SPOT_` code the host has asked to have ringed on the deck, or
     /// `SPOT_NOTHING`. This is how a panel that names a place — "Cold store",
@@ -283,10 +382,16 @@ impl Game {
     /// A game in a room laid out from elsewhere — a ship design, through
     /// `crate::aboard` — with one Bim per `start`, standing there.
     ///
-    /// **At most [`room::BERTHS`] of them.** A Bim's index is its whole
-    /// identity — its berth, its seat, its coverall — and the room has two
-    /// of each, so a bigger crew is cut to two rather than handed a bed that
-    /// does not exist. Lifting that is a change to the room, not to here.
+    /// **At most as many as the room has beds.** A Bim's index is its whole
+    /// identity — its berth, its seat, its coverall — so a bigger crew is
+    /// cut to the beds there are rather than handed a bed that does not
+    /// exist.
+    ///
+    /// And possibly **none**: a station nobody lives on still has a galley
+    /// and bunks to draw, and the room is what draws them. Everything that
+    /// runs a frame loops over the crew there are; only the wasm exports
+    /// that steer `PLAYER` assume one, and those act on the ship's room,
+    /// which always has somebody.
     pub fn with_layout(
         layout: room::Layout,
         seed: u64,
@@ -296,7 +401,7 @@ impl Game {
     ) -> Game {
         let room = Room::from_layout(layout);
         let rng = Rng::new(seed);
-        let crew = starts.len().min(room::BERTHS).max(1);
+        let crew = starts.len().min(room.beds.len());
         Game::with_room(room, rng, crew, |who, _| starts[who], width, height)
     }
 
@@ -308,7 +413,13 @@ impl Game {
         width: f32,
         height: f32,
     ) -> Game {
-        let maps = Maps::new(room.interior, &room.solids(), room.bath.door, BODY_MARGIN);
+        let maps = Maps::new(
+            room.interior,
+            &room.solids(),
+            room.bath.door,
+            BODY_MARGIN,
+            room.nav_tile(),
+        );
         let bims = (0..crew)
             .map(|who| {
                 let at = start(who, &mut rng);
@@ -321,6 +432,9 @@ impl Game {
             maps,
             blockers: Vec::new(),
             door_was_shut: false,
+            doors_locked: 0,
+            doors_shut: 0,
+            hit_door: 0,
             bim_was_inside: false,
             door_shut_in: 0.0,
             rng,
@@ -331,6 +445,10 @@ impl Game {
             schedule: Schedule::new(),
             manager: Manager::new(),
             priorities: Priorities::new(),
+            helm: None,
+            helmsman: None,
+            orders: Vec::new(),
+            eva: None,
             autonomous: true,
             highlight: room::SPOT_NOTHING,
             list: DrawList::new(),
@@ -342,6 +460,76 @@ impl Game {
         game
     }
 
+    /// Everybody aboard, taken out of this room for good — for a room that
+    /// is being replaced by a bigger one, a docked ship's by the ship's and
+    /// the station's together. Every errand is given up first, the way a
+    /// blocked one is: whatever was carried goes back in the store, whoever
+    /// was in bed or on the pan is stood up. What survives is the Bim — its
+    /// needs, its health, its diary, where it stands — and not what it was
+    /// in the middle of, because the thing it was walking to is in another
+    /// room now.
+    pub fn take_crew(mut self) -> Vec<Bim> {
+        for bim in &mut self.bims {
+            if let Some(task) = bim.task.take() {
+                task.abandon(&mut bim.character, &mut self.room);
+            }
+            for saved in bim.queue.drain(..) {
+                if let Some(crop) = saved.lifted {
+                    self.room.store(crop);
+                }
+                if saved.holds_stew() {
+                    self.room.stew += 1;
+                }
+            }
+            bim.character.hold_main(crate::character::Held::Nothing);
+            bim.character.hold_tool(crate::character::Held::Nothing);
+            bim.pending_move = None;
+        }
+        self.bims
+    }
+
+    /// Take a crew in — from [`Game::take_crew`] on another room — standing
+    /// each one `shift` from where it stood there, because the two rooms'
+    /// origins differ by that. They go on the end: index is berth and seat,
+    /// and the room's beds are in the order its layout listed them, so a
+    /// caller that wants the ship's crew in the ship's bunks adopts them
+    /// first. Anybody whose feet would land somewhere a body cannot stand —
+    /// off the deck of a room that has just shrunk — is stood at their bunk
+    /// instead.
+    pub fn adopt(&mut self, crew: Vec<Bim>, shift: Vec2) {
+        for mut bim in crew {
+            let who = self.bims.len();
+            if who >= self.room.beds.len() {
+                break;
+            }
+            // Where the feet land, snapped to the nearest cell a body fits in:
+            // a spot beside a bunk sits on the edge of the bunk's inflated
+            // footprint, and whether the cell under it reads free depends on
+            // how the grid happened to fall. Far from anywhere free — off the
+            // deck altogether — is the bunk instead.
+            let at = bim.character.pos + shift;
+            let free = self.maps.pick(true).nearest_free(at);
+            let at = if (free - at).len() <= 2.0 * BODY_MARGIN {
+                free
+            } else {
+                self.room.bed_station(who)
+            };
+            bim.character.stand_at(at);
+            bim.character.set_scripted(false);
+            // The route it was on comes too, in the new room's coordinates;
+            // so does a post, and a post the new room has no floor under is
+            // no post at all.
+            bim.character.shift_route(shift);
+            bim.character
+                .set_post(bim.character.post().map(|p| p + shift).filter(|&p| {
+                    (self.maps.pick(true).nearest_free(p) - p).len() <= 2.0 * BODY_MARGIN
+                }));
+            bim.character.selected = bim.character.selected && who == PLAYER;
+            self.bims.push(bim);
+        }
+        self.refresh_blockers();
+    }
+
     /// The fixed furniture plus the door, if the door is currently something
     /// to walk into.
     fn refresh_blockers(&mut self) {
@@ -350,6 +538,26 @@ impl Game {
         if let Some(door) = self.room.closed_door() {
             self.blockers.push(door);
         }
+        let shut = self.room.shut_doors();
+        self.doors_shut = shut.len();
+        self.blockers.extend(shut);
+    }
+
+    /// The navigation grids again, with the ship's locked doors as solids.
+    /// Once per change of lock, never per frame: it is a walk of every cell
+    /// against every solid.
+    fn refresh_maps(&mut self) {
+        let locked = self.room.locked_doors();
+        self.doors_locked = locked.len();
+        let mut solids = self.room.solids();
+        solids.extend(locked);
+        self.maps = Maps::new(
+            self.room.interior,
+            &solids,
+            self.room.bath.door,
+            BODY_MARGIN,
+            self.room.nav_tile(),
+        );
     }
 
     /// Fit the room into the canvas, centred, without distorting it.
@@ -385,6 +593,7 @@ impl Game {
     pub fn simulate(&mut self, dt: f32) {
         self.clock.advance(dt);
         self.room.update(dt);
+        self.judge_the_food();
 
         // The bay grows on the clock, against the manager's target. It is the
         // game that drives it rather than the room, because the target is the
@@ -418,7 +627,11 @@ impl Game {
         for step in 0..crew {
             self.tick_bim((self.first_tick + step) % crew, dt, minutes, bedtime);
         }
-        self.first_tick = (self.first_tick + 1) % crew;
+        // A room with nobody in it — a station nobody lives on — has no tie
+        // to break, and no remainder to take.
+        if crew > 0 {
+            self.first_tick = (self.first_tick + 1) % crew;
+        }
 
         // The locker door shows the broom when nobody has it. Derived rather
         // than set, so an errand given up mid-sweep cannot leave the cupboard
@@ -429,7 +642,22 @@ impl Game {
             .any(|b| b.character.main_held() == Held::Broom);
 
         self.tick_door_closer(dt);
-        if self.room.closed_door().is_some() != self.door_was_shut {
+        // The ship's doors open for whoever walks up to them and shut
+        // behind; a lock or a shut leaf is a change to what a route or a
+        // body has to go round.
+        let bodies: Vec<Vec2> = self
+            .bims
+            .iter()
+            .filter(|b| !b.character.is_dead())
+            .map(|b| b.character.pos)
+            .collect();
+        self.room.update_doors(dt, &bodies);
+        if self.room.locked_doors().len() != self.doors_locked {
+            self.refresh_maps();
+        }
+        if self.room.closed_door().is_some() != self.door_was_shut
+            || self.room.shut_doors().len() != self.doors_shut
+        {
             self.refresh_blockers();
         }
 
@@ -479,7 +707,20 @@ impl Game {
             self.bims[who].task.as_ref().and_then(|t| t.restoring())
         };
         let tiring = self.bims[who].health.stage().tiring();
-        self.bims[who].needs.update(dt, restoring, tiring);
+        let purging = if self.bims[who].is_poisoned() {
+            POISONED_PURGE
+        } else {
+            1.0
+        };
+        self.bims[who].needs.update(dt, restoring, tiring, purging);
+        // The illness runs its course on its own clock, asleep or awake.
+        self.bims[who].poisoned_for = (self.bims[who].poisoned_for - minutes).max(0.0);
+        // A mouthful out of a bad pot. Read off what the Bim is doing this
+        // instant rather than off the plate: the galley is one Bim's at a
+        // time, so the pot a plate was filled from is the pot on the hob.
+        if restoring == Some(Need::Food) && self.room.food_bad {
+            self.poison(who);
+        }
 
         // Cleanliness follows the deck rather than the clock: the tiles the
         // Bim is standing among, and what it has on itself.
@@ -614,6 +855,7 @@ impl Game {
         self.take_pending_move(who);
         self.pump_queue(who);
         self.consider_errand(who);
+        self.return_to_post(who);
         self.flee_filth(who, dt);
 
         {
@@ -712,12 +954,14 @@ impl Game {
             self.bims[who].needs.level(Need::Cleanliness),
         );
         let (bims, rng) = (&mut self.bims, &mut self.rng);
+        let purging = bims[who].is_poisoned();
         let mishap = bims[who].ordeal.update(
             minutes,
             restroom,
             cleanliness,
             urge == Urge::Extreme,
             urge == Urge::Medium,
+            purging,
             rng,
         );
 
@@ -883,6 +1127,11 @@ impl Game {
 
     pub fn heads_held_by(&self) -> u32 {
         self.held_by(Exclusive::Heads)
+    }
+
+    /// And the shower: one cubicle.
+    pub fn shower_held_by(&self) -> u32 {
+        self.held_by(Exclusive::Shower)
     }
 
     fn held_by(&self, want: Exclusive) -> u32 {
@@ -1192,6 +1441,101 @@ impl Game {
         spot
     }
 
+    /// Post a Bim somewhere: drop what it is doing, walk there, and stand
+    /// there until told otherwise. What "take the helm" and "go ashore" are
+    /// made of. It still goes off on its errands when a need bites and
+    /// comes back afterwards — see [`Game::return_to_post`] — and a player
+    /// order to anywhere else takes the post away. Any of the crew, not
+    /// only the player's: the ship posts the station's people ashore before
+    /// it casts off. Snapped to somewhere a body can stand; false, and no
+    /// post, when there was no route.
+    pub fn send_to(&mut self, who: usize, to: Vec2) -> bool {
+        self.dispatch(who, to, true)
+    }
+
+    /// Walk a Bim somewhere, dropping what it is doing, without posting it
+    /// there: once there it picks its errands back up. What calling the
+    /// crew back aboard before the ship casts off is made of — a crew
+    /// member posted at the airlock would stand there for the rest of the
+    /// voyage.
+    pub fn walk_to(&mut self, who: usize, to: Vec2) -> bool {
+        self.dispatch(who, to, false)
+    }
+
+    fn dispatch(&mut self, who: usize, to: Vec2, post: bool) -> bool {
+        if who >= self.bims.len() || !self.is_alive(who) {
+            return false;
+        }
+        let nav = self.maps.pick(self.room.bath.is_open());
+        let target = nav.nearest_free(to);
+        let route = nav.path(self.bims[who].character.pos, target);
+        if route.is_empty() {
+            return false;
+        }
+        self.interrupt_for_order(who);
+        self.bims[who].character.follow_path(route);
+        if post {
+            self.bims[who].character.set_post(Some(target));
+        }
+        self.mark(target, false);
+        true
+    }
+
+    /// Stand a Bim at its post this instant, for the probes and the
+    /// fixtures: the walk is the room's business and a test of the helm is
+    /// not a test of the walk.
+    pub fn post_for_probe(&mut self, who: usize, at: Vec2) -> Vec2 {
+        let spot = self.put_for_probe(who, at);
+        self.bims[who].character.set_post(Some(spot));
+        spot
+    }
+
+    /// Where the Bim has been posted, if anywhere.
+    pub fn post_of(&self, who: usize) -> Option<Vec2> {
+        self.bims.get(who).and_then(|b| b.character.post())
+    }
+
+    /// Whether the Bim is standing at (or within `slack` of) its post.
+    pub fn at_post(&self, who: usize, slack: f32) -> bool {
+        self.bims
+            .get(who)
+            .and_then(|b| {
+                b.character
+                    .post()
+                    .map(|p| (b.character.pos - p).len() <= slack)
+            })
+            .unwrap_or(false)
+    }
+
+    /// Whose coverall a Bim wears: the ship's or the station's. Drawing only.
+    pub fn set_uniform(&mut self, who: usize, uniform: crate::character::Uniform) {
+        if let Some(bim) = self.bims.get_mut(who) {
+            bim.character.set_uniform(uniform);
+        }
+    }
+
+    /// Back to the post once the errand that took it away is done. Only when
+    /// there is nothing running and nothing queued, and only when the last
+    /// route has been walked to its end — handing a Bim a fresh route every
+    /// frame is how one comes to march on the spot for ever.
+    fn return_to_post(&mut self, who: usize) {
+        let bim = &self.bims[who];
+        let Some(post) = bim.character.post() else {
+            return;
+        };
+        if bim.task.is_some()
+            || !bim.queue.is_empty()
+            || !bim.character.arrived()
+            || bim.character.is_seated()
+            || (bim.character.pos - post).len() <= POST_SLACK
+        {
+            return;
+        }
+        let nav = self.maps.pick(self.room.bath.is_open());
+        let route = nav.path(bim.character.pos, nav.nearest_free(post));
+        self.bims[who].character.follow_path(route);
+    }
+
     /// Send a Bim somewhere by the same route a player order would take, but
     /// without needing it selected or it being the player's. For the probes.
     /// False when there was no route, which leaves the Bim wandering — a probe
@@ -1242,6 +1586,12 @@ impl Game {
 
     /// Run a need down by hand, for the probes.
     #[allow(dead_code)]
+    /// Take one thing out of the cold store, for a probe that wants the
+    /// shelf bare without waiting for it to be eaten down.
+    pub fn take_for_probe(&mut self, crop: hydro::Crop) {
+        self.room.take(crop);
+    }
+
     pub fn spend_for_probe(&mut self, who: usize, need: u32, amount: f32) {
         if let Some(need) = Need::from_index(need) {
             self.bims[who].needs.spend(need, amount);
@@ -1288,6 +1638,11 @@ impl Game {
 
     pub fn store_tofu(&self) -> u32 {
         self.room.tofu
+    }
+
+    /// Pots of stew on the shelf, cooked ahead.
+    pub fn store_stew(&self) -> u32 {
+        self.room.stew
     }
 
     // --- the timetable ----------------------------------------------------
@@ -1376,6 +1731,10 @@ impl Game {
                 // can go and see to, so it starts no errand — what it does
                 // instead is in `mind_the_mess` and `flee_filth`.
                 Need::Cleanliness => false,
+                // A day's grime: a shower, where there is one. Where there
+                // is not, nothing — the Bim goes on wanting one and nothing
+                // else comes of it.
+                Need::Hygiene => self.take_shower(who),
             };
             if started {
                 return;
@@ -1434,9 +1793,18 @@ impl Game {
     fn do_some_work(&mut self, who: usize) -> bool {
         for job in self.work_on_offer(who) {
             let started = match job {
-                Job::Cook => self.make_food(who),
+                // Hunger first: a Bim past its food trigger eats, and only
+                // one that is not cooks for the shelf. Both want the galley,
+                // so a meal that cannot start is not a stew that can.
+                Job::Cook => {
+                    (self.is_hungry(who) && self.make_food(who))
+                        || (self.wants_stew() && self.make_stew(who))
+                }
+                Job::Helm => self.man_the_helm(who),
                 Job::Plant | Job::Cut => self.tend_bay(who),
                 Job::Clean => self.sweep_up(who),
+                Job::Craft => self.craft(who),
+                Job::Mine => self.go_outside(who),
                 // Never offered on its own: see `waits_on`.
                 Job::Haul => false,
             };
@@ -1455,11 +1823,12 @@ impl Game {
     /// being in its locker, and those have nothing to do with the list.
     fn work_on_offer(&self, who: usize) -> Vec<Job> {
         let mut offered: Vec<Job> = Vec::new();
-        // Hunger, if the need is past its trigger. Asked of `urgent` rather
-        // than of the level so that switching the food trigger off switches
-        // the cooking off with it, exactly as it did when this lived in the
-        // loop above.
-        if self.bims[who].needs.urgent().contains(&Need::Food) {
+        // Cooking: hunger, or the shelf being short of stew. The stew half is
+        // not offered without something to make one of — a job that cannot
+        // be begun is a job that comes round every frame and starts nothing.
+        // Which of the two a Bim then does is `do_some_work`'s: the hungry
+        // one eats.
+        if self.is_hungry(who) || self.wants_stew() {
             offered.push(Job::Cook);
         }
         // What the bay wants decides which of the two bay rows applies. Asked
@@ -1475,8 +1844,198 @@ impl Game {
         if self.room.filth.dirty_tiles() > 0 {
             offered.push(Job::Clean);
         }
+        // The ship wants somebody at the helm and nobody is posted there.
+        if self.helm.is_some() && !self.helm_manned() {
+            offered.push(Job::Helm);
+        }
+        // Something to make, at a bench nobody is at.
+        if self.craft_on_offer(who).is_some() {
+            offered.push(Job::Craft);
+        }
+        // A belt to walk out to, a suit to wear, and nobody else out there.
+        if self.can_go_outside(who) {
+            offered.push(Job::Mine);
+        }
         offered.sort_by_key(|&job| self.waits_on(job));
         offered
+    }
+
+    /// The first order whose bench is free and reachable, or none. First in
+    /// the world's order, which is the recipe table's — so a smelt is picked
+    /// over an emitter when both want doing and both benches stand free.
+    fn craft_on_offer(&self, who: usize) -> Option<Order> {
+        self.orders.iter().copied().find(|order| {
+            self.room.benches.get(order.bench).is_some()
+                && self.can_begin(
+                    who,
+                    Kind::Craft {
+                        recipe: order.recipe,
+                        bench: order.bench,
+                    },
+                )
+        })
+    }
+
+    /// Whether `who` could set out on a walk now: the world says there is
+    /// one and this Bim may go, the room has a suit locker and a port, and
+    /// the airlock is nobody else's.
+    fn can_go_outside(&self, who: usize) -> bool {
+        self.eva
+            .as_ref()
+            .is_some_and(|eva| eva.allowed.get(who).copied().unwrap_or(false))
+            && self.room.suit_locker.is_some()
+            && self.room.gangway.is_some()
+            && self.room.outside.is_some()
+            && self.can_begin(who, Kind::Eva)
+    }
+
+    /// Out through the airlock, for as long as the world said.
+    pub fn go_outside(&mut self, who: usize) -> bool {
+        if !self.can_go_outside(who) {
+            return false;
+        }
+        let minutes = self.eva.as_ref().map(|e| e.minutes).unwrap_or(0.0);
+        if minutes <= 0.0 || !self.take_over(who, Kind::Eva, minutes) {
+            return false;
+        }
+        self.bims[who].task = Some(Task::eva(
+            who,
+            minutes,
+            &mut self.bims[who].character,
+            &mut self.room,
+            &self.maps,
+        ));
+        true
+    }
+
+    /// Off to make the first thing on offer.
+    pub fn craft(&mut self, who: usize) -> bool {
+        let Some(order) = self.craft_on_offer(who) else {
+            return false;
+        };
+        let kind = Kind::Craft {
+            recipe: order.recipe,
+            bench: order.bench,
+        };
+        if !self.take_over(who, kind, order.minutes) {
+            return false;
+        }
+        self.bims[who].task = Some(Task::craft(
+            who,
+            order.recipe,
+            order.bench,
+            order.minutes,
+            &mut self.bims[who].character,
+            &mut self.room,
+            &self.maps,
+        ));
+        true
+    }
+
+    /// Whether anybody is posted at the helm — by the job or by the player,
+    /// it makes no difference to the ship. Posted, not standing: a helmsman
+    /// off at the heads is still the helmsman and comes back.
+    fn helm_manned(&self) -> bool {
+        let Some(seat) = self.helm else {
+            return false;
+        };
+        self.bims.iter().enumerate().any(|(who, bim)| {
+            self.is_alive(who)
+                && bim
+                    .character
+                    .post()
+                    .is_some_and(|post| (post - seat).len() <= HELM_SLACK)
+        })
+    }
+
+    /// Take the helm: posted at the seat, the way the player's own order
+    /// does it. Recorded, so the post can be lifted when the ship no longer
+    /// wants it.
+    fn man_the_helm(&mut self, who: usize) -> bool {
+        let Some(seat) = self.helm else {
+            return false;
+        };
+        if !self.send_to(who, seat) {
+            return false;
+        }
+        self.helmsman = Some(who);
+        true
+    }
+
+    /// The workstations aboard, in the layout's order — what an `Order`'s
+    /// `bench` indexes.
+    pub fn benches(&self) -> &[crate::room::Bench] {
+        &self.room.benches
+    }
+
+    /// What the world wants made, this step. Replaces the last list whole:
+    /// an order that is no longer on it — the target met, the ore sold, the
+    /// smelter browned out — is simply not begun again, and a chain already
+    /// at the bench finishes what it started. The world says, every step.
+    pub fn set_craft_orders(&mut self, orders: Vec<Order>) {
+        self.orders = orders;
+    }
+
+    /// The recipes finished since the last call, in the order they were
+    /// finished. The world moves the cargo for each.
+    pub fn take_crafted(&mut self) -> Vec<u32> {
+        core::mem::take(&mut self.room.crafted)
+    }
+
+    /// How many of `recipe` are being made right now — chains running, not
+    /// queued. The world counts them against a target, so a target of one
+    /// more is one more and not one more per step the first one takes.
+    pub fn crafts_under_way(&self, recipe: u32) -> u32 {
+        self.bims
+            .iter()
+            .filter(|b| {
+                b.task.as_ref().is_some_and(
+                    |t| matches!(t.kind(), Kind::Craft { recipe: r, .. } if r == recipe),
+                )
+            })
+            .count() as u32
+    }
+
+    /// Whether a walk outside is on, and who may go. The world says, every
+    /// step; a walk already under way finishes whatever it says next.
+    pub fn set_eva(&mut self, eva: Option<Eva>) {
+        self.eva = eva;
+    }
+
+    /// Walks outside finished since the last call. The world reads the
+    /// belt for each.
+    pub fn take_walks(&mut self) -> u32 {
+        core::mem::take(&mut self.room.walks_done)
+    }
+
+    /// Whether this Bim is outside the hull, in a suit. What the world
+    /// doses.
+    pub fn is_outside(&self, who: usize) -> bool {
+        self.bims.get(who).is_some_and(|b| b.character.is_outside())
+    }
+
+    /// Where the helm's seat is while the ship wants somebody at it, in room
+    /// units, or `None` when it does not — at a berth, or in a room with no
+    /// helm. The world says, every step. Taking it away lifts the post the
+    /// job set, and only that one: a Bim the player stood there stays.
+    pub fn set_helm(&mut self, seat: Option<Vec2>) {
+        self.helm = seat;
+        if seat.is_none()
+            && let Some(who) = self.helmsman.take()
+            && let Some(bim) = self.bims.get_mut(who)
+        {
+            bim.character.set_post(None);
+        }
+        // The job's helmsman was ordered elsewhere: the post is gone and so
+        // is the helmsman, and the job comes round again for whoever is free.
+        if let Some(who) = self.helmsman
+            && self
+                .bims
+                .get(who)
+                .is_none_or(|b| b.character.post().is_none())
+        {
+            self.helmsman = None;
+        }
     }
 
     /// The number a job actually waits on.
@@ -1495,6 +2054,29 @@ impl Game {
                 .max(self.priorities.of(Job::Haul)),
             other => self.priorities.of(other),
         }
+    }
+
+    /// Whether this Bim's food need is past its trigger. Asked of `urgent`
+    /// rather than of the level so that switching the food trigger off
+    /// switches the cooking off with it.
+    fn is_hungry(&self, who: usize) -> bool {
+        self.bims[who].needs.urgent().contains(&Need::Food)
+    }
+
+    /// Whether the cold store holds fewer pots of stew than the manager asked
+    /// for, and what a pot takes to make. The demand half of the cook row's
+    /// stew; `make_stew` is the other half.
+    fn wants_stew(&self) -> bool {
+        self.room.stew < self.manager.stew() && self.room.can_make_stew()
+    }
+
+    /// The stew half of the cook row, for the probes: whether the shelf is
+    /// asking for one. Read directly because the row is also hunger's, and
+    /// a Bim that happens to be hungry when the probe looks would otherwise
+    /// read as the shelf asking.
+    #[allow(dead_code)]
+    pub fn wants_stew_for_probe(&self) -> bool {
+        self.wants_stew()
     }
 
     /// Whether going without food has begun to do this Bim damage, as against
@@ -1751,12 +2333,13 @@ impl Game {
         self.room.bay.hibernating()
     }
 
-    pub fn food_target(&self) -> u32 {
-        self.manager.food_units()
+    /// What the place is told to keep, by `manager::Stock`.
+    pub fn target(&self, which: Stock) -> u32 {
+        self.manager.target(which)
     }
 
-    pub fn set_food_target(&mut self, units: u32) {
-        self.manager.set_food_units(units);
+    pub fn set_target(&mut self, which: Stock, count: u32) {
+        self.manager.set_target(which, count);
     }
 
     pub fn target_veg(&self) -> u32 {
@@ -1765,6 +2348,10 @@ impl Game {
 
     pub fn target_tofu(&self) -> u32 {
         self.manager.tofu()
+    }
+
+    pub fn target_stew(&self) -> u32 {
+        self.manager.stew()
     }
 
     /// Whether a shut — but not locked — door is the only thing between the
@@ -1801,9 +2388,12 @@ impl Game {
             // A pot with something in it is the first place it would go, and
             // it needs nothing out of the store to do it.
             Need::Food if self.room.pot_servings > 0 => Kind::Leftovers,
-            // Either recipe starts at the fridge, so which one it would pick
-            // makes no difference to where it has to be able to walk.
-            Need::Food if self.room.has_ingredients() => Kind::Meal(Dish::Stew),
+            // A stew on the shelf, either recipe: all three start at the
+            // fridge, so which it would pick makes no difference to where it
+            // has to be able to walk.
+            Need::Food if self.room.stew > 0 || self.room.has_ingredients() => {
+                Kind::Meal(Dish::Stew)
+            }
             // The heads are behind the door, and that chain opens it itself;
             // rest is the timetable's business and never starts a need errand.
             _ => return None,
@@ -2151,6 +2741,7 @@ impl Game {
 
         // Only a click, not a sweep, counts as poking at the furniture.
         if box_.width() < 4.0 && box_.height() < 4.0 {
+            self.note_door(box_.center());
             let hit = self.room.hit(box_.center());
             if hit != HIT_NONE {
                 return hit;
@@ -2195,6 +2786,8 @@ impl Game {
             return ORDER_IGNORED;
         }
         let want = vec2(x, y);
+        // A fresh order is the end of standing anywhere in particular.
+        self.bims[PLAYER].character.set_post(None);
 
         // Snap to somewhere the Bim can actually stand, so an order onto the
         // table means "the floor beside the table" rather than nothing at all.
@@ -2302,6 +2895,14 @@ impl Game {
 
     /// Minutes since midnight. The host formats the reading; no strings cross
     /// the boundary.
+    /// Wind the clock on by `minutes` of game time without simulating any of
+    /// it. For a room opened partway through a day — a station's residents
+    /// when the ship arrives — so its day is the world's day rather than
+    /// starting at the waking hour whenever the ship happens to turn up.
+    pub fn wind_clock(&mut self, minutes: f32) {
+        self.clock.advance(clock::seconds(minutes));
+    }
+
     pub fn clock_minutes(&self) -> f32 {
         self.clock.minutes()
     }
@@ -2394,8 +2995,58 @@ impl Game {
     /// Which fixture is at a point, without disturbing the selection. The
     /// host asks this on a right-click, so poking at the furniture and
     /// ordering the Bim about can share one button.
-    pub fn hit_at(&self, x: f32, y: f32) -> u32 {
+    pub fn hit_at(&mut self, x: f32, y: f32) -> u32 {
+        self.note_door(vec2(x, y));
         self.room.hit(vec2(x, y))
+    }
+
+    /// Remember which of the ship's doors a click landed on, if one, so the
+    /// host can ask [`Game::hit_door`] after the code says it was a door.
+    fn note_door(&mut self, p: Vec2) {
+        if let Some(i) = self.room.door_at(p) {
+            self.hit_door = i;
+        }
+    }
+
+    /// The ship's door the last click landed on.
+    pub fn hit_door(&self) -> usize {
+        self.hit_door
+    }
+
+    pub fn ship_door_count(&self) -> usize {
+        self.room.doors.len()
+    }
+
+    /// Whether this room draws its doors. Off for a station's room kept
+    /// open only for its pictures while the ship is docked: the joined room
+    /// has the same doors and the people going through them.
+    pub fn set_doors_drawn(&mut self, drawn: bool) {
+        self.room.doors_drawn = drawn;
+    }
+
+    /// Which of the ship's doors a point is in, if one.
+    pub fn door_at(&self, x: f32, y: f32) -> Option<usize> {
+        self.room.door_at(vec2(x, y))
+    }
+
+    pub fn ship_door_is_open(&self, i: usize) -> bool {
+        self.room.doors.get(i).is_some_and(|d| d.is_open())
+    }
+
+    pub fn ship_door_is_held(&self, i: usize) -> bool {
+        self.room.doors.get(i).is_some_and(|d| d.held)
+    }
+
+    pub fn ship_door_is_locked(&self, i: usize) -> bool {
+        self.room.doors.get(i).is_some_and(|d| d.locked)
+    }
+
+    /// The Bim walks to the door's panel and works it — the bathroom door's
+    /// arrangement, for any of the ship's doors.
+    pub fn order_door(&mut self, who: usize, i: usize, order: door::Order) {
+        if i < self.room.doors.len() {
+            self.send_to_switch(who, Switch::Door(i, order));
+        }
     }
 
     pub fn fridge_is_open(&self) -> bool {
@@ -2466,6 +3117,12 @@ impl Game {
         if self.eat_leftovers(who) {
             return true;
         }
+        // A stew on the shelf is a meal already made: warm it through rather
+        // than start from raw. It was cooked to be eaten, and cooking round
+        // it would leave the shelf full and the store bare.
+        if self.reheat(who) {
+            return true;
+        }
         // Half and half, which over two meals a day comes out at about one
         // bowl a day — the tofu the Bim wants daily. If the store cannot run
         // to what it fancies it has the other, which is what keeps a Bim with
@@ -2476,6 +3133,51 @@ impl Game {
             (Dish::Bowl, Dish::Stew)
         };
         self.cook(who, first) || self.cook(who, second)
+    }
+
+    /// Warm a stew from the cold store through and eat it. Nothing to do
+    /// when there is none on the shelf.
+    pub fn reheat(&mut self, who: usize) -> bool {
+        if self.room.stew == 0
+            || !self.can_begin(who, Kind::Reheat)
+            || !self.take_over(who, Kind::Reheat, 0.0)
+        {
+            return false;
+        }
+        self.bims[who].task = Some(Task::reheat(
+            who,
+            &mut self.bims[who].character,
+            &mut self.room,
+            &self.maps,
+        ));
+        true
+    }
+
+    /// Cook a stew for the cold store: a vegetable and a block of tofu,
+    /// chopped, through the pot, and put away in a tub. The player's own
+    /// order from the hob's menu as well as the stew job's errand, and
+    /// refused without both halves of the recipe.
+    pub fn make_stew(&mut self, who: usize) -> bool {
+        if self.bims[who]
+            .task
+            .as_ref()
+            .is_some_and(|task| task.kind() == Kind::Batch)
+        {
+            return false;
+        }
+        if !self.room.can_make_stew()
+            || !self.can_begin(who, Kind::Batch)
+            || !self.take_over(who, Kind::Batch, 0.0)
+        {
+            return false;
+        }
+        self.bims[who].task = Some(Task::batch(
+            who,
+            &mut self.bims[who].character,
+            &mut self.room,
+            &self.maps,
+        ));
+        true
     }
 
     /// Helpings left in the pot, 0 when there is nothing to come back to.
@@ -2591,6 +3293,81 @@ impl Game {
             return false;
         }
         self.bims[who].task = Some(Task::use_toilet(
+            who,
+            &mut self.bims[who].character,
+            &mut self.room,
+            &self.maps,
+        ));
+        true
+    }
+
+    /// The moment something is made in the galley, judge it: for every tile
+    /// within [`GALLEY_REACH`] of the hob with a mess on it, one roll at
+    /// [`BAD_FOOD_PER_DIRTY_TILE`], and one bad roll is a bad meal. A clean
+    /// galley draws nothing from the stream, so a clean run is unchanged.
+    fn judge_the_food(&mut self) {
+        if !self.room.take_judgement() {
+            return;
+        }
+        let dirty = self
+            .room
+            .filth
+            .dirty_tiles_within(self.room.pot_pos(), GALLEY_REACH);
+        let mut bad = false;
+        for _ in 0..dirty {
+            if self.rng.chance(BAD_FOOD_PER_DIRTY_TILE) {
+                bad = true;
+            }
+        }
+        self.room.food_bad = bad;
+    }
+
+    /// Food poisoning, from now: [`POISONING_LASTS`] of it. Remembered once
+    /// per bout — a second mouthful of the same meal is the same illness.
+    fn poison(&mut self, who: usize) {
+        if !self.bims[who].is_poisoned() {
+            self.remember(who, What::FoodPoisoning, 0);
+        }
+        self.bims[who].poisoned_for = POISONING_LASTS;
+    }
+
+    /// Game hours of food poisoning left, nought when well. For the panel.
+    pub fn poisoning(&self, who: usize) -> f32 {
+        self.bims[who].poisoned_for / clock::HOUR
+    }
+
+    /// Make `who` ill this instant, for the probes: the roll is the galley's
+    /// business and what the illness does is the thing under test.
+    #[allow(dead_code)]
+    pub fn poison_for_probe(&mut self, who: usize) {
+        self.poison(who);
+    }
+
+    /// Whether what the galley last made is bad, for the probes.
+    #[allow(dead_code)]
+    pub fn food_is_bad(&self) -> bool {
+        self.room.food_bad
+    }
+
+    /// Where the pot stands, for a probe that wants to foul the galley.
+    #[allow(dead_code)]
+    pub fn pot_pos_for_probe(&self) -> Vec2 {
+        self.room.pot_pos()
+    }
+
+    /// Whether a shower can be begun: there is one, nobody else is in it,
+    /// and there is a way to it.
+    pub fn can_shower(&self, who: usize) -> bool {
+        self.room.shower.is_some() && self.can_begin(who, Kind::Shower)
+    }
+
+    /// Off to the shower. The need's own errand and nothing else's: there is
+    /// no menu item and no job row for it, like the heads.
+    pub fn take_shower(&mut self, who: usize) -> bool {
+        if !self.can_shower(who) || !self.take_over(who, Kind::Shower, 0.0) {
+            return false;
+        }
+        self.bims[who].task = Some(Task::shower(
             who,
             &mut self.bims[who].character,
             &mut self.room,

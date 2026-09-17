@@ -5,8 +5,10 @@
 #                       ship design, then the world docked where you said
 #   ./run simulation    straight into the world on the playtest ship
 #   ./run room          the behaviour test room — the Bims on a deck
+#   ./run test          the simulation somewhere else each time: docked at a
+#                       random station somebody lives on, in a random galaxy
 #
-# All three serve the *live* web/ directory, which is the difference between
+# All four serve the *live* web/ directory, which is the difference between
 # this and `nix run .#game` / `.#simulation` / `.#room`: those serve a frozen
 # copy out of the Nix store and will not notice an edit until they are
 # restarted.
@@ -17,7 +19,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 usage() {
-  echo "usage: ./run <game|simulation|room> [port] [--no-open]" >&2
+  echo "usage: ./run <game|simulation|room|test> [port] [--no-open]" >&2
   exit 2
 }
 
@@ -43,6 +45,11 @@ case "$1" in
     page=index.html
     wasm=(--wasm bims.wasm)
     port=8084
+    ;;
+  test)
+    page='ship.html?mode=1&random=1'
+    wasm=(--wasm ship.wasm)
+    port=8085
     ;;
   -h | --help) usage ;;
   *)

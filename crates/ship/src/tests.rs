@@ -295,6 +295,80 @@ fn the_sky_and_what_is_alongside_do_not_turn_with_the_ship() {
     );
 }
 
+/// The sky streams past a ship under way and stands still otherwise. It is
+/// a picture clock on the *world's* clock: a step with the ship at rest
+/// moves nothing, a frame with no step in it moves nothing however fast
+/// the ship is going — a pause holds the stars — and the near layer streams
+/// further than the far one, opposite the way the ship is going.
+#[test]
+fn the_sky_streams_on_the_world_s_clock_and_only_under_way() {
+    use crate::starfield::Starfield;
+    use worldgen::math::dvec2;
+
+    let mut game = game();
+    // Docked and still: frames and steps go by and the sky does not move.
+    game.stream_sky();
+    for _ in 0..10 {
+        game.world.step(&[]);
+        game.stream_sky();
+    }
+    assert!(
+        game.stars.slid.iter().all(|s| s.x == 0.0 && s.y == 0.0),
+        "the sky moved with the ship at rest: {:?}",
+        game.stars.slid.map(|s| (s.x, s.y))
+    );
+
+    // Under way, to the east, on a clock that moved a minute: the near layer
+    // streams west, and further than the far one.
+    let mut stars = Starfield::new(1);
+    let east = dvec2(3_000.0, 0.0);
+    stars.advance(east, 100.0);
+    assert!(
+        stars.slid.iter().all(|s| s.x == 0.0 && s.y == 0.0),
+        "the first frame is a reading, not a stream"
+    );
+    stars.advance(east, 101.0);
+    let near = stars.slid[0];
+    let far = stars.slid[2];
+    assert!(near.x > 0.0 && near.y == 0.0, "near layer {near:?}");
+    // Wrapped to the tile, so "west" reads as a large positive `x`.
+    let west_by = |s: worldgen::math::DVec2| crate::starfield::FIELD - s.x;
+    assert!(
+        west_by(near) > 0.0 && west_by(near) < 100.0,
+        "{}",
+        west_by(near)
+    );
+    assert!(
+        west_by(far) < west_by(near),
+        "the far layer should stream less: {far:?} against {near:?}"
+    );
+    // The same velocity on a clock that has not moved: a pause.
+    let held = stars.slid;
+    stars.advance(east, 101.0);
+    assert!(
+        stars
+            .slid
+            .iter()
+            .zip(held.iter())
+            .all(|(a, b)| a.x == b.x && a.y == b.y)
+    );
+    // Faster is further, and the mapping is monotonic even past the clamp.
+    let mut slow = Starfield::new(1);
+    slow.advance(dvec2(30.0, 0.0), 0.0);
+    slow.advance(dvec2(30.0, 0.0), 1.0);
+    assert!(west_by(slow.slid[0]) > 0.0 && west_by(slow.slid[0]) < west_by(near));
+    // North on the system's axes is up the screen, so a ship going north
+    // has the stars going down: positive `y`, unwrapped.
+    let mut north = Starfield::new(1);
+    north.advance(dvec2(0.0, 3_000.0), 0.0);
+    north.advance(dvec2(0.0, 3_000.0), 1.0);
+    assert!(
+        north.slid[0].y > 0.0 && north.slid[0].y < 100.0,
+        "{:?}",
+        (north.slid[0].x, north.slid[0].y)
+    );
+}
+
 /// The `rot` field of every shape in the buffer.
 fn shape_rotations(list: &crate::draw::DrawList) -> Vec<f32> {
     let slice = unsafe { std::slice::from_raw_parts(list.as_ptr(), list.len()) };
@@ -401,8 +475,10 @@ fn the_exhaust_follows_the_plan() {
     use world::world::Command;
 
     let mut game = game();
-    // Somewhere off to one side, so there is a real turn to make first.
+    // Somewhere off to one side, so there is a real turn to make first —
+    // and the crew member at the helm, since the ship is flown from there.
     let here = game.world.ship.position();
+    game.world.man_the_helm_for_probe(0);
     game.send(Command::Confirm {
         slot: 0,
         target: Target::Point(dvec2(here.x + 30_000.0, here.y + 7_000.0)),
@@ -429,11 +505,20 @@ fn the_exhaust_follows_the_plan() {
     assert_eq!(exhaust(&game), 0, "nothing burns at the dock");
 
     let mut seen = std::collections::BTreeSet::new();
+    let mut under_way = false;
     for _ in 0..400_000 {
         game.step();
         let Some(state) = game.world.trip_state() else {
-            break;
+            // Casting off and pushing off the berth come first, and the
+            // engines are cold through both; the trip is over once there
+            // has been one.
+            assert_eq!(game.firing(), crate::hull::Firing::NONE);
+            if under_way {
+                break;
+            }
+            continue;
         };
+        under_way = true;
         let firing = game.firing();
         match state.phase {
             Phase::Align => {
@@ -486,4 +571,154 @@ fn the_exhaust_follows_the_plan() {
     );
     assert_eq!(game.firing(), crate::hull::Firing::NONE);
     assert_eq!(exhaust(&game), 0, "nothing burns once it is there");
+}
+
+/// The mated airlocks are a door: shut while nobody is near the passage,
+/// open once somebody stands at it, and shut again when they have gone —
+/// eased, so the picture never jumps. A picture clock only: the passage is
+/// walkable whatever the door looks like.
+#[test]
+fn the_airlock_opens_for_whoever_comes_to_it_and_shuts_behind_them() {
+    let mut game = game();
+    assert!(game.mated_airlock().is_some(), "the fixture docks");
+    for _ in 0..60 {
+        game.tick_airlock();
+    }
+    assert_eq!(game.airlock_ajar, 0.0, "open with nobody at it");
+
+    // Stand the crew member in the passage: the ship's door face, in the
+    // room's units.
+    let port = shipdesign::port(&game.world.ship.design).unwrap();
+    let (fx, fy) = port.face();
+    let offset = game.world.aboard.offset;
+    let at = bims::math::vec2((fx + offset.x) as f32, (fy + offset.y) as f32);
+    game.world.aboard.room.put_for_probe(0, at);
+    let mut opening = Vec::new();
+    for _ in 0..40 {
+        game.tick_airlock();
+        opening.push(game.airlock_ajar);
+    }
+    assert!(
+        opening.windows(2).all(|w| w[1] >= w[0]),
+        "it should open, not flicker"
+    );
+    assert!(
+        opening[0] > 0.0 && opening[0] < 1.0,
+        "it should ease, not jump"
+    );
+    assert_eq!(game.airlock_ajar, 1.0, "wide open with somebody at it");
+
+    // And away again: the far end of the ship.
+    let far = bims::math::vec2(
+        (offset.x + 3.0 * 52.0) as f32,
+        (offset.y + 3.0 * 52.0) as f32,
+    );
+    game.world.aboard.room.put_for_probe(0, far);
+    for _ in 0..60 {
+        game.tick_airlock();
+    }
+    assert_eq!(game.airlock_ajar, 0.0, "shut once they have gone");
+}
+
+/// The ship view is about the crew member the player steers: wherever they
+/// stand — aboard, or across the airlock on the station — they are in the
+/// middle of the window, the pan is measured from them and cannot take
+/// them off the edge, and a zoom keeps what is under the pointer under it.
+#[test]
+fn the_camera_follows_the_crew_member_the_player_steers() {
+    let mut game = game();
+    let middle = (CANVAS.0 / 2.0, CANVAS.1 / 2.0);
+    let pixel = |game: &Game| {
+        let (x, y) = world_paint::crew_on_screen(game, 0);
+        let cam = &game.ship_view;
+        (
+            cam.offset_x() + x * cam.scale(),
+            cam.offset_y() + y * cam.scale(),
+        )
+    };
+
+    game.follow_player();
+    let at = pixel(&game);
+    assert!(
+        (at.0 - middle.0).abs() < 1e-3 && (at.1 - middle.1).abs() < 1e-3,
+        "{at:?}"
+    );
+
+    // Across the airlock: far from the ship's centre, still in the middle.
+    let offset = game.world.aboard.offset;
+    let side = game.world.ship.design.build_area as f64 * 52.0;
+    let far = bims::math::vec2(
+        (offset.x + side + 20.0 * 52.0) as f32,
+        (offset.y + side / 2.0) as f32,
+    );
+    let landed = game.world.aboard.room.put_for_probe(0, far);
+    assert!(
+        (landed - far).len() < 60.0,
+        "the probe could not stand there: {landed:?}"
+    );
+    game.follow_player();
+    let at = pixel(&game);
+    assert!(
+        (at.0 - middle.0).abs() < 1e-3 && (at.1 - middle.1).abs() < 1e-3,
+        "{at:?}"
+    );
+    // And the ship's own centre is off to one side, a long way.
+    assert!((game.ship_view.offset_x() - middle.0).abs() > 10.0 * 52.0 * game.ship_view.scale());
+
+    // Zoomed in about a corner of the window, the point under the pointer
+    // stays under it; the crew member stays where the pan left them.
+    let corner = (100.0, 80.0);
+    let before = game.ship_view.to_view(corner.0, corner.1);
+    game.ship_view.zoom(corner.0, corner.1, 2.0);
+    let after = game.ship_view.to_view(corner.0, corner.1);
+    assert!((before.0 - after.0).abs() < 1e-3 && (before.1 - after.1).abs() < 1e-3);
+
+    // Panned as far as it goes, they are still a sliver inside the edge.
+    game.ship_view.pan(-100_000.0, -100_000.0);
+    game.follow_player();
+    let at = pixel(&game);
+    assert!(at.0 > 0.0 && at.1 > 0.0, "panned off the edge: {at:?}");
+
+    // Let go, the view stays exactly where it was — nothing on screen
+    // moves for the flip of a switch.
+    let held = (game.ship_view.offset_x(), game.ship_view.offset_y());
+    game.set_follow(false);
+    game.follow_player();
+    let loose = (game.ship_view.offset_x(), game.ship_view.offset_y());
+    assert!(
+        (held.0 - loose.0).abs() < 1e-3 && (held.1 - loose.1).abs() < 1e-3,
+        "letting go moved the view: {held:?} -> {loose:?}"
+    );
+    // And the crew member walking off does not drag it after them.
+    let back = bims::math::vec2(offset.x as f32 + 100.0, offset.y as f32 + 100.0);
+    game.world.aboard.room.put_for_probe(0, back);
+    game.follow_player();
+    let still = (game.ship_view.offset_x(), game.ship_view.offset_y());
+    assert!((still.0 - loose.0).abs() < 1e-3 && (still.1 - loose.1).abs() < 1e-3);
+    // A free camera goes wherever it is dragged: a pan that would have
+    // been clamped carries the whole way, and the subject is off the edge.
+    game.ship_view.pan(-100_000.0, 0.0);
+    assert!(
+        (game.ship_view.offset_x() - loose.0 + 100_000.0).abs() < 1.0,
+        "a free pan was clamped: {} -> {}",
+        loose.0,
+        game.ship_view.offset_x()
+    );
+    assert!(
+        pixel(&game).0 < 0.0,
+        "the subject should be off the edge now"
+    );
+    // Zooming still keeps what is under the pointer under it.
+    let before = game.ship_view.to_view(corner.0, corner.1);
+    game.ship_view.zoom(corner.0, corner.1, 0.5);
+    let after = game.ship_view.to_view(corner.0, corner.1);
+    assert!((before.0 - after.0).abs() < 1e-2 && (before.1 - after.1).abs() < 1e-2);
+    // Tethered again, the next frame snaps back to the crew member.
+    game.set_follow(true);
+    game.follow_player();
+    let at = pixel(&game);
+    assert!(
+        (at.0 - middle.0).abs() < 1e-3 && (at.1 - middle.1).abs() < 1e-3,
+        "following again did not bring them back: {at:?}"
+    );
 }

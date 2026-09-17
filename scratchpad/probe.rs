@@ -166,7 +166,8 @@ fn main() {
 
     let mut game = Game::new(5, 960.0, 640.0);
     // Ask for far more than is aboard, so the bay is working from the start.
-    game.set_food_target(manager::MOST);
+    game.set_target(manager::Stock::Veg, manager::MOST);
+    game.set_target(manager::Stock::Tofu, manager::MOST);
 
     let mut lifted_at = None;
     let mut stored_at = None;

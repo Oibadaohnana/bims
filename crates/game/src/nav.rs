@@ -13,9 +13,16 @@ use crate::math::{Rect, Vec2, vec2};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-/// Grid resolution in world pixels. Fine enough to slip through the gaps
-/// between units, coarse enough that a search is trivial.
+/// Grid resolution in world pixels, in the classic room. Fine enough to slip
+/// through the gaps between units, coarse enough that a search is trivial.
 const CELL: f32 = 10.0;
+
+/// Cells to a tile in a room laid out on a tile grid — a ship's. An odd
+/// number, so a tile's middle is a cell's middle: a one-tile corridor with
+/// a body margin of 23 leaves six units free down its centre, and whether
+/// any cell centre lands in those six is otherwise down to where the grid
+/// happens to start. See [`Nav::tiled`].
+const CELLS_PER_TILE: f32 = 5.0;
 
 /// Integer step costs, the usual trick for keeping A* ordering on integers
 /// rather than floats: 10 orthogonal, 14 diagonal (√2 ≈ 1.4).
@@ -27,6 +34,9 @@ pub struct Nav {
     rows: usize,
     /// World position of the centre of cell (0, 0).
     origin: Vec2,
+    /// The cell's side: [`CELL`] in the classic room, a fifth of a tile
+    /// aboard.
+    cell: f32,
     blocked: Vec<bool>,
 }
 
@@ -42,31 +52,83 @@ impl Nav {
             walkable.min.x + (walkable.width() - (cols - 1) as f32 * CELL) * 0.5,
             walkable.min.y + (walkable.height() - (rows - 1) as f32 * CELL) * 0.5,
         );
+        Nav::build(cols, rows, origin, CELL, interior, solids, clearance)
+    }
 
+    /// The grid for a room laid out on tiles of `tile`, `interior` being
+    /// tile-aligned: [`CELLS_PER_TILE`] cells a tile, phased so that every
+    /// tile's middle is a cell's middle. That is what makes a one-tile
+    /// corridor walkable — the free strip down its centre is narrower than
+    /// a cell, and a grid started anywhere else has a cell centre in it
+    /// only by luck, tile by tile.
+    pub fn tiled(interior: Rect, solids: &[Rect], clearance: f32, tile: f32) -> Nav {
+        let cell = tile / CELLS_PER_TILE;
+        let cols = (interior.width() / cell).round().max(1.0) as usize;
+        let rows = (interior.height() / cell).round().max(1.0) as usize;
+        let origin = interior.min + vec2(cell * 0.5, cell * 0.5);
+        Nav::build(cols, rows, origin, cell, interior, solids, clearance)
+    }
+
+    /// Either grid: a cell is blocked if a body centred on it would overlap
+    /// a solid or stick out past the walls.
+    fn build(
+        cols: usize,
+        rows: usize,
+        origin: Vec2,
+        cell: f32,
+        interior: Rect,
+        solids: &[Rect],
+        clearance: f32,
+    ) -> Nav {
+        let walkable = interior.expand(-clearance);
         let mut nav = Nav {
             cols,
             rows,
             origin,
+            cell,
             blocked: vec![false; cols * rows],
         };
+        // The classic grid is cut to the walkable area and never has a cell
+        // outside it; the tiled one covers the whole interior, so the
+        // margin's cells are blocked here.
         for r in 0..rows {
             for c in 0..cols {
-                let p = nav.centre(c, r);
-                let hit = solids.iter().any(|s| s.expand(clearance).contains(p));
-                nav.blocked[r * cols + c] = hit;
+                if !walkable.contains(nav.centre(c, r)) {
+                    nav.blocked[r * cols + c] = true;
+                }
+            }
+        }
+        // Solid by solid over the cells its inflated box can reach, rather
+        // than cell by cell over every solid: the same question asked of
+        // the same cells, so the grid comes out identical, and a ship's
+        // room with seven hundred solids builds in a few thousand tests
+        // instead of sixty million. It matters because a ship's grids are
+        // rebuilt whenever one of its doors is locked or unlocked.
+        for s in solids {
+            let box_ = s.expand(clearance);
+            let c0 = ((box_.min.x - origin.x) / cell).floor().max(0.0) as usize;
+            let r0 = ((box_.min.y - origin.y) / cell).floor().max(0.0) as usize;
+            let c1 = ((box_.max.x - origin.x) / cell).ceil().max(0.0) as usize;
+            let r1 = ((box_.max.y - origin.y) / cell).ceil().max(0.0) as usize;
+            for r in r0..=r1.min(rows.saturating_sub(1)) {
+                for c in c0..=c1.min(cols.saturating_sub(1)) {
+                    if box_.contains(nav.centre(c, r)) {
+                        nav.blocked[r * cols + c] = true;
+                    }
+                }
             }
         }
         nav
     }
 
     fn centre(&self, c: usize, r: usize) -> Vec2 {
-        self.origin + vec2(c as f32 * CELL, r as f32 * CELL)
+        self.origin + vec2(c as f32 * self.cell, r as f32 * self.cell)
     }
 
     /// Nearest cell to a world point, clamped into the grid.
     fn cell_at(&self, p: Vec2) -> (usize, usize) {
-        let c = ((p.x - self.origin.x) / CELL).round();
-        let r = ((p.y - self.origin.y) / CELL).round();
+        let c = ((p.x - self.origin.x) / self.cell).round();
+        let r = ((p.y - self.origin.y) / self.cell).round();
         (
             c.clamp(0.0, (self.cols - 1) as f32) as usize,
             r.clamp(0.0, (self.rows - 1) as f32) as usize,
@@ -237,8 +299,8 @@ impl Nav {
     /// can hold to without the physics arguing with it.
     fn line_clear(&self, a: Vec2, b: Vec2) -> bool {
         let span = b - a;
-        let steps = (span.len() / (CELL * 0.4)).ceil().max(1.0) as usize;
-        let side = span.normalize_or_zero().perp() * (CELL * 0.5);
+        let steps = (span.len() / (self.cell * 0.4)).ceil().max(1.0) as usize;
+        let side = span.normalize_or_zero().perp() * (self.cell * 0.5);
         (0..=steps).all(|i| {
             let p = a.lerp(b, i as f32 / steps as f32);
             self.is_free(p) && self.is_free(p + side) && self.is_free(p - side)
@@ -284,13 +346,25 @@ pub struct Maps {
 
 impl Maps {
     /// `solids` is everything fixed; `door` is the panel that only sometimes
-    /// stands in the way.
-    pub fn new(interior: Rect, solids: &[Rect], door: Rect, clearance: f32) -> Maps {
+    /// stands in the way. `tile` is the room's tile where it has one — a
+    /// ship's — and the grids are then [`Nav::tiled`]; `None` is the
+    /// classic room's grid.
+    pub fn new(
+        interior: Rect,
+        solids: &[Rect],
+        door: Rect,
+        clearance: f32,
+        tile: Option<f32>,
+    ) -> Maps {
         let mut with_door = solids.to_vec();
         with_door.push(door);
+        let grid = |solids: &[Rect]| match tile {
+            Some(tile) => Nav::tiled(interior, solids, clearance, tile),
+            None => Nav::new(interior, solids, clearance),
+        };
         Maps {
-            open: Nav::new(interior, solids, clearance),
-            shut: Nav::new(interior, &with_door, clearance),
+            open: grid(solids),
+            shut: grid(&with_door),
         }
     }
 

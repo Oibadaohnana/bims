@@ -77,6 +77,10 @@
               cp web/index.html web/bims.js "$out/share/bims/"
               cp web/builder.html web/builder.js "$out/share/bims/"
               cp web/ship.html web/ship.js "$out/share/bims/"
+              # The crew's panels, shared by the room and the ship: both pages
+              # load crew.js before their own script and link crew.css. A
+              # page served without them is a black canvas with no message.
+              cp web/crew.js web/crew.css "$out/share/bims/"
               # One wasm per cdylib. A page whose wasm was not copied fetches
               # a 404 and shows nothing at all.
               cp target/wasm32-unknown-unknown/release/bims.wasm "$out/share/bims/"
@@ -151,6 +155,18 @@
             port = 8084;
             about = "Serve the Bims behaviour test room on http://localhost:8084";
           };
+
+          # The simulation somewhere else each time: a random seed, and a
+          # random station somebody lives on in that galaxy, docked from the
+          # first step. For trying the game out without the lobby and without
+          # the same dock every time.
+          bims-test = serveFor {
+            name = "bims-test";
+            page = "ship.html?mode=1&random=1";
+            wasm = [ "ship.wasm" ];
+            port = 8085;
+            about = "Serve the Bims simulation docked somewhere at random on http://localhost:8085";
+          };
         in
         {
           inherit
@@ -158,6 +174,7 @@
             bims-game
             bims-simulation
             bims-room
+            bims-test
             ;
         };
     in
@@ -173,6 +190,7 @@
             bims-game
             bims-simulation
             bims-room
+            bims-test
             ;
           default = built.bims;
         }
@@ -206,9 +224,19 @@
             program = nixpkgs.lib.getExe built.bims-room;
             meta.description = "The behaviour test room — Bims on a deck — on http://localhost:8084";
           };
+          test = {
+            type = "app";
+            program = nixpkgs.lib.getExe built.bims-test;
+            meta.description = "Docked at a random station in a random galaxy, on the playtest ship, on http://localhost:8085";
+          };
         in
         {
-          inherit game simulation room;
+          inherit
+            game
+            simulation
+            room
+            test
+            ;
           default = game;
         }
       );

@@ -37,12 +37,42 @@ pub enum Job {
     /// whichever of the two is set later. When something else worth hauling
     /// arrives, this is the row it goes under.
     Haul,
-    /// Making a meal.
+    /// Cooking: a meal for a hungry Bim, and stew for the cold store while
+    /// the shelf holds fewer than the manager asked for — one vegetable and
+    /// one block of tofu, chopped, cooked and put away in a tub. One row,
+    /// because both are the galley, and a Bim that is hungry eats before it
+    /// cooks for the shelf whatever the number says.
     Cook,
+    /// Standing at the helm to control the ship. On offer while the ship is
+    /// away from a berth and nobody is posted at the helm; whoever takes it
+    /// is posted there — a standing order, like the player's own "take the
+    /// helm" — and let go when the ship is tied up again. The room only
+    /// knows the helm through `Game::set_helm`, which the world calls: the
+    /// classic room has no helm and never offers this.
+    Helm,
+    /// Making something at a bench — the smelter, the workbench — while the
+    /// world has an order for it: the hold short of a product the player
+    /// asked to keep, the inputs aboard, and the station powered. One row
+    /// for every bench, because what a Bim does at any of them is stand
+    /// there; which recipe is the order's. See `game::Order`.
+    Craft,
+    /// A walk outside in a suit to gather ore, while the ship is holding
+    /// at a belt with a suit aboard and room for what comes back. The world
+    /// says when — `game::Eva` — and what a walk yields is the belt's.
+    Mine,
 }
 
 impl Job {
-    pub const ALL: [Job; 5] = [Job::Clean, Job::Plant, Job::Cut, Job::Haul, Job::Cook];
+    pub const ALL: [Job; 8] = [
+        Job::Clean,
+        Job::Plant,
+        Job::Cut,
+        Job::Haul,
+        Job::Cook,
+        Job::Helm,
+        Job::Craft,
+        Job::Mine,
+    ];
 
     /// 0, then one per job. The host names them.
     pub fn code(self) -> u32 {

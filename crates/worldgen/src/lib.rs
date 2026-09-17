@@ -53,7 +53,7 @@ pub mod system;
 mod tests;
 
 pub use checksum::galaxy_checksum;
-pub use data::{BodyKind, HazardKind, StationKind, TravelBand};
+pub use data::{BeltYield, BodyKind, HazardKind, StationKind, TravelBand, belt_yield};
 pub use galaxy::{Galaxy, GalaxyType, Star, StarClass};
 pub use layout::Fault;
 pub use math::DVec2;

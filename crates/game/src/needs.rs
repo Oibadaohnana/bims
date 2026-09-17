@@ -62,6 +62,9 @@ const VISITS_PER_DAY: f32 = 3.0;
 /// for a day is uncomfortable, not damaged, and the margin is where that
 /// difference lives.
 const CHATS_PER_DAY: f32 = 4.0;
+/// Once a waking day a Bim wants a shower. Not oftener: a crew that queued
+/// for the one shower twice a day would spend the day queuing.
+const SHOWERS_PER_DAY: f32 = 1.0;
 
 /// Waking minutes each errand costs, from the Bim setting off to the need
 /// being full again. These are measured off the chains, not guessed at, and
@@ -80,11 +83,17 @@ const VISIT_COST: f32 = 14.0;
 const TO_BED_COST: f32 = 6.0;
 /// Crossing the room to where the other one is and standing there talking.
 const CHAT_COST: f32 = 12.0;
+/// Over to the shower and the shower itself.
+const SHOWER_COST: f32 = 6.0 + SHOWER_MINUTES;
 
 /// Per game minute *awake*: each need falls from full to urgent exactly once
 /// per slot, and the slots tile the waking day with room for the errands.
 const REST_DRAIN: f32 = SPAN / (BODY_WAKING / SLEEPS_PER_DAY - TO_BED_COST);
 const FOOD_DRAIN: f32 = SPAN / (WAKING / MEALS_PER_DAY - MEAL_COST);
+/// A day's ordinary grime: sweat and dust, on the waking day like food. What
+/// the deck adds on top of it is `Need::Cleanliness`'s, and separate — see
+/// the note on [`Need::Hygiene`].
+const HYGIENE_DRAIN: f32 = SPAN / (WAKING / SHOWERS_PER_DAY - SHOWER_COST);
 /// The restroom need is the exception, and its slot is the *whole* day rather
 /// than the waking part of it: it is the one thing that keeps draining while
 /// the Bim sleeps, so a night is six hours of it. Derived from the same
@@ -111,6 +120,8 @@ const RELIEF: f32 = 5.0;
 /// A conversation. Short — it is two people standing on the deck, not an
 /// evening — and what it is worth is spread over exactly the length of it.
 const TALKING: f32 = 6.0;
+/// Standing under the shower. The whole of the need comes back over it.
+pub const SHOWER_MINUTES: f32 = 8.0;
 
 /// Where the company bar sends the Bim looking for the other one, and how much
 /// of it a conversation puts back.
@@ -130,6 +141,7 @@ const REST_RECOVER: f32 = SPAN / SLEEP_MINUTES;
 /// A meal fills the whole range whatever it started at, as does a visit.
 const FOOD_RECOVER: f32 = FULL / EATING;
 const RESTROOM_RECOVER: f32 = FULL / RELIEF;
+const HYGIENE_RECOVER: f32 = FULL / SHOWER_MINUTES;
 /// A word does not fill anybody up the way a meal does. A conversation is
 /// worth [`CHAT_FILLS`] of the bar and no more, so the Bim is back looking for
 /// the other one before the day is out however many it has already had — which
@@ -147,6 +159,9 @@ const CLEAN_AT_DAWN: f32 = 1.0;
 /// They woke up in the same compartment they went to sleep in, so neither is
 /// short of company yet.
 const COMPANY_AT_DAWN: f32 = 0.85;
+/// Fresh out of bed, and the shower is an evening thing: a full bar at dawn
+/// reaches the trigger towards the end of the waking day.
+const HYGIENE_AT_DAWN: f32 = 1.0;
 
 /// How badly the Bim needs the heads, read straight off the level.
 ///
@@ -214,18 +229,27 @@ pub enum Need {
     /// aboard that needs two Bims — see `social.rs` for what going without it
     /// does, which is a good deal worse than what this bar shows.
     Company,
+    /// A day's grime on the Bim itself, on the clock like food, and put right
+    /// by a shower. Kept apart from [`Need::Cleanliness`] on purpose: that one
+    /// is the *deck* — it follows the mess about the Bim and empties nobody's
+    /// stomach by itself — and the stages of being sick hang off it, so a
+    /// clock draining it would have a crew with nowhere to wash falling ill
+    /// on a spotless deck. This one is simply a Bim that wants a wash, and a
+    /// room with no shower is a Bim that goes on wanting one.
+    Hygiene,
 }
 
 impl Need {
     /// In the order they are shown, and the order the host indexes them by.
     /// Appended to rather than inserted into: the index is the whole contract
     /// across the boundary, and the host's `NEED_NAMES` is read off it.
-    pub const ALL: [Need; 5] = [
+    pub const ALL: [Need; 6] = [
         Need::Rest,
         Need::Food,
         Need::Restroom,
         Need::Cleanliness,
         Need::Company,
+        Need::Hygiene,
     ];
 
     pub fn from_index(i: u32) -> Option<Need> {
@@ -240,6 +264,7 @@ impl Need {
             // Time alone does not make a Bim dirty; filth does.
             Need::Cleanliness => 0.0,
             Need::Company => COMPANY_DRAIN,
+            Need::Hygiene => HYGIENE_DRAIN,
         }
     }
 
@@ -265,6 +290,7 @@ impl Need {
             Need::Restroom => RESTROOM_RECOVER,
             Need::Cleanliness => 0.0,
             Need::Company => COMPANY_RECOVER,
+            Need::Hygiene => HYGIENE_RECOVER,
         }
     }
 }
@@ -318,6 +344,7 @@ impl Needs {
                 RESTROOM_AT_DAWN,
                 CLEAN_AT_DAWN,
                 COMPANY_AT_DAWN,
+                HYGIENE_AT_DAWN,
             ],
             triggers: Need::ALL.map(|need| Trigger::at(need.trigger_at())),
         }
@@ -370,7 +397,9 @@ impl Needs {
     /// instant — mid-doze, mid-mouthful, sat on the pan — or none.
     /// `tiring` multiplies how fast the Bim runs out of rest — malnutrition
     /// doubles it and then trebles it, so a starving Bim needs more sleep.
-    pub fn update(&mut self, dt: f32, restoring: Option<Need>, tiring: f32) {
+    /// `purging` does the same to the restroom need: food poisoning trebles
+    /// it.
+    pub fn update(&mut self, dt: f32, restoring: Option<Need>, tiring: f32, purging: f32) {
         let minutes = dt * MINUTES_PER_SECOND;
 
         let asleep = restoring == Some(Need::Rest);
@@ -385,7 +414,12 @@ impl Needs {
             if asleep && need != Need::Restroom {
                 continue;
             }
-            let rate = need.drain() * if need == Need::Rest { tiring } else { 1.0 };
+            let rate = need.drain()
+                * match need {
+                    Need::Rest => tiring,
+                    Need::Restroom => purging,
+                    _ => 1.0,
+                };
             let level = &mut self.levels[need as usize];
             *level = (*level - rate * minutes).max(0.0);
         }

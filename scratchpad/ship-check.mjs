@@ -51,11 +51,14 @@ const BROOM_LOCKER = 14;
 const STRUCTURE = 15;
 const OUTSIDE_WALL = 16;
 const HELM = 17;
+const REACTOR = 18;
+const POWER_CONDUIT = 19;
 const FUEL_TANK = 21;
 const AIRLOCK = 23;
 const SENSOR_ARRAY = 24;
 const SHELF = 25;
 const THRUSTER = 27;
+const DIAGONAL_OUTSIDE_WALL = 30;
 
 /** `physics::ResourceId`, for the trade panel. */
 const METAL = 1;
@@ -245,7 +248,8 @@ async function session(search, { spawn = true } = {}) {
 
 /** The reference ship, built through the palette: deck, hull, galley, heads,
  * a table, a bay, a locker, an engine, thrusters, an airlock, a sensor array,
- * a full tank, and a bed and a seat each.
+ * a full tank, a reactor with conduit under everything that draws, and a
+ * bed and a seat each.
  *
  * Deliberately the same layout as `shipdesign::fixture::flyer`, so a change to
  * the rules that breaks one breaks both — but built out of pointer events
@@ -284,8 +288,23 @@ function buildShip(page, crew) {
 
   put(TABLE, 4, 6);
   put(HELM, 7, 6);
-  put(HYDRO_BAY, 10, 10);
-  put(ENGINE, 7, 13);
+  put(HYDRO_BAY, 3, 10);
+  // The engine in the stern with its bell over the edge: an engine fires
+  // aft and has to fire into space, so two tiles of stern plating come off
+  // (the deck under them stays) and the engine stands there.
+  drag(7, 18, 8, 18, 2);
+  put(ENGINE, 7, 16);
+
+  // The reactor, and one run of conduit from it under everything that
+  // draws: up column 8 through the helm and the bay, along row 3 under the
+  // galley to the cold store, and up column 5 to where the array will be.
+  // Conduit is dragged like deck — a rectangle a tile wide is a run.
+  put(REACTOR, 10, 13);
+  pick(POWER_CONDUIT);
+  drag(3, 3, 8, 3);
+  drag(8, 4, 8, 13);
+  drag(9, 13, 10, 13);
+  drag(5, 1, 5, 2);
 
   for (let i = 0; i < crew; i++) {
     put(BUNK, 14, 8 + 2 * i);
@@ -308,7 +327,11 @@ function buildShip(page, crew) {
     drag(x, y, x, y, 2);
     put(kind, x, y);
   }
-  put(AIRLOCK, 16, 8);
+  // The airlock goes in the skin — a ship docks by an airlock that opens
+  // onto space, and one on the deck is a door to nowhere. Peel two tiles
+  // of plating; the deck under them stays, and the airlock stands on it.
+  drag(18, 11, 18, 12, 2);
+  put(AIRLOCK, 18, 11);
   put(FUEL_TANK, 2, 12);
 
   // And something to eat and something to burn. Bought through the panel,
@@ -420,9 +443,51 @@ const FOR_THE_HARNESS = new Set([
   "ship_simulation_star",
   "ship_simulation_station",
   "ship_world_star",
+  // Standing the ship beside a station and asking about one: the residents
+  // are fifty tiles from a hull that is days away by trip.
+  "ship_put_for_probe",
+  "ship_station_x",
+  "ship_station_y",
+  "ship_station_radius",
+  "ship_station_residents",
+  // Standing a crew member at the helm without the walk: the trips below
+  // are about the trips.
+  "ship_man_helm_for_probe",
 ]);
 const orphans = [...exported].filter((name) => !called.has(name) && !FOR_THE_HARNESS.has(name));
 check("no export has quietly stopped being called", orphans.length === 0, orphans.join(", "));
+
+// And the room's half of the boundary. The crew aboard are the room's Bims,
+// and their panels are web/crew.js, shared with the room's page: everything
+// it calls is a `bims_*`, and ship.wasm carries those because a `#[no_mangle]`
+// in an rlib is exported from every cdylib that links it — `bims::host_aboard`
+// points them at the room aboard. That is a property of the linker, not of
+// anything written down, so it is checked here rather than trusted: a build
+// that stopped exporting them would be a game screen whose every panel
+// trapped on first paint. The page's own deck calls — `bims_hit_at`, the
+// marquee, the order — are in ship.js and counted too.
+const crewSource = readFileSync("web/crew.js", "utf8");
+check("crew.js has no stray NUL in it", !crewSource.includes("\0"));
+const roomCalled = new Set(
+  [...`${crewSource}\n${hostSource}`.matchAll(/wasm\.(bims_[a-z0-9_]+)/g)].map((m) => m[1]),
+);
+const roomExported = new Set(Object.keys(wasm).filter((name) => name.startsWith("bims_")));
+check("the crew's panels call the room at all", roomCalled.size > 40, `${roomCalled.size} calls`);
+const roomMissing = [...roomCalled].filter((name) => !roomExported.has(name));
+check(
+  "everything the crew's panels call is exported from ship.wasm",
+  roomMissing.length === 0,
+  roomMissing.join(", "),
+);
+// Two the world drives itself, and the room's own view, which the ship's
+// camera replaces: a page that called either would be running a second clock
+// or reading a transform that means nothing aboard.
+const NOT_ABOARD = ["bims_init", "bims_update", "bims_view_scale", "bims_view_x", "bims_view_y"];
+check(
+  "and the room is never stepped or fitted from this page",
+  NOT_ABOARD.every((name) => !roomCalled.has(name)),
+  NOT_ABOARD.filter((name) => roomCalled.has(name)).join(", "),
+);
 
 // --- the wasm agrees with the native build --------------------------------
 
@@ -741,6 +806,33 @@ check(
   `${at24} steps in a second of frames at ${speedNow()}x`,
 );
 
+// Whether the view follows the crew member you steer. Following, a pan
+// stops at the edge with them still on the canvas; let go, the view stays
+// exactly where it was and the same pan carries the whole way. The pair of
+// buttons and the F key go to the same place in wasm, and the buttons are
+// marked off what wasm says.
+{
+  const follow = (on) => byId.get("follow-buttons").querySelector(`[data-follow=${on}]`);
+  const playerPixel = () => wasm.ship_view_x() + wasm.ship_crew_x(0) * wasm.ship_view_scale();
+  check("the view starts following the crew", wasm.ship_follow() === 1 && follow(1).className === "on");
+  wasm.ship_pan(-100000, 0);
+  step(1);
+  check("following, a pan stops with them still on the canvas", playerPixel() > 0, String(playerPixel()));
+  const held = wasm.ship_view_x();
+  follow(0).dispatch("click");
+  step(1);
+  check("Free camera lets the view go", wasm.ship_follow() === 0 && follow(0).className === "on" && follow(1).className === "");
+  check("and letting go moves nothing", Math.abs(wasm.ship_view_x() - held) < 1e-3, `${held} -> ${wasm.ship_view_x()}`);
+  wasm.ship_pan(-100000, 0);
+  step(1);
+  check("free, the same pan carries the whole way", Math.abs(wasm.ship_view_x() - (held - 100000)) < 1, String(wasm.ship_view_x()));
+  check("with the crew member off the edge", playerPixel() < 0, String(playerPixel()));
+  solo.fire("keydown", { key: "f" });
+  step(1);
+  check("F follows again", wasm.ship_follow() === 1 && follow(1).className === "on");
+  check("and the view comes back to them", playerPixel() > 0, String(playerPixel()));
+}
+
 // --- the map, and plotting a trip ------------------------------------------
 
 solo.fire("keydown", { key: "m" });
@@ -791,6 +883,34 @@ check(
   "there is nothing to pick out there",
   wasm.ship_map_pick(aimedAt.clientX, aimedAt.clientY, 14) === 0,
 );
+
+// The ship is flown from the helm, and nobody starts there: a click on the
+// map aims at nothing until the crew member you steer is standing at it,
+// and the panel says so and offers the walk.
+check("nobody starts at the helm", wasm.ship_at_helm(0) === 0);
+solo.gameCanvas.dispatch("pointerdown", { button: 0, ...aimedAt });
+step(1);
+check("the map does not aim from anywhere but the helm", wasm.ship_preview_state() === 0, String(wasm.ship_preview_state()));
+check(
+  "and the helm panel says to take it",
+  byId.get("plan").textContent.toLowerCase().includes("helm"),
+  byId.get("plan").textContent,
+);
+check("the Take the helm button is live", byId.get("take-helm").disabled === false);
+check("Confirm is not", byId.get("confirm").disabled === true);
+byId.get("take-helm").dispatch("click");
+solo.until(() => wasm.ship_at_helm(0) === 1, "reached the helm");
+step(1);
+check("the walk ends at the helm", byId.get("take-helm").disabled === true);
+check(
+  "which the panel names",
+  byId.get("helm-watch").textContent.includes("at the helm"),
+  byId.get("helm-watch").textContent,
+);
+// And they stay there rather than wandering off it.
+for (let i = 0; i < 300; i++) step(1);
+check("and they stay at the helm", wasm.ship_at_helm(0) === 1);
+
 solo.gameCanvas.dispatch("pointerdown", { button: 0, ...aimedAt });
 // One frame, so the panel has been painted. The quote is re-worked every
 // frame rather than once at the click — a number that was right when it was
@@ -811,6 +931,34 @@ check("Confirm is live once there is something to confirm", confirm.disabled ===
 const fuelBefore = wasm.ship_fuel_aboard();
 confirm.dispatch("click");
 step(2);
+// From a berth a trip begins with leaving it: everybody to their own side
+// of the airlock — nobody is aboard who should not be, so that is at once —
+// then the push-off, and only then the trip.
+check(
+  "Confirm starts the departure",
+  [3, 4].includes(wasm.ship_world_state()),
+  String(wasm.ship_world_state()),
+);
+check(
+  "which the readout names",
+  ["Casting off", "Undocking"].includes(byId.get("trip-phase").textContent),
+  byId.get("trip-phase").textContent,
+);
+check("and the page said so", byId.get("log").textContent.includes("Casting off"), byId.get("log").textContent);
+check("Abort is live while it is leaving", byId.get("abort").disabled === false);
+check("and Brake is not: there is nothing under way to brake", byId.get("brake").disabled === true);
+const berth = { x: wasm.ship_world_x(), y: wasm.ship_world_y() };
+const headingAtBerth = wasm.ship_world_heading();
+solo.until(() => wasm.ship_world_state() === 4, "began pushing off");
+let turned = false;
+let pushed = 0;
+while (wasm.ship_world_state() === 4 && pushed < 40000) {
+  turned = turned || wasm.ship_world_heading() !== headingAtBerth;
+  step(1);
+  pushed++;
+}
+check("the push-off is straight out, not a turn", !turned);
+check("and it moved the ship", Math.hypot(wasm.ship_world_x() - berth.x, wasm.ship_world_y() - berth.y) > 500);
 check("Confirm sets the ship going", wasm.ship_world_state() === 2, String(wasm.ship_world_state()));
 check(
   "and reserves the fuel for it",
@@ -841,8 +989,21 @@ check(
 );
 check("still no error box", !byId.get("error").textContent, byId.get("error").textContent);
 
-// --- giving up --------------------------------------------------------------
-
+// --- changing target, and braking ---------------------------------------------
+//
+// Change target is an affordance for what a click on the map already does:
+// it opens the map with nothing aimed at, so the next click is the new
+// target and Confirm flies it. Under way that is a redirect. Brake stops
+// the ship where it is, and once it is stopping there is nothing to brake.
+//
+// The trip was a game afternoon and the crew member has long since left
+// the helm for their errands, so they are sent back first — the page's own
+// way, the button and the walk — or the Confirm is refused.
+if (wasm.ship_at_helm(0) === 0) {
+  byId.get("take-helm").dispatch("click");
+  solo.until(() => wasm.ship_at_helm(0) === 1, "back at the helm");
+  step(1);
+}
 solo.gameCanvas.dispatch("pointerdown", {
   button: 0,
   pointerId: 1,
@@ -851,15 +1012,44 @@ solo.gameCanvas.dispatch("pointerdown", {
 });
 confirm.dispatch("click");
 step(2);
-check("off again", wasm.ship_world_state() === 2);
+check("off again", wasm.ship_world_state() === 2, String(wasm.ship_world_state()));
 
 for (let i = 0; i < 40; i++) step(1);
-byId.get("abort").dispatch("click");
+// Casting off walks the crew to the gangway and back, so a ship straight
+// off the berth has nobody at the helm for a moment; a redirect from a
+// point in space does not, and the crew member is still standing there.
+check("under way, Brake is live and Abort is not", byId.get("brake").disabled === false && byId.get("abort").disabled === true);
+solo.fire("keydown", { key: "m" });
+step(1);
+check("back on the ship view", wasm.ship_view_mode() === 0, String(wasm.ship_view_mode()));
+check("Change target is live at the helm", byId.get("change-target").disabled === false);
+byId.get("change-target").dispatch("click");
+step(1);
+check("Change target opens the map", wasm.ship_view_mode() === 1, String(wasm.ship_view_mode()));
+check("with nothing aimed at", wasm.ship_preview_state() === 0 && confirm.disabled === true, String(wasm.ship_preview_state()));
+check(
+  "and the panel says what the two buttons are for",
+  byId.get("plan").textContent.includes("Brake"),
+  byId.get("plan").textContent,
+);
+solo.gameCanvas.dispatch("pointerdown", {
+  button: 0,
+  pointerId: 1,
+  clientX: middle.x + 140,
+  clientY: middle.y,
+});
+step(1);
+check("the next click is the new target", wasm.ship_preview_state() === 1 && confirm.disabled === false, String(wasm.ship_preview_state()));
+check("quoted as a redirect, stopping first", wasm.ship_preview_stopping() > 0, String(wasm.ship_preview_stopping()));
+
+byId.get("brake").dispatch("click");
 step(2);
-check("Abort is taken", byId.get("log").textContent.toLowerCase().includes("stopping"), byId.get("log").textContent);
+check("Brake is taken", byId.get("log").textContent.toLowerCase().includes("stopping"), byId.get("log").textContent);
+check("and once stopping there is nothing to brake", byId.get("brake").disabled === true && wasm.ship_trip_aborting() === 1);
 solo.until(() => wasm.ship_world_state() !== 2, "stopped");
 check("and it comes to rest", wasm.ship_world_speed() === 0, String(wasm.ship_world_speed()));
 check("holding, with nobody's route on the map", wasm.ship_destination_by() === 0);
+check("at rest neither Brake nor Abort is live", byId.get("brake").disabled === true && byId.get("abort").disabled === true);
 
 // --- a designer opened on the playtest ship ----------------------------------
 //
@@ -878,18 +1068,19 @@ check("with nothing wrong with it", given.wasm.ship_issue_count() === 0, String(
 check("the pool is what the crew brought", given.pool() === SOLO_POOL, String(given.pool()));
 check("and none of it has been spent", given.left() === SOLO_POOL, String(given.left()));
 check("Accept is on offer at once", given.byId.get("accept").disabled === false);
-// In the middle of the forty-tile grid: the twenty-tile ship shifted by ten.
+// In the middle of the forty-tile grid: the twenty-tile ship shifted by
+// ten, so its hob at (6, 7) is at (16, 17).
 given.pick(HOB);
-given.hover(18, 13);
+given.hover(16, 17);
 check("the ship is in the middle of the grid", given.wasm.ship_hovered_part() !== 0 && given.wasm.ship_ghost_ok() === 0);
 // A right-click on the given hob takes the hob and only the hob, and its
 // price is the crew's — a gift is a gift.
 const partsBefore = given.wasm.ship_part_total();
-given.peel(18, 13);
+given.peel(16, 17);
 check("a given part peels off like any other", given.wasm.ship_part_total() === partsBefore - 1, String(given.wasm.ship_part_total()));
 check("and its price is money in hand", given.left() === SOLO_POOL + given.price(HOB), String(given.left()));
 check("but the deck under it stays", given.wasm.ship_issue_count() > 0);
-given.put(HOB, 18, 13);
+given.put(HOB, 16, 17);
 check("and it goes back", given.wasm.ship_issue_count() === 0 && given.left() === SOLO_POOL);
 given.byId.get("accept").dispatch("click");
 given.step(1);
@@ -1038,6 +1229,24 @@ const unnamedGoods = goodsRows
   .map((r) => r.querySelector(".name").textContent)
   .filter((name) => !name || /^Resource \d+$/.test(name));
 check("every resource has a name", unnamedGoods.length === 0, unnamedGoods.join(", "));
+
+// What this station has on the shelf is the wasm's to say — `ship_sold_here`
+// — and a row it does not sell is greyed with its buy buttons off. An emitter
+// is never sold anywhere, so that row is the one to look at.
+const EMITTER = 7;
+const unsoldWrong = goodsRows.filter((r) => {
+  const sold = shop.wasm.ship_sold_here(Number(r.dataset.resource)) !== 0;
+  const greyed = r.className.includes("unsold");
+  const buyOff = r.querySelectorAll("[data-buy]").every((b) => b.disabled);
+  return sold === greyed || (!sold && !buyOff);
+});
+check("a row this station does not sell is greyed, buy buttons off", unsoldWrong.length === 0, unsoldWrong.map((r) => r.dataset.resource).join(", "));
+check("and emitters are never on the shelf", shop.wasm.ship_sold_here(EMITTER) === 0);
+check(
+  "so their row says so",
+  shop.root.querySelector(`[data-resource="${EMITTER}"]`).className.includes("unsold"),
+);
+check("and metal is", shop.wasm.ship_sold_here(METAL) !== 0);
 
 const holdRows = shop.root.querySelectorAll("[data-storage]");
 check(
@@ -1195,6 +1404,48 @@ check(
   `${open.wasm.ship_draw_len()} against ${litLength}`,
 );
 
+// A corner cut off at forty-five degrees. The corner tile and its two
+// neighbours come off the ship altogether — wall, deck and frame, one
+// right-click a layer — and the two hull tiles the cut ends on are peeled
+// to their frame; then one drag of the diagonal tool lays the run across
+// the gap, a staircase one tile a step with every piece turned the same
+// way, and the hull is as closed as it was. The rules do not care which
+// half of each tile is solid — a corner piece is one object a tile and it
+// shields — so any turn seals it; only the picture knows the difference.
+console.log("\na chamfered corner");
+for (const [x, y] of [[3, 3], [4, 3], [3, 4]]) {
+  open.drag(x, y, x, y, 2);
+  open.drag(x, y, x, y, 2);
+  open.drag(x, y, x, y, 2);
+}
+open.drag(5, 3, 5, 3, 2);
+open.drag(3, 5, 3, 5, 2);
+check("the corner cut off opens the hull", open.wasm.ship_exposed_count() > 0);
+open.hover(3, 3);
+check("and the corner tile is off the ship", open.wasm.ship_hovered_part() === 0);
+open.pick(DIAGONAL_OUTSIDE_WALL);
+const beforeRun = open.wasm.ship_part_total();
+open.drag(3, 5, 5, 3);
+check(
+  "one drag lays a run of three corner pieces",
+  open.wasm.ship_part_total() === beforeRun + 3,
+  `${open.wasm.ship_part_total() - beforeRun} placed`,
+);
+open.hover(4, 4);
+check("a corner piece is a tile the readout names", open.wasm.ship_hovered_part() !== 0);
+check("and the hull is closed by them", open.wasm.ship_exposed_count() === 0, `${open.wasm.ship_exposed_count()} exposed`);
+// The pieces peel off like any hull — one at a time here, since a
+// removing drag is a rectangle and would take the deck beside them too —
+// and go back at the next quarter turn on the same three tiles.
+for (const [x, y] of [[3, 5], [4, 4], [5, 3]]) open.drag(x, y, x, y, 2);
+check("and they peel off again", open.wasm.ship_part_total() === beforeRun, String(open.wasm.ship_part_total()));
+open.fire("keydown", { key: "r" });
+open.drag(3, 5, 5, 3);
+check("turned, it still lays three", open.wasm.ship_part_total() === beforeRun + 3, String(open.wasm.ship_part_total()));
+check("and still seals", open.wasm.ship_exposed_count() === 0, `${open.wasm.ship_exposed_count()} exposed`);
+check("the palette has a button for both corner pieces",
+  open.root.querySelector('[data-part="29"]') !== null && open.root.querySelector('[data-part="30"]') !== null);
+
 // A plain wall is not hull. Same hole, filled with the wrong thing.
 open.drag(6, 3, 6, 3, 2);
 open.put(WALL, 6, 3);
@@ -1304,6 +1555,11 @@ check("selling puts every euro back", crew.left() === purse, `${crew.left()} aga
 // --- a redirect, by the other player ------------------------------------------
 
 crew.fire("keydown", { key: "m" });
+// Both at the helm, since the ship is flown from there — the other player
+// cannot be walked there from this browser, so they are stood there.
+crew.wasm.ship_man_helm_for_probe(0);
+crew.wasm.ship_man_helm_for_probe(1);
+check("both are at the helm", crew.wasm.ship_at_helm(0) === 1 && crew.wasm.ship_at_helm(1) === 1, `${crew.wasm.ship_at_helm(0)} ${crew.wasm.ship_at_helm(1)}`);
 const crewMiddle = { x: crew.gameCanvas.clientWidth / 2, y: crew.gameCanvas.clientHeight / 2 };
 crew.wasm.ship_zoom(crewMiddle.x, crewMiddle.y, 100000);
 crew.gameCanvas.dispatch("pointerdown", {
@@ -1315,12 +1571,16 @@ crew.gameCanvas.dispatch("pointerdown", {
 crew.step(1);
 crew.byId.get("confirm").dispatch("click");
 crew.step(2);
+crew.until(() => crew.wasm.ship_world_state() === 2, "player one's ship set off");
 check("player one sets off", crew.wasm.ship_world_state() === 2);
 check("and the route is theirs", crew.wasm.ship_destination_by() === 1, String(crew.wasm.ship_destination_by()));
 for (let i = 0; i < 40; i++) crew.step(1);
 
 // The other one sends the ship somewhere else. It stops first — that is what a
-// redirect *is* — and the route on the map becomes theirs.
+// redirect *is* — and the route on the map becomes theirs. Back at the helm
+// first: a quarter of an hour at 24x is long enough for the crew to have
+// gone about their errands, and the ship is flown from the helm.
+crew.wasm.ship_man_helm_for_probe(1);
 crew.wasm.ship_cmd_confirm_point(1, crew.wasm.ship_world_x() - 20000, crew.wasm.ship_world_y());
 crew.step(2);
 check(
@@ -1356,7 +1616,7 @@ for (const withAirlock of [true, false]) {
   console.log(`\na ship ${withAirlock ? "with" : "without"} an airlock, coming alongside`);
   buildShip(port, 1);
   if (!withAirlock) {
-    port.drag(16, 8, 16, 9, 2);
+    port.drag(18, 11, 18, 12, 2);
     check("the airlock is off", port.wasm.ship_has_errors() === 0);
   }
   port.byId.get("accept").dispatch("click");
@@ -1365,21 +1625,31 @@ for (const withAirlock of [true, false]) {
   const dock = port.wasm.ship_docked_at() - 1;
   const at = { x: port.wasm.ship_world_x(), y: port.wasm.ship_world_y() };
   port.wasm.ship_cmd_speed(0, 4);
+  port.wasm.ship_man_helm_for_probe(0);
 
   // Out to a point, then back to the dock it just left.
   port.wasm.ship_cmd_confirm_point(0, at.x + 20000, at.y);
   port.step(2);
+  port.until(() => port.wasm.ship_world_state() === 2, "set off");
   port.until(() => port.wasm.ship_world_state() !== 2, "got clear of the dock");
   check("it is holding out in space", port.wasm.ship_world_state() === 1);
   check("and the station panel is gone", port.byId.get("game-trade").hidden === true);
 
   const back = mapIndex(port, 1, dock);
   check("the dock it left is still on the map", back >= 0, String(back));
+  // Back to the helm first: the trip out was long enough at 24x for the
+  // crew member to have gone off about their errands.
+  port.wasm.ship_man_helm_for_probe(0);
   port.wasm.ship_cmd_confirm_node(0, 1, dock);
   port.step(2);
   port.until(() => port.wasm.ship_world_state() !== 2, "came back");
 
   if (withAirlock) {
+    // The trip ends short of the berth and the ship comes alongside — a
+    // slide onto the berth, read off the clock, and tied up at the end.
+    check("it comes alongside first", port.wasm.ship_world_state() === 5, String(port.wasm.ship_world_state()));
+    check("which the readout says", port.byId.get("trip-phase").textContent === "Docking", port.byId.get("trip-phase").textContent);
+    port.until(() => port.wasm.ship_world_state() !== 5, "tied up");
     check("it docks", port.wasm.ship_world_state() === 0 && port.wasm.ship_docked_at() === dock + 1);
     check("and the station panel comes back", port.byId.get("game-trade").hidden === false);
   } else {

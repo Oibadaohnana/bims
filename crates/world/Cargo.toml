@@ -15,6 +15,7 @@ description = "The one world clock: a system, a ship, and what happens on it"
 bims = { path = "../game" }
 economy = { path = "../economy" }
 flight = { path = "../flight" }
+health = { path = "../health" }
 physics = { path = "../physics" }
 shipdesign = { path = "../shipdesign" }
 time = { path = "../time" }

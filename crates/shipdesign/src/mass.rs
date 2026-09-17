@@ -13,7 +13,7 @@
 use physics::{EngineSpec, Facing, Mass, MassError};
 
 use crate::design::ShipDesign;
-use crate::parts::{PartKind, part_mass};
+use crate::parts::part_mass;
 
 /// Every part welded to the hull, added up. The frame, the plating and
 /// everything standing on it — but **not** what is in the hold; that is
@@ -38,7 +38,7 @@ pub fn engines(design: &ShipDesign) -> Vec<EngineSpec> {
     design
         .parts
         .iter()
-        .filter(|p| p.kind == PartKind::Engine)
+        .filter(|p| p.kind.def().pushes())
         .map(|p| EngineSpec {
             thrust: p.kind.def().thrust,
             facing: p.rotation.facing(),

@@ -12,9 +12,10 @@ import { readFileSync } from "node:fs";
 
 /** The attributes a page switches with `hidden`: the room's tray panels, the
  * builder's screens and its tool's tabs, and the ship designer's two
- * screens. */
+ * screens. The tray's rules live in crew.css, shared by the room and the
+ * ship, so that is read as well as the pages. */
 const SWITCHED = ["data-panel", "data-screen", "data-tab"];
-const PAGES = ["web/index.html", "web/builder.html", "web/ship.html"];
+const PAGES = ["web/index.html", "web/builder.html", "web/ship.html", "web/crew.css"];
 
 const fails = [];
 let looked = 0;
@@ -45,6 +46,41 @@ if (looked === 0) {
 
 for (const bad of fails) {
   console.log(`  FAIL  ${bad} sets display without :not([hidden])`);
+}
+
+// The other way two pages sharing a stylesheet bite: a class web/crew.css
+// styles **bare** — `.what { … }`, the ? button — lands on every element
+// of that class on either page. A page that carries crew's own markup (the
+// timetable legend's swatches) wants that; a page that has a rule of its
+// *own* for the same class does not — it has two stylesheets fighting over
+// one element, and that is how the ship page's readouts came to be
+// seventeen pixels wide. So every bare class rule in crew.css is checked
+// against each page's own <style>: a rule there naming the class is a
+// collision.
+{
+  const crew = readFileSync("web/crew.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const bare = new Set();
+  for (const m of crew.matchAll(/(?:^|\n)\.([a-z][a-z-]*)(?::[a-z-]+)*\s*[,{]/g)) bare.add(m[1]);
+  if (bare.size === 0) {
+    console.log("  FAIL  no bare class rules found in web/crew.css");
+    fails.push("no bare classes");
+  }
+  for (const page of ["web/ship.html", "web/index.html"]) {
+    const html = readFileSync(page, "utf8");
+    const own = html
+      .slice(html.indexOf("<style>"), html.indexOf("</style>"))
+      .replace(/\/\*[\s\S]*?\*\//g, "");
+    for (const m of own.matchAll(/([^{}]*)\{/g)) {
+      const selector = m[1];
+      for (const c of selector.matchAll(/\.([a-z][a-z-]*)/g)) {
+        if (bare.has(c[1])) {
+          console.log(`  FAIL  ${page}: its own rule "${selector.trim()}" styles .${c[1]}, which web/crew.css styles bare`);
+          fails.push(`${page} ${c[1]}`);
+        }
+      }
+    }
+  }
+  console.log(`  checked  ${bare.size} bare classes of web/crew.css against both pages' own styles`);
 }
 console.log(fails.length ? `\n${fails.length} FAILED` : "\nall passed");
 process.exit(fails.length ? 1 : 0);

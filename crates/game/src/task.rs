@@ -27,6 +27,17 @@ fn portions(dish: Dish) -> u32 {
     }
 }
 
+/// How many times a chain goes round the fridge-board-knife loop before it
+/// carries on: once per portion of a meal, and twice for the shelf stew —
+/// a vegetable and then a block of tofu.
+fn laps(kind: Kind) -> u32 {
+    match kind {
+        Kind::Meal(dish) => portions(dish),
+        Kind::Batch => 2,
+        _ => 1,
+    }
+}
+
 /// How many knife strokes it takes to get through one vegetable.
 const CHOPS: u32 = 5;
 /// How many spoonfuls go from the pot onto the plate.
@@ -128,6 +139,26 @@ pub enum Step {
     BackToBoardWithBowl,
     FillBowl,
 
+    // A stew for the store, and a stew out of it. Making one shares the
+    // meal chain as far as the hob — fridge, board, knife, twice round, pot,
+    // heat — and then, instead of a plate, the pot goes into a tub and the
+    // tub into the cold store. The store's door has its own pair of steps
+    // here rather than borrowing `OpenFridge`/`CloseFridge`, because that
+    // chain has already been through those once on the way to the board,
+    // and a step that appears twice in one chain is a step `rewind` and the
+    // progress bar cannot tell apart.
+    PackStew,
+    CarryStewToStore,
+    OpenStoreForStew,
+    StowStew,
+    ShutStoreOnStew,
+    // Warming one up is the other way about: the tub out of the store and
+    // into the pot, and from the hob on it is the meal chain's own serving
+    // and sitting down.
+    TakeStew,
+    CarryStewToPot,
+    TipStewIntoPot,
+
     // Clearing up afterwards. The last of these is skipped unless the
     // machine came up full, which is the one branch in any of the chains.
     ClearTable,
@@ -204,6 +235,35 @@ pub enum Step {
     GoToMeet,
     Talk,
 
+    // A shower: over to it and standing under it. Nothing to take, open or
+    // put back, so the chain is the walk and the wash.
+    GoToShower,
+    Shower,
+
+    // Making something: over to the bench the recipe wants, and hands on it
+    // for the recipe's length. What is made, out of what, is the world's —
+    // the room only says, on the way out of `Work`, that a recipe was
+    // finished, and `Game::take_crafted` hands that on. See
+    // `shipdesign::recipes`.
+    GoToBench,
+    Work,
+
+    // A walk outside: a suit out of its locker, over to the deck inside the
+    // port, out through the airlock, so many minutes out there gathering
+    // ore, back in, and the suit hung up again. The outside is a **clock,
+    // not a place**: the Bim is held at a spot beyond the hull and drawn in
+    // the suit, and what it brings back is the world's to add — the room
+    // counts finished walks in `Room::walks_done` and the world reads the
+    // belt. See `Kind::Eva`.
+    GoToSuitLocker,
+    TakeSuit,
+    GoToGangway,
+    StepOut,
+    Outside,
+    StepIn,
+    BackToSuitLocker,
+    PutSuitBack,
+
     Done,
 }
 
@@ -226,6 +286,13 @@ impl Step {
             TakeBowl => BackToBoardWithBowl,
             BackToBoardWithBowl => FillBowl,
             FillBowl => CarryToTable,
+            PackStew => CarryStewToStore,
+            CarryStewToStore => OpenStoreForStew,
+            OpenStoreForStew => StowStew,
+            StowStew => ShutStoreOnStew,
+            TakeStew => CloseFridge,
+            CarryStewToPot => TipStewIntoPot,
+            TipStewIntoPot => TurnStoveOn,
             GatherSlices => CarryToPot,
             CarryToPot => TipIntoPot,
             TipIntoPot => TurnStoveOn,
@@ -277,8 +344,17 @@ impl Step {
             Doze => WakeUp,
             WakeUp => ClimbOutOfBed,
             GoToMeet => Talk,
+            GoToShower => Shower,
+            GoToBench => Work,
+            GoToSuitLocker => TakeSuit,
+            TakeSuit => GoToGangway,
+            GoToGangway => StepOut,
+            StepOut => Outside,
+            Outside => StepIn,
+            StepIn => BackToSuitLocker,
+            BackToSuitLocker => PutSuitBack,
             StartDishwasher | FlipSwitch | ClimbOutOfBed | ShutDoorBehind | PutBroomBack | Talk
-            | Done => Done,
+            | ShutStoreOnStew | Shower | Work | PutSuitBack | Done => Done,
         }
     }
 
@@ -288,8 +364,12 @@ impl Step {
     fn duration(self) -> f32 {
         use Step::*;
         match self {
-            OpenFridge | CloseFridge => 0.7,
-            TakeVegetable | TakeKnife | TakePlateAndSpoon => 0.8,
+            OpenFridge | CloseFridge | OpenStoreForStew | ShutStoreOnStew => 0.7,
+            TakeVegetable | TakeKnife | TakePlateAndSpoon | TakeStew => 0.8,
+            // Ladling a pot into a tub, and a tub into a pot.
+            PackStew => 1.2,
+            StowStew => 0.7,
+            TipStewIntoPot => 0.9,
             PutVegetableDown | PutKnifeDown | SetPlateDown | PickUpPlate => 0.5,
             GatherSlices => 0.6,
             TakeBowl => 0.8,
@@ -309,6 +389,9 @@ impl Step {
             TakeBroom | PutBroomBack => 0.7,
             Sweep => SWEEP_TIME,
             Talk => CHAT_TIME,
+            Shower => clock::seconds(crate::needs::SHOWER_MINUTES),
+            TakeSuit | PutSuitBack => 1.5,
+            StepOut | StepIn => 1.0,
             StowCrop => 0.7,
             OpenDoor | ShutDoor | UnlockDoor | ShutDoorBehind => 0.7,
             SitOnToilet | RiseFromToilet => 0.7,
@@ -339,6 +422,8 @@ impl Step {
                 | CarryToDishwasher
                 | GoToDrawerForBowl
                 | BackToBoardWithBowl
+                | CarryStewToStore
+                | CarryStewToPot
                 | GoToSwitch
                 | GoToTray
                 | CarryCropToStore
@@ -353,6 +438,11 @@ impl Step {
                 | BackToDoor
                 | StepOutside
                 | GoToMeet
+                | GoToShower
+                | GoToBench
+                | GoToSuitLocker
+                | GoToGangway
+                | BackToSuitLocker
         )
     }
 
@@ -371,7 +461,14 @@ impl Step {
         use Step::*;
         matches!(
             self,
-            Chop | GatherSlices | TipIntoPot | Serve | FillBowl | WorkTray | StowCrop
+            Chop | GatherSlices
+                | TipIntoPot
+                | Serve
+                | FillBowl
+                | WorkTray
+                | StowCrop
+                | PackStew
+                | TipStewIntoPot
         )
     }
 }
@@ -383,6 +480,13 @@ pub enum Kind {
     /// A meal, of one recipe or the other. Both start the same way — fridge,
     /// board, knife — and part company once the chopping is done.
     Meal(Dish),
+    /// A stew for the cold store rather than the table: a vegetable and a
+    /// block of tofu, chopped one after the other, cooked, and put away in
+    /// a tub. What the manager's stew target is met with.
+    Batch,
+    /// A stew out of the cold store, warmed up and eaten. What a hungry Bim
+    /// does when there is one on the shelf, instead of cooking from raw.
+    Reheat,
     /// Walking over to something and working it by hand. Every switch aboard
     /// goes through this: none of them answer from across the room.
     Switch(Switch),
@@ -405,6 +509,23 @@ pub enum Kind {
     /// when it is interrupted — half a conversation is worth nothing, and the
     /// other half will have walked off. See `Game::interrupt`.
     Chat,
+    /// A shower, for a Bim a day's grime has caught up with. Only aboard a
+    /// room that has one — see `Room::shower`.
+    Shower,
+    /// Making one recipe at one bench: `recipe` indexes
+    /// `shipdesign::recipes::RECIPES` and `bench` the room's `benches`. How
+    /// long it takes rides in `rest_minutes`, the way a doze's length does,
+    /// because the room has no recipe table to read it off.
+    Craft {
+        recipe: u32,
+        bench: usize,
+    },
+    /// A walk outside to gather ore off a belt, in a suit. How long it is
+    /// out there rides in `rest_minutes`. Only aboard a room with a suit
+    /// locker and a port — see `Room::suit_locker` and `Room::gangway` —
+    /// and only when the world says the ship is at a belt with a suit
+    /// aboard; see `Game::set_eva`.
+    Eva,
 }
 
 impl Kind {
@@ -412,7 +533,7 @@ impl Kind {
     /// how a half-finished one works out where to pick itself up.
     fn first_step(self) -> Step {
         match self {
-            Kind::Meal(_) => Step::GoToFridge,
+            Kind::Meal(_) | Kind::Batch | Kind::Reheat => Step::GoToFridge,
             Kind::Switch(_) => Step::GoToSwitch,
             Kind::Rest => Step::GoToBed,
             Kind::Heads => Step::GoToDoor,
@@ -420,6 +541,9 @@ impl Kind {
             Kind::Tend(_) => Step::GoToTray,
             Kind::Clean => Step::GoToLocker,
             Kind::Chat => Step::GoToMeet,
+            Kind::Shower => Step::GoToShower,
+            Kind::Craft { .. } => Step::GoToBench,
+            Kind::Eva => Step::GoToSuitLocker,
         }
     }
 
@@ -436,6 +560,13 @@ impl Kind {
             let next = match (self, here) {
                 (Kind::Meal(_), Step::Chop) => Step::PutKnifeDown,
                 (Kind::Meal(Dish::Bowl), Step::PutKnifeDown) => Step::GoToDrawerForBowl,
+                // Off the hob and into a tub, rather than onto a plate.
+                (Kind::Batch, Step::Cook) => Step::TurnStoveOff,
+                (Kind::Batch, Step::TurnStoveOff) => Step::PackStew,
+                // A tub out of the store, and from the pot on the meal chain
+                // takes over.
+                (Kind::Reheat, Step::OpenFridge) => Step::TakeStew,
+                (Kind::Reheat, Step::CloseFridge) => Step::CarryStewToPot,
                 // Nothing was lit, so there is no hob to turn off.
                 (Kind::Leftovers, Step::Serve) => Step::PickUpPlate,
                 // The bay borrows the meal chain's fridge steps and leaves by
@@ -480,7 +611,9 @@ pub struct Saved {
     /// hands because the hands only know it is a vegetable; the store wants
     /// the crop. Lose this and an interrupted harvest is a harvest thrown
     /// away.
-    lifted: Option<Crop>,
+    /// Public for `Game::take_crew`, which banks a suspended chain's crop
+    /// when the Bim leaves the room for good.
+    pub lifted: Option<Crop>,
     started_inside: bool,
     main: Held,
     tool: Held,
@@ -514,6 +647,13 @@ impl Saved {
 
     pub fn kind(&self) -> Kind {
         self.kind
+    }
+
+    /// Whether a tub of stew was in the hands when the chain was put down.
+    /// `Game::take_crew` banks it when the Bim leaves the room for good, the
+    /// same as `lifted`.
+    pub fn holds_stew(&self) -> bool {
+        self.main == Held::Stew
     }
 
     /// How far through the chain this was, for the host's readout.
@@ -571,10 +711,10 @@ fn destination(
 ) -> Option<Vec2> {
     use Step::*;
     match step {
-        GoToFridge | CarryCropToStore => Some(room.fridge_station()),
+        GoToFridge | CarryCropToStore | CarryStewToStore => Some(room.fridge_station()),
         CarryToBoard | BackToBoard | BackToBoardWithBowl => Some(room.board_station()),
         GoToDrawerForKnife | GoToDrawerForPlate | GoToDrawerForBowl => Some(room.drawer_station()),
-        CarryToPot => Some(room.stove_station()),
+        CarryToPot | CarryStewToPot => Some(room.stove_station()),
         // Serving needs pot and plate either side, so it has its own spot.
         BackToStove => Some(room.serve_station()),
         // The chair sits clear of the table footprint, so the Bim can actually
@@ -606,6 +746,17 @@ fn destination(
         StepInside | BackToDoor => Some(room.bath.inside_station()),
         GoToToilet => Some(room.bath.toilet_station()),
         GoToSink => Some(room.bath.sink_station()),
+        // A room without a shower has nowhere to send the Bim, and the errand
+        // is not begun — `Game::take_shower` asks first.
+        GoToShower => room.shower_station(),
+        GoToBench => match kind {
+            Kind::Craft { bench, .. } => room.benches.get(bench).map(|b| b.at),
+            _ => None,
+        },
+        // A room without a suit locker or a port has nowhere to send the
+        // Bim, and the errand is not begun — `Game::can_go_outside` asks.
+        GoToSuitLocker | BackToSuitLocker => room.suit_locker_station(),
+        GoToGangway => room.gangway,
         _ => None,
     }
 }
@@ -668,7 +819,7 @@ const NOMINAL_WALK: f32 = 3.0;
 fn weight(step: Step, rest_minutes: f32) -> f32 {
     if step.is_walk() {
         NOMINAL_WALK
-    } else if step == Step::Doze {
+    } else if matches!(step, Step::Doze | Step::Work | Step::Outside) {
         clock::seconds(rest_minutes)
     } else {
         step.duration().max(0.05)
@@ -683,10 +834,7 @@ fn weight(step: Step, rest_minutes: f32) -> f32 {
 /// would run backwards when a stew goes round for its second one, because the
 /// Bim really is back at the fridge where it started.
 fn progress_of(kind: Kind, step: Step, elapsed: f32, rest_minutes: f32, laps_done: u32) -> f32 {
-    let laps = match kind {
-        Kind::Meal(dish) => portions(dish),
-        _ => 1,
-    };
+    let laps = laps(kind);
 
     // Everything up to and including the chopping is the part that repeats;
     // everything after it happens once.
@@ -852,6 +1000,20 @@ impl Task {
         Task::starting_at(who, Kind::Meal(dish), Step::GoToFridge, 0.0, ch, room, maps)
     }
 
+    /// Cook a stew for the cold store: a vegetable and a block of tofu,
+    /// chopped, through the pot, and put away in a tub.
+    pub fn batch(who: usize, ch: &mut Character, room: &mut Room, maps: &Maps) -> Task {
+        room.reset_for_cooking(Dish::Stew);
+        Task::starting_at(who, Kind::Batch, Step::GoToFridge, 0.0, ch, room, maps)
+    }
+
+    /// Warm a stew from the cold store through and eat it. The same sit-down
+    /// and clearing-up as a meal cooked from raw, and no knife.
+    pub fn reheat(who: usize, ch: &mut Character, room: &mut Room, maps: &Maps) -> Task {
+        room.reset_for_cooking(Dish::Stew);
+        Task::starting_at(who, Kind::Reheat, Step::GoToFridge, 0.0, ch, room, maps)
+    }
+
     /// Walk over to a switch and work it. Everything the Bim can operate goes
     /// through here, so nothing in the room can be changed without the Bim
     /// being there to change it.
@@ -935,6 +1097,44 @@ impl Task {
         task
     }
 
+    pub fn shower(who: usize, ch: &mut Character, room: &mut Room, maps: &Maps) -> Task {
+        Task::starting_at(who, Kind::Shower, Step::GoToShower, 0.0, ch, room, maps)
+    }
+
+    /// Out for a walk: the suit, the airlock, `minutes` outside, and back.
+    pub fn eva(who: usize, minutes: f32, ch: &mut Character, room: &mut Room, maps: &Maps) -> Task {
+        Task::starting_at(
+            who,
+            Kind::Eva,
+            Step::GoToSuitLocker,
+            minutes,
+            ch,
+            room,
+            maps,
+        )
+    }
+
+    /// Off to make `recipe` at `bench`, for `minutes` at it.
+    pub fn craft(
+        who: usize,
+        recipe: u32,
+        bench: usize,
+        minutes: f32,
+        ch: &mut Character,
+        room: &mut Room,
+        maps: &Maps,
+    ) -> Task {
+        Task::starting_at(
+            who,
+            Kind::Craft { recipe, bench },
+            Step::GoToBench,
+            minutes,
+            ch,
+            room,
+            maps,
+        )
+    }
+
     /// Send the Bim to bed for `minutes` of game time: up the ladder, under
     /// the covers, and back out again when the clock says so.
     pub fn rest(
@@ -974,15 +1174,35 @@ impl Task {
         if self.step == ShutDishwasher && !room.dishwasher.is_full() {
             return Done;
         }
-        if let Kind::Meal(dish) = self.kind {
+        if laps(self.kind) > 1 {
             match self.step {
-                // Round again for the second vegetable of a stew.
-                Chop if self.chopped < portions(dish) => return GoToFridge,
+                // Round again for the second vegetable of a stew — or the
+                // block of tofu that goes into a shelf stew after the greens.
+                Chop if self.chopped < laps(self.kind) => return GoToFridge,
                 // On that second trip the knife is already in hand, so the
                 // Bim goes straight back to chopping.
                 PutVegetableDown if self.chopped >= 1 => return Chop,
-                // A bowl needs no pot and no heat: fetch it and fill it.
-                PutKnifeDown if dish == Dish::Bowl => return GoToDrawerForBowl,
+                _ => {}
+            }
+        }
+        // A bowl needs no pot and no heat: fetch it and fill it.
+        if self.kind == Kind::Meal(Dish::Bowl) && self.step == PutKnifeDown {
+            return GoToDrawerForBowl;
+        }
+        // Off the hob and into a tub, rather than onto a plate.
+        if self.kind == Kind::Batch {
+            match self.step {
+                Cook => return TurnStoveOff,
+                TurnStoveOff => return PackStew,
+                _ => {}
+            }
+        }
+        // A tub out of the store, into the pot, and from there the meal
+        // chain's own serving and sitting down.
+        if self.kind == Kind::Reheat {
+            match self.step {
+                OpenFridge => return TakeStew,
+                CloseFridge => return CarryStewToPot,
                 _ => {}
             }
         }
@@ -1039,7 +1259,7 @@ impl Task {
     /// length; a doze runs for as long as the Bim was told to sleep.
     fn duration(&self) -> f32 {
         match self.step {
-            Step::Doze => clock::seconds(self.rest_minutes),
+            Step::Doze | Step::Work | Step::Outside => clock::seconds(self.rest_minutes),
             step => step.duration(),
         }
     }
@@ -1084,6 +1304,7 @@ impl Task {
             Step::Eat => Some(Need::Food),
             Step::UseToilet => Some(Need::Restroom),
             Step::Talk => Some(Need::Company),
+            Step::Shower => Some(Need::Hygiene),
             _ => None,
         }
     }
@@ -1093,6 +1314,22 @@ impl Task {
         let at = self.resume.as_ref().map_or(self.step, |s| s.step);
         let elapsed = self.resume.as_ref().map_or(self.elapsed, |s| s.elapsed);
         progress_of(self.kind, at, elapsed, self.rest_minutes, self.chopped)
+    }
+
+    /// Give this chain up for good, the way a blocked one is: whatever is in
+    /// the Bim's hands goes back where it came from and the Bim is stood up.
+    /// For a Bim leaving the room altogether.
+    pub fn abandon(mut self, ch: &mut Character, room: &mut Room) {
+        Task::let_go(
+            self.who,
+            self.kind,
+            self.step,
+            self.lifted.take(),
+            true,
+            ch,
+            room,
+        );
+        ch.set_scripted(false);
     }
 
     /// Put this chain down and hand back everything needed to resume it.
@@ -1122,8 +1359,10 @@ impl Task {
         // `None`, deliberately: a suspended chain is kept, not given up, and
         // `saved` above is still carrying the crop. Banking it here as well
         // would put one plant in the store twice — once now and once when the
-        // Bim gets back to the fridge with it.
-        Task::let_go(self.who, self.kind, self.step, None, ch, room);
+        // Bim gets back to the fridge with it. `false` for the same reason:
+        // a tub of stew in the hands is on `saved.main` and comes back with
+        // the chain.
+        Task::let_go(self.who, self.kind, self.step, None, false, ch, room);
         ch.set_scripted(false);
         saved
     }
@@ -1136,10 +1375,19 @@ impl Task {
         kind: Kind,
         step: Step,
         lifted: Option<Crop>,
+        for_good: bool,
         ch: &mut Character,
         room: &mut Room,
     ) {
         use Step::*;
+        // A tub of stew, the same as a harvest: a chain given up for good
+        // with one in hand puts it back on the shelf rather than nowhere.
+        // Only for good — a suspended chain keeps it on `Saved` and would
+        // otherwise have it twice.
+        if for_good && ch.main_held() == Held::Stew {
+            room.stew += 1;
+            ch.hold_main(Held::Nothing);
+        }
         // A harvest in the hands of a chain that is being given up for good.
         // It goes in the store rather than nowhere: the produce is real, the
         // Bim grew it, and a plant that evaporates because a door shut across
@@ -1158,6 +1406,14 @@ impl Task {
         // lesser-of-two-wrongs the harvest above takes.
         if kind == Kind::Clean && ch.main_held() == Held::Broom {
             ch.hold_main(Held::Nothing);
+        }
+        // A walk outside given up brings the body back in through the door,
+        // whatever it was doing out there: a suspended one resumes from the
+        // gangway and goes out again, and an abandoned one is simply back.
+        if ch.is_outside()
+            && let Some(gangway) = room.gangway
+        {
+            ch.come_inside(gangway);
         }
         match step {
             Doze | WakeUp => {
@@ -1254,7 +1510,8 @@ impl Task {
             OpenFridge | CloseFridge | TakeVegetable | PutVegetableDown | TakeKnife
             | PutKnifeDown | GatherSlices | TipIntoPot | TurnStoveOn | TurnStoveOff
             | TakePlateAndSpoon | SetPlateDown | PickUpPlate | OpenDishwasher | StackDishes
-            | ShutDishwasher | StartDishwasher | TakeBowl | FillBowl | StowCrop => {
+            | ShutDishwasher | StartDishwasher | TakeBowl | FillBowl | StowCrop | PackStew
+            | StowStew | OpenStoreForStew | ShutStoreOnStew | TakeStew | TipStewIntoPot => {
                 ch.face(FACE_WALL);
                 ch.set_action(Action::Reach);
             }
@@ -1289,6 +1546,37 @@ impl Task {
             Talk => {
                 ch.face(self.face);
                 ch.set_action(Action::Talk);
+            }
+            Shower => {
+                ch.face(room.shower_facing());
+                ch.set_action(Action::Wash);
+            }
+            // At the locker, facing it; at the port, facing out; outside,
+            // hands busy; and back in, facing the deck.
+            TakeSuit | PutSuitBack => {
+                ch.face(room.suit_locker_facing());
+                ch.set_action(Action::Reach);
+            }
+            StepOut => {
+                ch.face(room.port_facing());
+                ch.set_action(Action::Reach);
+            }
+            Outside => ch.set_action(Action::Reach),
+            StepIn => {
+                if let Some(gangway) = room.gangway {
+                    ch.come_inside(gangway);
+                }
+                ch.face(room.port_facing() + PI);
+                ch.set_action(Action::Reach);
+            }
+            // Hands on the bench, turned into it.
+            Work => {
+                if let Kind::Craft { bench, .. } = self.kind
+                    && let Some(bench) = room.benches.get(bench)
+                {
+                    ch.face(bench.facing());
+                }
+                ch.set_action(Action::Reach);
             }
             // Working the door panel. From the deck the Bim faces the
             // bulkhead; from inside it turns round and faces it the other way.
@@ -1358,8 +1646,8 @@ impl Task {
 
         // Things that happen the moment a step begins.
         match self.step {
-            OpenFridge => room.set_fridge_open(true),
-            CloseFridge => room.set_fridge_open(false),
+            OpenFridge | OpenStoreForStew => room.set_fridge_open(true),
+            CloseFridge | ShutStoreOnStew => room.set_fridge_open(false),
             GoToDrawerForKnife | GoToDrawerForPlate => {}
             TakeKnife | TakePlateAndSpoon | TakeBowl => room.set_drawer_open(true),
             Doze => room.set_bed_occupied(self.who, true),
@@ -1379,14 +1667,15 @@ impl Task {
             ShutDoorBehind => room.bath.set_open(false),
             WashHands => {
                 room.bath.run_tap(WASH_TIME);
-                // A basin is a basin: it gets the worst of a mess off a Bim,
-                // and is the only thing aboard that does so far.
+                // A basin is a basin: it gets the worst of a mess off a Bim.
                 ch.wash(WASH_TAKES_OFF);
             }
+            // A shower takes the lot off, whatever it was.
+            Shower => ch.wash(1.0),
             SitDown => {
                 // The plate goes on the table as the Bim sits down to it.
                 if let Held::Plate(fill, _) = ch.main_held() {
-                    room.plate_on_table[self.who] = Some(fill);
+                    room.set_plate_at(self.who, Some(fill));
                 }
                 ch.hold_main(Held::Nothing);
                 ch.hold_tool(Held::Slices); // stands in for a fork
@@ -1399,6 +1688,38 @@ impl Task {
     fn leave(&mut self, ch: &mut Character, room: &mut Room) {
         use Step::*;
         match self.step {
+            // Out through the door: held beyond the hull, in the suit, until
+            // `StepIn` brings the body back.
+            StepOut => {
+                if let Some(outside) = room.outside {
+                    ch.go_outside(outside, room.port_facing());
+                }
+            }
+            // A walk finished: the room counts it and the world reads the
+            // belt. The room never touches a resource itself.
+            Outside => room.walks_done += 1,
+            // Finished: the room writes it down and the world moves the
+            // cargo. The room never touches a resource itself.
+            Work => {
+                if let Kind::Craft { recipe, .. } = self.kind {
+                    room.crafted.push(recipe);
+                }
+            }
+            // A shelf stew takes its two things one trip each — the
+            // vegetable first, the block of tofu on the way round again —
+            // where a meal takes what its recipe says.
+            TakeVegetable if self.kind == Kind::Batch => {
+                let crop = if self.chopped == 0 {
+                    Crop::Veg
+                } else {
+                    Crop::Soy
+                };
+                ch.hold_main(match crop {
+                    Crop::Veg => Held::Vegetable,
+                    Crop::Soy => Held::Tofu,
+                });
+                room.take(crop);
+            }
             TakeVegetable => {
                 let dish = match self.kind {
                     Kind::Meal(dish) => dish,
@@ -1412,8 +1733,39 @@ impl Task {
                 room.take_from_fridge(dish);
             }
             PutVegetableDown => {
+                // The board draws whatever was put on it: a block chops into
+                // cubes and a vegetable into rounds.
+                room.board_tofu = ch.main_held() == Held::Tofu;
                 ch.hold_main(Held::Nothing);
                 room.board_veg = 1.0;
+            }
+            // Out of the store and into the hands; the tub is the Bim's now
+            // and the count says so, the same way a crop is off the tray the
+            // moment it is lifted.
+            TakeStew => {
+                ch.hold_main(Held::Stew);
+                room.stew = room.stew.saturating_sub(1);
+            }
+            // Into the pot to warm through. It was cooked once already, so
+            // it starts most of the way to done rather than raw.
+            TipStewIntoPot => {
+                ch.hold_main(Held::Nothing);
+                room.pot_contents = 1.0;
+                room.pot_cooked = 0.6;
+                room.food_bad = false;
+                room.pot_servings = SERVINGS_PER_POT;
+            }
+            // The whole pot into a tub. Nothing is left on the hob to come
+            // back to: the pot is empty and the tub is what holds it now.
+            PackStew => {
+                ch.hold_main(Held::Stew);
+                room.pot_contents = 0.0;
+                room.pot_cooked = 0.0;
+                room.pot_servings = 0;
+            }
+            StowStew => {
+                ch.hold_main(Held::Nothing);
+                room.stew += 1;
             }
             TakeKnife => {
                 ch.hold_tool(Held::Knife);
@@ -1431,6 +1783,7 @@ impl Task {
                 ch.hold_main(Held::Nothing);
                 room.pot_contents = 1.0;
                 room.pot_cooked = 0.0;
+                room.food_bad = false;
                 room.pot_servings = SERVINGS_PER_POT;
             }
             TurnStoveOn => room.set_stove(true),
@@ -1498,6 +1851,9 @@ impl Task {
                 ch.hold_main(Held::Plate(1.0, Dish::Bowl));
                 room.board_slices = 0;
                 room.board_veg = 0.0;
+                // Nothing cooked, but made in the same galley: judged the
+                // same way as a pot.
+                room.made_a_bowl();
             }
             Chop => self.chopped += 1,
             SetPlateDown => {
@@ -1519,7 +1875,7 @@ impl Task {
             // The plate and the cutlery come up off the table together; the
             // fork is already in hand from eating with it.
             ClearTable => {
-                room.plate_on_table[self.who] = None;
+                room.set_plate_at(self.who, None);
                 ch.hold_main(Held::Plate(0.0, room.dish));
             }
             StackDishes => {
@@ -1592,7 +1948,7 @@ impl Task {
                 }
                 Eat => {
                     let left = 1.0 - self.done_count as f32 / BITES as f32;
-                    room.plate_on_table[self.who] = Some(left.max(0.0));
+                    room.set_plate_at(self.who, Some(left.max(0.0)));
                 }
                 _ => {}
             }
@@ -1633,7 +1989,15 @@ impl Task {
         if self.blocked {
             // This chain is over for good, so anything in the Bim's hands is
             // handed over with it — `take`, so nothing can bank it twice.
-            Task::let_go(self.who, self.kind, self.step, self.lifted.take(), ch, room);
+            Task::let_go(
+                self.who,
+                self.kind,
+                self.step,
+                self.lifted.take(),
+                true,
+                ch,
+                room,
+            );
             ch.set_scripted(false);
             self.step = Step::Done;
             return;

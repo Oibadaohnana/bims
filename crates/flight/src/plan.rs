@@ -434,7 +434,7 @@ pub fn state_at(plan: &Plan, minutes: f64) -> State {
     for segment in &plan.segments {
         let t = left.min(segment.duration);
         along += speed * t + 0.5 * segment.accel * t * t;
-        fuel += plan.dynamics.fuel_per_minute(segment.engines) * t;
+        fuel += plan.dynamics.fuel_per_minute(segment.accel) * t;
         speed += segment.accel * t;
         heading = segment.spin.angle_at(heading, t);
         if !settled && t < segment.duration {
@@ -562,7 +562,7 @@ fn choose_brake(dynamics: &Dynamics, distance: f64) -> Option<Braking> {
         let turn = Spin::swing(std::f64::consts::PI, dynamics.alpha);
         let t_flip = turn.duration();
         let t1 = (-t_flip + (t_flip * t_flip + 4.0 * distance / a_f).sqrt()) / 2.0;
-        let fuel = dynamics.fuel_per_minute(dynamics.forward_engines) * 2.0 * t1;
+        let fuel = dynamics.fuel_per_minute(a_f) * 2.0 * t1;
         (
             2.0 * t1 + t_flip,
             Braking {
@@ -600,8 +600,7 @@ fn choose_brake(dynamics: &Dynamics, distance: f64) -> Option<Braking> {
         // This is `physics::travel_days`' shape, split into its two legs.
         let t1 = (2.0 * distance * a_b / (a_f * (a_f + a_b))).sqrt();
         let t2 = t1 * a_f / a_b;
-        let fuel = dynamics.fuel_per_minute(dynamics.forward_engines) * t1
-            + dynamics.fuel_per_minute(dynamics.backward_engines) * t2;
+        let fuel = dynamics.fuel_per_minute(a_f) * t1 + dynamics.fuel_per_minute(a_b) * t2;
         (
             t1 + t2,
             Braking {
@@ -785,7 +784,7 @@ fn brake_segments(
         spin: Spin::Still,
     });
     Braking {
-        fuel: dynamics.fuel_per_minute(engines) * duration,
+        fuel: dynamics.fuel_per_minute(accel) * duration,
         segments,
     }
 }

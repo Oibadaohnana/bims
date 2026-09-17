@@ -82,6 +82,14 @@ pub fn world_checksum(world: &World) -> u64 {
     hash.eat(world.galaxy_type as u64);
     hash.eat(world.star_id as u64);
     hash.eat(world.money);
+    for &target in world.craft_targets.iter() {
+        hash.eat(target as u64);
+    }
+    for body in &world.health {
+        hash.eat_rounded(body.points, FINE_GRID);
+        hash.eat_rounded(body.dose, FINE_GRID);
+        hash.eat(u64::from(body.dead));
+    }
 
     let ship = &world.ship;
     hash.eat(world.design_hash());
@@ -90,6 +98,7 @@ pub fn world_checksum(world: &World) -> u64 {
     hash.eat_rounded(ship.anchor.y, POSITION_GRID);
     hash.eat_rounded(ship.heading, FINE_GRID);
     hash.eat(ship.reserved_fuel as u64);
+    hash.eat_rounded(ship.charge, FINE_GRID);
     hash.eat(ship.destination_set_by.map(u64::from).unwrap_or(u64::MAX));
     hash.eat(ship.frame.code() as u64);
     if let Some(node) = ship.frame.node() {
@@ -116,6 +125,38 @@ pub fn world_checksum(world: &World) -> u64 {
             hash.eat(u64::from(plan.docks));
             hash.eat(u64::from(plan.aborting));
             hash.eat(plan.segments.len() as u64);
+        }
+        ShipState::CastingOff { station, since } => {
+            hash.eat(*station as u64);
+            hash.eat_rounded(*since, FINE_GRID);
+        }
+        ShipState::Undocking {
+            station,
+            from,
+            along,
+            began,
+        } => {
+            hash.eat(*station as u64);
+            hash.eat_rounded(from.x, POSITION_GRID);
+            hash.eat_rounded(from.y, POSITION_GRID);
+            hash.eat_rounded(along.x, FINE_GRID);
+            hash.eat_rounded(along.y, FINE_GRID);
+            hash.eat_rounded(*began, FINE_GRID);
+        }
+        ShipState::Docking {
+            station,
+            from,
+            from_heading,
+            hold,
+            began,
+        } => {
+            hash.eat(*station as u64);
+            hash.eat_rounded(from.x, POSITION_GRID);
+            hash.eat_rounded(from.y, POSITION_GRID);
+            hash.eat_rounded(*from_heading, FINE_GRID);
+            hash.eat_rounded(hold.x, POSITION_GRID);
+            hash.eat_rounded(hold.y, POSITION_GRID);
+            hash.eat_rounded(*began, FINE_GRID);
         }
     }
 

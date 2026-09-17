@@ -19,6 +19,12 @@
 //   node scratchpad/ship-layout.mjs mapup    > /tmp/ship.svg
 //   node scratchpad/ship-layout.mjs turn     > /tmp/ship.svg
 //   node scratchpad/ship-layout.mjs burn     > /tmp/ship.svg
+//   node scratchpad/ship-layout.mjs docked   > /tmp/ship.svg
+//   node scratchpad/ship-layout.mjs residents > /tmp/ship.svg
+//   node scratchpad/ship-layout.mjs approach > /tmp/ship.svg
+//   node scratchpad/ship-layout.mjs crossing > /tmp/ship.svg
+//   node scratchpad/ship-layout.mjs simulation > /tmp/ship.svg
+//   node scratchpad/ship-layout.mjs station  > /tmp/ship.svg
 //
 // `game` and `map` are the game, and they are the ones worth the thirty
 // seconds: the ship is drawn **turned** and the sky behind it is not, and
@@ -31,7 +37,25 @@
 // thing to look for there. `turn` and `burn` catch the exhaust: the ship
 // mid-align with the thrusters puffing, and under the engines with the
 // plume out of the stern. A puff going *into* the hull, or a flame over the
-// deck, is what to look for.
+// deck, is what to look for. `docked` is the ship at its berth, zoomed out
+// so the whole station is in the picture beside it — the two airlocks
+// should meet, both open, and the hull should be clear of the station's.
+// `residents` stands the ship fifty tiles off the nearest station somebody
+// lives on and lets it run an hour: the station's room is open, the people
+// on it should be on its deck, and its fixtures should be the room's
+// pictures rather than coloured blocks. `approach` is the ship six hundred
+// tiles short of a station, zoomed right out: the station should be a plate
+// with its icon on it, getting nearer, and nothing inside it drawn.
+// `crossing` sends the crew member onto the station's deck and catches them
+// partway: docked, the two are one room, and the Bim should be in the tube
+// between the hulls or just through it, on the station's side.
+// `simulation` and `station` are `ship.html?mode=1` as `nix run
+// .#simulation` opens it, with no ship built by hand at all: the playtest
+// ship docked at its spawn, head up, an hour in, with the station's rooms
+// beside it — the chamfered bow, the bulkheads with their doorways, the
+// helm, the shelves and the shower are all drawn here and nowhere else.
+// `simulation` is close in on the ship; `station` is zoomed out over the
+// station, with its residents about their rooms.
 //
 // It writes the SVG to stdout and a line about what it caught to stderr, so a
 // redirect gives a clean file.
@@ -67,7 +91,9 @@ const page = await bootWasmPage({
   search:
     WHEN === "given"
       ? `?money=100000&area=40&players=1&slot=0&preset=1${spawn.query}`
-      : `?money=200000&area=20&players=1&slot=0&preset=0${spawn.query}`,
+      : WHEN === "simulation" || WHEN === "station"
+        ? "?mode=1"
+        : `?money=200000&area=20&players=1&slot=0&preset=0${spawn.query}`,
 });
 const { byId, root, wasm } = page;
 const designCanvas = byId.get("stage");
@@ -78,8 +104,28 @@ const { at, pick, drag, put } = tools;
 
 let caught = "";
 if (WHEN === "given") {
-  canvas.dispatch("pointermove", at(18, 13));
+  canvas.dispatch("pointermove", at(16, 17));
   caught = "the playtest ship as the designer opens on it, with the pointer on the hob";
+} else if (WHEN === "simulation" || WHEN === "station") {
+  canvas = gameCanvas;
+  wasm.ship_set_head_up(1);
+  wasm.ship_cmd_speed(0, 4);
+  for (let i = 0; i < 60 * 60; i++) page.step(1);
+  const middle = { x: gameCanvas.clientWidth / 2, y: gameCanvas.clientHeight / 2 };
+  const station = wasm.ship_docked_at() - 1;
+  const dx = wasm.ship_station_x(station) - wasm.ship_world_x();
+  const dy = wasm.ship_station_y(station) - wasm.ship_world_y();
+  if (WHEN === "station") {
+    wasm.ship_zoom(middle.x, middle.y, 0.3);
+    wasm.ship_pan(-dx * wasm.ship_view_scale(), dy * wasm.ship_view_scale());
+  } else {
+    wasm.ship_zoom(middle.x, middle.y, 0.8);
+  }
+  page.step(1);
+  caught =
+    WHEN === "station"
+      ? `station ${station} an hour after the world opened, its rooms and its residents, with the ship at its port`
+      : "the playtest ship docked at its spawn an hour in, head up, close enough to read the fittings";
 } else if (WHEN === "empty") {
   caught = "a bare build area — the grid, its edge, and nothing on it";
 } else if (WHEN === "ghost") {
@@ -129,7 +175,7 @@ if (WHEN === "given") {
   caught =
     "a hull with a hole in it — every tile the outside can see into, tinted, " +
     "including through the internal wall";
-} else if (["game", "map", "headup", "mapup", "turn", "burn"].includes(WHEN)) {
+} else if (["game", "map", "headup", "mapup", "turn", "burn", "docked", "residents", "approach", "crossing", "undocking", "docking"].includes(WHEN)) {
   // A ship a trip can actually be planned for: everything `buildShip` puts
   // down, plus what flying wants — thrusters, an airlock, an array, a tank
   // and something to burn.
@@ -145,6 +191,7 @@ if (WHEN === "given") {
     // Under way for the same reason `game` is: a map at a heading of nothing
     // says nothing about which way it turns.
     if (headUp) {
+      wasm.ship_man_helm_for_probe(0);
       wasm.ship_cmd_confirm_point(0, wasm.ship_world_x() + 400000, wasm.ship_world_y() + 90000);
       wasm.ship_cmd_speed(0, 4);
       for (let i = 0; i < 700; i++) page.step(1);
@@ -153,11 +200,112 @@ if (WHEN === "given") {
       ? "the system map turned round the ship, with the marker straight up"
       : "the system map — the star, what has been found, the ring the scanner " +
         "reaches to, and the ship pointing where it is pointing";
+  } else if (WHEN === "docked") {
+    wasm.ship_set_head_up(1);
+    const middle = { x: gameCanvas.clientWidth / 2, y: gameCanvas.clientHeight / 2 };
+    wasm.ship_zoom(middle.x, middle.y, 0.22);
+    // The station is to one side of the ship; pan so both are in the frame.
+    const station = wasm.ship_docked_at() - 1;
+    const dx = wasm.ship_station_x(station) - wasm.ship_world_x();
+    const dy = wasm.ship_station_y(station) - wasm.ship_world_y();
+    wasm.ship_pan(-dx * wasm.ship_view_scale() * 0.5, dy * wasm.ship_view_scale() * 0.5);
+    page.step(1);
+    caught = `the ship docked at station ${station}, airlock to airlock, with the whole station beside it`;
+  } else if (WHEN === "undocking" || WHEN === "docking") {
+    // Halfway through the push-off, or halfway through coming alongside:
+    // the ship a little off the station's door, and for the docking, still
+    // turning onto the berth's heading. Both are read off the clock, so
+    // the moment is a number of steps.
+    const station = wasm.ship_docked_at() - 1;
+    wasm.ship_man_helm_for_probe(0);
+    // Not far, for the docking: it has to come back inside the budget.
+    const reach = WHEN === "undocking" ? 400000 : 30000;
+    wasm.ship_cmd_confirm_point(0, wasm.ship_world_x() + reach, wasm.ship_world_y() + reach / 4);
+    let budget = 40000;
+    while (budget-- > 0 && wasm.ship_world_state() !== 4) page.step(1);
+    if (WHEN === "undocking") {
+      for (let i = 0; i < 90; i++) page.step(1);
+    } else {
+      // Out, round, and back to the door it left; catch it coming alongside.
+      wasm.ship_cmd_speed(0, 4);
+      while (budget-- > 0 && wasm.ship_world_state() !== 1) page.step(1);
+      wasm.ship_man_helm_for_probe(0);
+      wasm.ship_cmd_confirm_node(0, 1, station);
+      while (budget-- > 0 && wasm.ship_world_state() !== 5) page.step(1);
+      wasm.ship_cmd_speed(0, 1);
+      for (let i = 0; i < 150; i++) page.step(1);
+    }
+    const middle = { x: gameCanvas.clientWidth / 2, y: gameCanvas.clientHeight / 2 };
+    wasm.ship_zoom(middle.x, middle.y, 0.12);
+    const dx = wasm.ship_station_x(station) - wasm.ship_world_x();
+    const dy = wasm.ship_station_y(station) - wasm.ship_world_y();
+    wasm.ship_pan(-dx * wasm.ship_view_scale() * 0.5, dy * wasm.ship_view_scale() * 0.5);
+    page.step(1);
+    caught =
+      WHEN === "undocking"
+        ? `the ship halfway through pushing off station ${station}'s door, state ${wasm.ship_world_state()}`
+        : `the ship halfway through coming alongside station ${station}, state ${wasm.ship_world_state()}, heading ${((wasm.ship_world_heading() * 180) / Math.PI).toFixed(0)}°`;
+  } else if (WHEN === "approach") {
+    const station = wasm.ship_docked_at() - 1;
+    const away = wasm.ship_station_radius(station) + 600 * wasm.ship_tile();
+    wasm.ship_put_for_probe(wasm.ship_station_x(station) + away, wasm.ship_station_y(station));
+    page.step(1);
+    const middle = { x: gameCanvas.clientWidth / 2, y: gameCanvas.clientHeight / 2 };
+    wasm.ship_zoom(middle.x, middle.y, 0.02);
+    wasm.ship_pan(away * wasm.ship_view_scale() * 0.5, 0);
+    page.step(1);
+    caught = `the ship six hundred tiles off station ${station}, which is a plate with its icon on it`;
+  } else if (WHEN === "crossing") {
+    wasm.ship_set_head_up(1);
+    page.step(1);
+    // The station's deck, to starboard of the crew member, off the hull.
+    const s = wasm.ship_view_scale();
+    const p = {
+      x: wasm.ship_view_x() + wasm.ship_crew_x(0) * s,
+      y: wasm.ship_view_y() + wasm.ship_crew_y(0) * s,
+    };
+    let over = null;
+    for (let d = 60; d < 2000 && !over; d += 20) {
+      const q = { x: p.x + d * s, y: p.y };
+      gameCanvas.dispatch("pointermove", { pointerId: 3, clientX: q.x, clientY: q.y });
+      const spot = wasm.bims_spot_at(wasm.ship_room_x(q.x, q.y), wasm.ship_room_y(q.x, q.y));
+      if (wasm.ship_game_tile_inside() === 0 && spot === 1) over = { x: q.x + 8 * wasm.ship_tile() * s, y: q.y };
+    }
+    if (!over) throw new Error("no station deck to starboard");
+    gameCanvas.dispatch("pointerdown", { pointerId: 3, button: 2, clientX: over.x, clientY: over.y });
+    // Until the Bim is past the ship's skin: the airlock is at the hull's
+    // edge, and a few tiles beyond it is the tube.
+    const skin = wasm.ship_room_x(over.x, over.y) - 7 * wasm.ship_tile();
+    let budget = 20000;
+    while (budget-- > 0 && wasm.bims_bim_x(0) < skin) page.step(1);
+    const middle = { x: gameCanvas.clientWidth / 2, y: gameCanvas.clientHeight / 2 };
+    wasm.ship_zoom(middle.x, middle.y, 0.6);
+    wasm.ship_pan(-(wasm.ship_crew_x(0)) * wasm.ship_view_scale() * 0.9, -(wasm.ship_crew_y(0)) * wasm.ship_view_scale() * 0.9);
+    page.step(1);
+    caught = "the crew member crossing from the ship to the station through the mated airlocks";
+  } else if (WHEN === "residents") {
+    let lived = -1;
+    for (let id = 0; id < 8 && lived < 0; id++) {
+      if (wasm.ship_station_residents(id) > 0) lived = id;
+    }
+    if (lived < 0) throw new Error("nobody lives on any station of the spawn system");
+    const radius = wasm.ship_station_radius(lived);
+    wasm.ship_put_for_probe(wasm.ship_station_x(lived) + radius + 20 * wasm.ship_tile(), wasm.ship_station_y(lived));
+    wasm.ship_cmd_speed(0, 4);
+    for (let i = 0; i < 60 * 60; i++) page.step(1);
+    const middle = { x: gameCanvas.clientWidth / 2, y: gameCanvas.clientHeight / 2 };
+    wasm.ship_zoom(middle.x, middle.y, 0.3);
+    const dx = wasm.ship_station_x(lived) - wasm.ship_world_x();
+    const dy = wasm.ship_station_y(lived) - wasm.ship_world_y();
+    wasm.ship_pan(-dx * wasm.ship_view_scale() * 0.8, dy * wasm.ship_view_scale() * 0.8);
+    page.step(1);
+    caught = `the ship beside station ${lived}, with ${wasm.ship_resident_count()} residents up and about after an hour`;
   } else if (WHEN === "turn" || WHEN === "burn") {
     // Head up, so the exhaust is read against a hull that is square: a puff
     // from the wrong nozzle is a puff into the ship, and that is easier to
     // see when the ship is not also turned.
     wasm.ship_set_head_up(1);
+    wasm.ship_man_helm_for_probe(0);
     wasm.ship_cmd_confirm_point(0, wasm.ship_world_x() + 400000, wasm.ship_world_y() + 90000);
     wasm.ship_cmd_speed(0, 4);
     // Phase codes are `flight::Phase`: 0 aligning, 1 burning.
@@ -174,6 +322,7 @@ if (WHEN === "given") {
   } else {
     // Turned, on purpose. A hull drawn mirrored, or a starfield that turns
     // with the ship, is obvious here and invisible in every assertion.
+    wasm.ship_man_helm_for_probe(0);
     wasm.ship_cmd_confirm_point(0, wasm.ship_world_x() + 400000, wasm.ship_world_y() + 90000);
     // At the top speed, because a ship turning at a tenth of a degree a
     // second would need ten real minutes to reach an interesting attitude.
@@ -221,6 +370,16 @@ for (let i = 0; i < shapes.length; i += stride) {
     out.push(
       `<ellipse cx="${x}" cy="${y}" rx="${Math.abs(w) / 2}" ry="${Math.abs(h) / 2}" ${paint}${spin}/>`,
     );
+  } else if (kind === 2) {
+    // The bottom-left half of the box, as the host draws it.
+    const points = [
+      [x - w / 2, y - h / 2],
+      [x - w / 2, y + h / 2],
+      [x + w / 2, y + h / 2],
+    ]
+      .map(([px, py]) => `${px},${py}`)
+      .join(" ");
+    out.push(`<polygon points="${points}" ${paint}${spin}/>`);
   } else {
     out.push(
       `<rect x="${x - w / 2}" y="${y - h / 2}" width="${Math.abs(w)}" height="${Math.abs(h)}"` +

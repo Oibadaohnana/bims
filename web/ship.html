@@ -4,6 +4,12 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Bims — Ship</title>
+    <!-- The crew's panels — the tray, the side, the agendas, the menus and
+         the tooltips — are styled in crew.css, shared with the room's page:
+         the crew aboard are the room's Bims and these are the room's panels.
+         Where they sit on this page is below, with the rest of the game
+         screen. -->
+    <link rel="stylesheet" href="crew.css" />
     <style>
       /* The room's palette, the same as the builder's: the menus, the design
          phase and the deck are one game and should not look like three
@@ -118,7 +124,7 @@
 
       /* --- the three columns --------------------------------------------- */
 
-      #work {
+      #columns {
         flex: 1;
         min-height: 0;
         display: flex;
@@ -192,7 +198,9 @@
         opacity: 0.45;
       }
 
-      .part .swatch {
+      /* "tint", not "swatch": the timetable legend in web/crew.css owns
+         .swatch. */
+      .part .tint {
         width: 13px;
         height: 13px;
         flex: none;
@@ -235,7 +243,11 @@
         pointer-events: none;
       }
 
-      #readout .what {
+      /* "named", not "what": web/crew.css is shared with this page and its
+         .what is the 17-pixel ? button, which squeezed these labels into a
+         box the size of a letter. A class shared across the two pages is
+         the same trap as a shared id. */
+      #readout .named {
         font-weight: 600;
       }
 
@@ -318,6 +330,16 @@
       #game-trade .good.carried .units {
         color: var(--ink);
         font-weight: 600;
+      }
+
+      /* Not on this station's shelf: the name and the price fade, and the
+         buy buttons are already off. The row stays, because what is aboard
+         can still be sold here. */
+      #trade .good.unsold .name,
+      #game-trade .good.unsold .name,
+      #trade .good.unsold .price,
+      #game-trade .good.unsold .price {
+        opacity: 0.45;
       }
 
       #trade .deal,
@@ -528,9 +550,6 @@
       }
 
       #game-readout {
-        position: absolute;
-        left: 10px;
-        top: 10px;
         display: flex;
         gap: 14px;
         padding: 5px 9px;
@@ -541,7 +560,7 @@
         pointer-events: none;
       }
 
-      #game-readout .what {
+      #game-readout .named {
         font-weight: 600;
       }
 
@@ -549,12 +568,107 @@
         color: var(--muted);
       }
 
-      #game-keys {
-        position: absolute;
-        left: 10px;
-        bottom: 10px;
-        color: var(--muted);
+      /* What the pointer is over, under the readout: the part or the
+         fixture and its state, and what is lying on the deck there in the
+         one warm colour the room keeps for things worth noticing. The box
+         itself goes when there is nothing, rather than sitting empty. */
+      #game-hover {
+        display: flex;
+        gap: 14px;
+        min-height: 29px;
+        box-sizing: border-box;
+        padding: 5px 9px;
+        border: 1px solid var(--edge);
+        border-radius: 5px;
+        background: rgba(12, 18, 16, 0.85);
         pointer-events: none;
+      }
+
+      #game-hover .named {
+        font-weight: 600;
+      }
+
+      #game-hover .on-it {
+        color: #ffb4a6;
+      }
+
+      /* Gone when there is nothing under the pointer — but the space it
+         takes stays, or the agendas under it would jump every time the
+         pointer crossed a part. */
+      #game-hover:has(.named:empty) {
+        visibility: hidden;
+      }
+
+      #game-hover .on-it:empty {
+        display: none;
+      }
+
+      /* The settings sheet: every key, explained. Opened with Escape and
+         shut with Escape or its button. `hidden` loses to any display rule,
+         so the rule that lays it out is guarded. */
+      #settings:not([hidden]) {
+        position: fixed;
+        z-index: 30;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(4, 8, 6, 0.6);
+      }
+
+      #settings .settings-sheet {
+        width: min(560px, calc(100vw - 32px));
+        max-height: calc(100vh - 32px);
+        overflow-y: auto;
+        padding: 16px 20px 18px;
+        border: 1px solid var(--edge);
+        border-radius: 8px;
+        background: var(--panel);
+      }
+
+      #settings h2 {
+        margin: 0 0 10px;
+        font-size: 16px;
+      }
+
+      #settings h3 {
+        margin: 14px 0 6px;
+        font-size: 13px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+
+      #settings table {
+        border-collapse: collapse;
+        width: 100%;
+      }
+
+      #settings td {
+        padding: 3px 0;
+        vertical-align: top;
+      }
+
+      #settings td:first-child {
+        width: 132px;
+        white-space: nowrap;
+      }
+
+      #settings kbd {
+        display: inline-block;
+        padding: 1px 6px;
+        border: 1px solid var(--edge);
+        border-bottom-width: 2px;
+        border-radius: 4px;
+        font: inherit;
+        font-size: 12px;
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      #settings .row {
+        display: flex;
+        justify-content: flex-end;
+        margin-top: 14px;
       }
 
       /* What just happened. The newest few lines, and they go on their own —
@@ -579,6 +693,191 @@
         text-align: right;
       }
 
+      /* The crew's panels, over the deck. The tray sits where it does on the
+         room's page, bottom left; the selected Bim's sheet top right, against
+         the helm; the agendas under the readout and the key hints, top left.
+         What they look like is crew.css; this is only where they go. */
+      #game-stage-wrap #tray {
+        left: 10px;
+        bottom: 10px;
+        width: 560px;
+        font-size: 14px;
+      }
+
+      #game-stage-wrap #side {
+        position: absolute;
+        z-index: 5;
+        top: 10px;
+        right: 10px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      /* The left-hand column, top down: what is aboard, the ship's readout,
+         what the pointer is over, then the agendas. One column in that order
+         so the first three never move — the agendas are as tall as the
+         crew's errands make them, and anything under them would ride up and
+         down with every chain. */
+      #game-stage-wrap #left-stack {
+        position: absolute;
+        z-index: 5;
+        top: 10px;
+        left: 10px;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+      }
+
+      /* What is aboard: a row a resource, an icon and a count, grouped by
+         where it is stowed — the shelves, then the tanks, then the cold
+         store — with a rule between the groups. Nothing pops up off a row;
+         the `?` in the corner is what explains the icons. */
+      #items {
+        position: relative;
+        min-width: 96px;
+        padding: 5px 6px;
+        border: 1px solid var(--edge);
+        border-radius: 8px;
+        background: rgb(20 29 25 / 0.9);
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* The ? sits on the panel's corner. It is wrapped rather than styled
+         by name: `.what` is web/crew.css's, and a rule for it here would be
+         two stylesheets over one button — tray-check.mjs says so. */
+      #items .explains {
+        position: absolute;
+        top: -8px;
+        right: -8px;
+        background: var(--panel);
+      }
+
+      #items .item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 2px 0;
+        color: var(--muted);
+      }
+
+      #items .item.held {
+        color: var(--ink);
+      }
+
+      /* A rule between one hold and the next. */
+      #items .item.first-of-hold {
+        margin-top: 4px;
+        padding-top: 6px;
+        border-top: 1px solid var(--edge);
+      }
+
+      #items .item.first-of-hold:first-child {
+        margin-top: 0;
+        padding-top: 2px;
+        border-top: 0;
+      }
+
+      #items .icon {
+        flex: none;
+        width: 26px;
+        height: 26px;
+        border-radius: 5px;
+        background: #0f1714 center / 20px 20px no-repeat;
+      }
+
+      #items .count {
+        flex: 1;
+        padding-right: 2px;
+        text-align: right;
+        font-weight: 600;
+      }
+
+      /* "Keep so many": the target the benches make a resource to, on the
+         rows of what they make. Dim until it is set, since nought is the
+         benches doing nothing. */
+      #items .keep {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        margin-left: 4px;
+        font-size: 11px;
+      }
+
+      #items .keep .target {
+        min-width: 18px;
+        text-align: center;
+        color: var(--muted);
+      }
+
+      #items .keep .deal-on {
+        padding: 0 4px;
+        border: 1px solid var(--edge);
+        border-radius: 3px;
+        background: transparent;
+        color: var(--ink);
+        font: inherit;
+        line-height: 14px;
+        cursor: pointer;
+      }
+
+      /* The icons, one a `physics::ResourceId`. A resource without a rule
+         here is a bare slot next to its count — scratchpad/simulation-check.mjs
+         reads this file and fails on one. */
+      #items .icon[data-resource="0"] {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpolygon points='3,16 6,8 13,4 20,8 21,16 15,21 7,21' fill='%237d7266'/%3E%3Cpolygon points='6,8 13,4 20,8 12,11' fill='%23a3978a'/%3E%3Cpolygon points='3,16 6,8 12,11 9,18' fill='%238f8477'/%3E%3Cpolygon points='12,11 20,8 21,16 15,21 9,18' fill='%23655b50'/%3E%3C/svg%3E");
+      }
+
+      #items .icon[data-resource="1"] {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpolygon points='2,19 6,9 18,9 22,19' fill='%238f9ba3'/%3E%3Cpolygon points='6,9 18,9 16,12 8,12' fill='%23d6dee3'/%3E%3Cpolygon points='2,19 6,9 8,12 6,19' fill='%23b5c0c7'/%3E%3Cline x1='7' y1='17' x2='17' y2='17' stroke='%236c777e' stroke-width='1'/%3E%3C/svg%3E");
+      }
+
+      #items .icon[data-resource="2"] {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='5' y='7' width='14' height='14' rx='2' fill='%23d9962e'/%3E%3Crect x='5' y='11' width='14' height='3' fill='%23b47a20'/%3E%3Crect x='9' y='3' width='6' height='4' rx='1' fill='%237d5316'/%3E%3Crect x='7' y='8' width='2' height='12' fill='%23f0b95a' opacity='0.6'/%3E%3C/svg%3E");
+      }
+
+      #items .icon[data-resource="3"] {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='6' y='6' width='12' height='12' rx='1.5' fill='%233d8a67'/%3E%3Crect x='9' y='9' width='6' height='6' fill='%23173126'/%3E%3Cg fill='%23c6d1cb'%3E%3Crect x='3' y='8' width='3' height='2'/%3E%3Crect x='3' y='14' width='3' height='2'/%3E%3Crect x='18' y='8' width='3' height='2'/%3E%3Crect x='18' y='14' width='3' height='2'/%3E%3Crect x='8' y='3' width='2' height='3'/%3E%3Crect x='14' y='3' width='2' height='3'/%3E%3Crect x='8' y='18' width='2' height='3'/%3E%3Crect x='14' y='18' width='2' height='3'/%3E%3C/g%3E%3C/svg%3E");
+      }
+
+      #items .icon[data-resource="4"] {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpolygon points='3,21 14,7 19,12' fill='%23ee8a3a'/%3E%3Cpolygon points='6,17 15,9 17,12' fill='%23f5a45f' opacity='0.7'/%3E%3Cpolygon points='14,7 15,2 17,8' fill='%235fbf66'/%3E%3Cpolygon points='15,8 21,3 19,10' fill='%234aa652'/%3E%3Cpolygon points='16,9 22,9 19,12' fill='%236bcc72'/%3E%3C/svg%3E");
+      }
+
+      #items .icon[data-resource="5"] {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpolygon points='4,9 9,4 21,4 16,9' fill='%23fbf8ee'/%3E%3Cpolygon points='16,9 21,4 21,16 16,21' fill='%23d5cdb8'/%3E%3Crect x='4' y='9' width='12' height='12' fill='%23f2ecdb'/%3E%3Cpolygon points='4,9 9,4 21,4 21,16 16,21 4,21' fill='none' stroke='%23b3a98f' stroke-width='1'/%3E%3C/svg%3E");
+      }
+
+      #items .icon[data-resource="6"] {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpolygon points='12,2 19,9 15,22 9,22 5,9' fill='%237a4fc9'/%3E%3Cpolygon points='12,2 19,9 12,11' fill='%23b391f0'/%3E%3Cpolygon points='5,9 12,2 12,11' fill='%239b74e3'/%3E%3Cpolygon points='12,11 19,9 15,22' fill='%235a37a3'/%3E%3C/svg%3E");
+      }
+
+      #items .icon[data-resource="7"] {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='8' width='12' height='8' rx='1.5' fill='%233f4a55'/%3E%3Ccircle cx='16' cy='12' r='4' fill='%23e0f0ff'/%3E%3Ccircle cx='16' cy='12' r='2.2' fill='%237a4fc9'/%3E%3Cline x1='20' y1='12' x2='23' y2='12' stroke='%23b391f0' stroke-width='1.5'/%3E%3Crect x='5' y='10' width='6' height='1.5' fill='%23aab5bd'/%3E%3Crect x='5' y='13' width='6' height='1.5' fill='%23aab5bd'/%3E%3C/svg%3E");
+      }
+
+      #items .icon[data-resource="8"] {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cellipse cx='12' cy='15' rx='7' ry='7' fill='%23dfe3ea'/%3E%3Crect x='5' y='13' width='14' height='9' rx='3' fill='%23c9cfd8'/%3E%3Ccircle cx='12' cy='8' r='5.5' fill='%23e8ecf2'/%3E%3Ccircle cx='12' cy='8' r='3.8' fill='%238cc6f0'/%3E%3Crect x='9' y='17' width='6' height='2' fill='%237a8290'/%3E%3C/svg%3E");
+      }
+
+      #items .icon[data-resource="9"] {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='8' width='16' height='5' rx='1.5' fill='%234a4650'/%3E%3Crect x='6' y='12' width='5' height='8' rx='1' fill='%23332f38'/%3E%3Crect x='17' y='9' width='5' height='3' rx='1' fill='%23b391f0'/%3E%3Crect x='4' y='9.5' width='10' height='1.5' fill='%237a4fc9'/%3E%3C/svg%3E");
+      }
+
+      #items .icon[data-resource="10"] {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M6 4 L9 3 L12 6 L15 3 L18 4 L19 21 L5 21 Z' fill='%236b7d8a'/%3E%3Cpath d='M9 7 L12 9 L15 7 L15 19 L9 19 Z' fill='%234f5f6b'/%3E%3Crect x='11' y='9' width='2' height='10' fill='%23aab8c2'/%3E%3C/svg%3E");
+      }
+
+      #items .icon[data-resource="11"] {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='7' width='18' height='13' rx='2' fill='%23f2f2ee'/%3E%3Crect x='8' y='4' width='8' height='4' rx='1' fill='%23c9c9c0'/%3E%3Crect x='10.5' y='9.5' width='3' height='8' fill='%23d64545'/%3E%3Crect x='8' y='12' width='8' height='3' fill='%23d64545'/%3E%3C/svg%3E");
+      }
+
+      /* And what is made aboard, by its key. */
+      #items .icon[data-made="stew"] {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='10' fill='%238b98a1'/%3E%3Ccircle cx='12' cy='12' r='8.2' fill='%23d9822e'/%3E%3Ccircle cx='9' cy='10' r='1.8' fill='%236fbf4a'/%3E%3Ccircle cx='14.5' cy='14' r='1.8' fill='%236fbf4a'/%3E%3Ccircle cx='14' cy='9' r='1.5' fill='%23f2e8c8'/%3E%3Ccircle cx='12' cy='12' r='5.2' fill='%235c6a73'/%3E%3Crect x='9.5' y='11' width='5' height='2' rx='1' fill='%23aab5bd'/%3E%3C/svg%3E");
+      }
+
       #controls {
         width: 268px;
         flex: none;
@@ -594,6 +893,10 @@
       #controls .row {
         display: flex;
         gap: 6px;
+      }
+
+      #helm .row + .row {
+        margin-top: 6px;
       }
 
       #plan div,
@@ -616,20 +919,38 @@
         color: var(--warn);
       }
 
+      /* Who is at the helm, if anybody. Muted while nobody is, since the
+         ship is flown from there and the panel below says so. */
+      #helm-watch {
+        color: var(--muted);
+        padding: 1px 0;
+      }
+
+      #helm-watch.manned {
+        color: var(--text);
+      }
+
       #plan .empty {
         color: var(--muted);
       }
 
-      /* The speed buttons, and the pair that says which way up the view is:
-         one row of choices each, one of them on. */
+      /* The speed buttons, and the two pairs that say which way up the view
+         is and whether it follows the crew: one row of choices each, one of
+         them on. */
       #speed-buttons,
-      #view-buttons {
+      #view-buttons,
+      #follow-buttons {
         display: flex;
         gap: 4px;
       }
 
+      #follow-buttons {
+        margin-top: 4px;
+      }
+
       #speed-buttons button,
-      #view-buttons button {
+      #view-buttons button,
+      #follow-buttons button {
         flex: 1;
         padding: 4px 0;
         border: 1px solid var(--edge);
@@ -642,7 +963,8 @@
       }
 
       #speed-buttons button.on,
-      #view-buttons button.on {
+      #view-buttons button.on,
+      #follow-buttons button.on {
         border-color: var(--accent);
         color: var(--accent);
       }
@@ -719,12 +1041,12 @@
           <span class="spacer"></span>
           <div id="money" aria-label="What is left in the pool"></div>
         </header>
-        <div id="work">
+        <div id="columns">
           <aside id="palette" aria-label="Parts"></aside>
           <div id="stage-wrap">
             <canvas id="stage"></canvas>
             <div id="readout">
-              <span class="what" id="readout-what"></span>
+              <span class="named" id="readout-what"></span>
               <span class="price" id="readout-price"></span>
               <span class="price" id="readout-tile"></span>
             </div>
@@ -771,6 +1093,7 @@
         <header id="game-bar">
           <h1>Bims</h1>
           <span class="reading" id="clock"></span>
+          <span id="recruited" hidden>◆ Recruited — orders only</span>
           <span class="reading" id="where"></span>
           <span class="spacer"></span>
           <span class="reading" id="purse"></span>
@@ -778,24 +1101,139 @@
         <div id="play">
           <div id="game-stage-wrap">
             <canvas id="game-stage"></canvas>
-            <div id="game-readout">
-              <span class="what" id="view-name"></span>
-              <span class="price" id="trip-phase"></span>
-              <span class="price" id="velocity"></span>
-              <span class="price" id="heading"></span>
-            </div>
-            <div id="game-keys">
-              M switches the ship and the map · N turns the view head up or north up ·
-              click the map to plot · middle-drag or WASD to pan · wheel to zoom
-            </div>
             <div id="log" role="status"></div>
+            <!-- The left-hand column, in this order and no other: what is
+                 aboard, the ship's readout, what the pointer is over, then
+                 the crew's agendas — the one thing here whose height moves,
+                 so it goes last. -->
+            <div id="left-stack">
+              <!-- What is aboard, a row a resource: the shelves, the tanks and
+                   the cold store. Built by web/ship.js off the resource
+                   count; the icons are the rules below, one a resource. -->
+              <div id="items" aria-label="What is aboard"></div>
+              <div id="game-readout">
+                <span class="named" id="view-name"></span>
+                <span class="price" id="trip-phase"></span>
+                <span class="price" id="velocity"></span>
+                <span class="price" id="heading"></span>
+              </div>
+              <!-- What the pointer is over, on its own line under the
+                   readout. Blank, but still there, when it is over nothing. -->
+              <div id="game-hover">
+                <span class="named" id="game-what"></span>
+                <span class="on-it" id="game-on-it"></span>
+              </div>
+              <!-- The crew's panels: the room's own, built by web/crew.js onto
+                   these ids, the same ids as on the room's page. One agenda per
+                   crew member; the selected one's sheet; and the tray, which is
+                   the same markup as index.html's — a Bim's timetable, work
+                   list and management row do not change for being aboard. -->
+              <div id="agendas" aria-label="What the crew are doing"></div>
+            </div>
+            <div id="side" aria-label="The selected crew member"></div>
+            <section id="tray" class="open">
+              <div id="tray-tabs">
+                <button type="button" class="tab on" data-tab="schedule">
+                  Schedule
+                </button>
+                <button type="button" class="tab" data-tab="work">Work</button>
+                <button type="button" class="tab" data-tab="management">
+                  Management
+                </button>
+                <button
+                  type="button"
+                  id="tray-toggle"
+                  aria-expanded="true"
+                  aria-controls="tray-body"
+                  title="Hide the panel"
+                >
+                  ▾
+                </button>
+              </div>
+              <div id="tray-body">
+                <div data-panel="schedule">
+                  <div id="brushes">
+                    <button type="button" class="brush on" data-slot="1">
+                      <i class="swatch sleep"></i>Sleep
+                    </button>
+                    <button type="button" class="brush" data-slot="0">
+                      <i class="swatch any"></i>Everything
+                    </button>
+                  </div>
+                  <ol id="hours" aria-label="The day, one slot an hour"></ol>
+                  <div id="thresholds" aria-label="Action thresholds"></div>
+                </div>
+                <!-- What the crew get on with, and in what order. One row per job,
+                     built by the host from the count wasm reports rather than
+                     written out here, because the list grows. -->
+                <div data-panel="work" hidden>
+                  <div id="work-sort">
+                    <span class="sort-label">Sort</span>
+                    <button type="button" class="sort on" data-sort="up">
+                      Priority 1→5
+                    </button>
+                    <button type="button" class="sort" data-sort="down">
+                      Priority 5→1
+                    </button>
+                    <button type="button" class="sort" data-sort="name">
+                      Name A–Z
+                    </button>
+                  </div>
+                  <table id="work" aria-label="What the crew get on with">
+                    <thead>
+                      <tr>
+                        <th>Job</th>
+                        <th>Priority</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+                <div data-panel="management" hidden>
+                  <label id="auto-control">
+                    <input id="autonomy" type="checkbox" checked />
+                    <span>Let the Bim decide</span>
+                  </label>
+                  <!-- What is aboard, and what the place keeps in stock: the bay
+                       plants to the first two targets, the galley cooks to the
+                       third. One input each, in the row of the thing it is a
+                       target for; wasm clamps and the page reads back what it
+                       holds. -->
+                  <table id="stock" aria-label="What is aboard">
+                    <thead>
+                      <tr>
+                        <th>Item</th>
+                        <th>Stock</th>
+                        <th>Location</th>
+                        <th>Target</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </div>
+            </section>
           </div>
           <aside id="controls">
+            <!-- The ship's controls, all of them from the helm. Take the
+                 helm walks the crew member you steer there; Change target
+                 opens the map for a fresh aim, under way or not; Confirm
+                 flies the aim, which under way is a redirect; Brake stops
+                 the ship where it is; and Abort calls off a departure the
+                 ship is still casting off or pushing off the berth for.
+                 Brake and Abort are never both live: one is for a ship
+                 under way and the other for one still leaving. -->
             <div id="helm">
               <h2>Helm</h2>
+              <div id="helm-watch"></div>
               <div id="plan"></div>
               <div class="row">
+                <button type="button" id="take-helm" class="big">Take the helm</button>
+                <button type="button" id="change-target" class="big">Change target</button>
+              </div>
+              <div class="row">
                 <button type="button" id="confirm" class="big">Confirm</button>
+                <button type="button" id="brake" class="big">Brake</button>
                 <button type="button" id="abort" class="big">Abort</button>
               </div>
             </div>
@@ -807,12 +1245,18 @@
             <!-- Which way up. North up is the game's own: the ship turns and
                  the sky stays put. Head up holds the ship square to the
                  window in both views and turns the sky and the map round
-                 it. A view setting, this player's own, and no command. -->
+                 it. A view setting, this player's own, and no command.
+                 Under it, whether the ship view follows the crew member
+                 you steer or is a free camera you drag anywhere. -->
             <div id="view">
               <h2>View</h2>
               <div id="view-buttons" aria-label="Which way up the view is">
                 <button type="button" data-head-up="0">North up</button>
                 <button type="button" data-head-up="1">Head up</button>
+              </div>
+              <div id="follow-buttons" aria-label="Whether the view follows the crew member you steer">
+                <button type="button" data-follow="1">Follow</button>
+                <button type="button" data-follow="0">Free camera</button>
               </div>
             </div>
             <div id="game-trade" data-panel="trade" hidden>
@@ -828,6 +1272,42 @@
         </div>
       </section>
     </main>
+    <div id="menu" role="menu" hidden></div>
+    <div id="tip" role="tooltip" hidden></div>
+    <div id="settings" role="dialog" aria-labelledby="settings-title" hidden>
+      <div class="settings-sheet">
+        <h2 id="settings-title">Settings and keys</h2>
+        <h3>At the helm</h3>
+        <table>
+          <tr><td><kbd>M</kbd></td><td>Switch between the ship and the map.</td></tr>
+          <tr><td><kbd>N</kbd></td><td>Turn the view head up or north up.</td></tr>
+          <tr><td><kbd>F</kbd></td><td>Follow the crew member you steer, or let the camera go free.</td></tr>
+          <tr><td><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd></td><td>Pan the view. Middle-drag does the same. A free camera goes anywhere; one following the crew stops at the edge.</td></tr>
+          <tr><td>Wheel</td><td>Zoom, about the pointer.</td></tr>
+          <tr><td>Take the helm</td><td>Send the crew member you steer to the helm. The ship is flown from there: nothing can be aimed at or confirmed until they are standing at it.</td></tr>
+          <tr><td>Click the map</td><td>Aim at a planet or a station; the helm quotes the trip, and Confirm sends the ship. At a station, everybody goes to their own side of the airlock first and the ship casts off once they have.</td></tr>
+        </table>
+        <h3>On the deck</h3>
+        <table>
+          <tr><td><kbd>1</kbd></td><td>Select the crew member you steer.</td></tr>
+          <tr><td>Drag</td><td>Select whoever is inside the box.</td></tr>
+          <tr><td>Right-click the deck</td><td>Send the selected crew member there.</td></tr>
+          <tr><td>Right-click a fixture</td><td>Open its menu.</td></tr>
+          <tr><td><kbd>R</kbd></td><td>Recruit the crew member you steer, or let them go.</td></tr>
+        </table>
+        <h3>In the yard</h3>
+        <table>
+          <tr><td>Drag</td><td>Lay the chosen part over every tile of the box.</td></tr>
+          <tr><td>Right-drag</td><td>Take the top part off every tile of the box.</td></tr>
+          <tr><td><kbd>R</kbd></td><td>Turn the part you are about to place.</td></tr>
+        </table>
+        <h3>Anywhere</h3>
+        <table>
+          <tr><td><kbd>Esc</kbd></td><td>Close a menu, stop aiming, or open and close this sheet.</td></tr>
+        </table>
+        <div class="row"><button type="button" id="settings-close">Close</button></div>
+      </div>
+    </div>
     <p id="error" role="alert"></p>
     <script>
       // A failure to even parse ship.js cannot be caught by ship.js, and
@@ -841,9 +1321,15 @@
 
       const build = Date.now();
       window.BIMS_BUILD = build;
-      const tag = document.createElement("script");
-      tag.src = `ship.js?v=${build}`;
-      document.body.appendChild(tag);
+      // crew.js first — the crew's panels, shared with the room's page — and
+      // in that order: a script added from script is async unless told
+      // otherwise, and two of them would race.
+      for (const src of ["crew.js", "ship.js"]) {
+        const tag = document.createElement("script");
+        tag.src = `${src}?v=${build}`;
+        tag.async = false;
+        document.body.appendChild(tag);
+      }
     </script>
   </body>
 </html>

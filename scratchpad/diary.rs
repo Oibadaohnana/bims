@@ -156,7 +156,7 @@ fn main() {
         // `scratchpad/smoke.mjs`, which can see the table they live in.
         let mut unknown = 0;
         for i in 0..n {
-            if !(20..=30).contains(&game.memory_what(w, i)) {
+            if !(20..=31).contains(&game.memory_what(w, i)) {
                 unknown += 1;
             }
             kinds.insert(game.memory_what(w, i));

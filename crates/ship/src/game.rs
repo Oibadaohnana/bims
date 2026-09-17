@@ -58,6 +58,14 @@ const SHIP_MAX_SCALE: f32 = 3.0;
 const MAP_MIN_SCALE: f32 = 1e-8;
 const MAP_MAX_SCALE: f32 = 1e-2;
 
+/// How near a body has to be to the passage for the airlock doors to open,
+/// in design units: a tile and a half, which is about a body's walk before
+/// it reaches the door.
+const AIRLOCK_HAIL: f64 = 1.5 * TILE as f64;
+
+/// How much of the way to open or shut the door moves each frame.
+const AIRLOCK_EASE: f32 = 0.18;
+
 /// How much of the canvas the whole of the discovered system should fill when
 /// the map is first opened.
 const MAP_FIT: f32 = 0.8;
@@ -90,12 +98,22 @@ pub struct Game {
     /// and nothing that decides anything reads this. Off by default, because
     /// a fixed sky is what makes a flip legible; see `camera.rs`.
     pub head_up: bool,
+    /// Whether the ship view follows the crew member the player steers, or
+    /// has been let go to be dragged anywhere — `Camera::set_loose`. On by
+    /// default; a view setting like `head_up`, this browser's own, and
+    /// nothing that decides anything reads it.
+    pub follow: bool,
     /// Frames drawn. What the exhaust flickers and the running lights blink
     /// off — a picture clock, counted by the render and by nothing that
     /// decides anything. It does not stop at a pause, which is right: a
     /// paused flame still burns.
     pub frame: u32,
     pub stars: Starfield,
+    /// How far the mated airlocks stand open, 0 shut to 1 wide. A picture
+    /// clock like `frame`: it eases towards open while somebody is at the
+    /// door and shut when nobody is, and nothing that decides anything
+    /// reads it — the passage is walkable whatever the door looks like.
+    pub airlock_ajar: f32,
 }
 
 impl Game {
@@ -130,7 +148,9 @@ impl Game {
             aimed: None,
             hover: None,
             head_up: false,
+            follow: true,
             frame: 0,
+            airlock_ajar: 0.0,
             stars: Starfield::new(seed),
         };
         game.fit_ship();
@@ -195,16 +215,89 @@ impl Game {
         }
     }
 
-    pub fn set_mode(&mut self, mode: ViewMode) {
-        if self.mode == mode {
+    /// The ship's airlock while it is mated to a station's: docked, and the
+    /// ship has a port. What the painter draws open. `None` otherwise.
+    pub fn mated_airlock(&self) -> Option<u32> {
+        let station = self.world.ship.state.alongside()?;
+        self.world.station(station)?.port()?;
+        shipdesign::port(&self.world.ship.design).map(|p| p.part_id)
+    }
+
+    /// Put the crew member the player steers in the middle of the ship view:
+    /// the camera's focus is where they stand, in the camera's units about
+    /// the ship, so the view follows them off the ship and into a station
+    /// and can never be panned until they are off the edge. Once a frame,
+    /// from `ship_render`. The map is left about the ship, and a view let
+    /// go (`follow` off) is left wherever it was dragged.
+    pub fn follow_player(&mut self) {
+        let who = bims::bim::PLAYER as u32;
+        if !self.follow || who >= self.world.aboard.count() {
             return;
         }
-        self.mode = mode;
-        // A map opened after an hour of flying should show where the ship has
-        // got to, not where it was when the map was last looked at.
-        if mode == ViewMode::Map {
-            self.fit_map();
+        let (x, y) = crate::world_paint::crew_on_screen(self, who);
+        self.ship_view.set_focus(x, y);
+    }
+
+    /// Stream the sky on by however much world time has passed since the
+    /// last frame, at the ship's speed. Once a frame, from `ship_render`;
+    /// a picture clock, and nothing that decides anything reads it.
+    pub fn stream_sky(&mut self) {
+        let velocity = self
+            .world
+            .trip_state()
+            .map(|state| state.velocity)
+            .unwrap_or(worldgen::math::DVec2::ZERO);
+        self.stars.advance(velocity, self.world.clock_minutes);
+    }
+
+    /// Follow the crew member the player steers, or stop: the ship view is
+    /// let loose so a drag takes it anywhere, and tethered again it snaps
+    /// back to them on the next frame.
+    pub fn set_follow(&mut self, on: bool) {
+        self.follow = on;
+        self.ship_view.set_loose(!on);
+    }
+
+    /// Move the airlock door on one frame: open while anybody in the room
+    /// is within [`AIRLOCK_HAIL`] of the passage, shut otherwise, easing
+    /// either way so it reads as a door and not a switch. Docked with the
+    /// rooms joined, or it stays shut.
+    pub fn tick_airlock(&mut self) {
+        let want = self.someone_at_the_door();
+        let target = if want { 1.0 } else { 0.0 };
+        self.airlock_ajar += (target - self.airlock_ajar) * AIRLOCK_EASE;
+        if (self.airlock_ajar - target).abs() < 0.005 {
+            self.airlock_ajar = target;
         }
+    }
+
+    fn someone_at_the_door(&self) -> bool {
+        if self.mated_airlock().is_none() || !self.world.aboard.is_joined() {
+            return false;
+        }
+        let Some(port) = shipdesign::port(&self.world.ship.design) else {
+            return false;
+        };
+        // The passage, in the room's units: the ship's door face, plus the
+        // ship's offset into the joined room.
+        let (fx, fy) = port.face();
+        let door = dvec2(fx, fy).add(self.world.aboard.offset);
+        (0..self.world.aboard.count()).any(|who| {
+            let at = self
+                .world
+                .aboard
+                .position(who)
+                .add(self.world.aboard.offset);
+            at.distance(door) <= AIRLOCK_HAIL
+        })
+    }
+
+    /// Switch views. Each camera keeps its own scale between visits: a map
+    /// zoomed in on the dock is still zoomed in on the dock when it is
+    /// opened again — it is centred on the ship whatever it is doing, so
+    /// what the ship has got up to in the meantime is on it anyway.
+    pub fn set_mode(&mut self, mode: ViewMode) {
+        self.mode = mode;
     }
 
     /// Start the ship view showing the whole hull.
@@ -276,18 +369,26 @@ impl Game {
     /// makes a click land on the tile it looks like it landed on at every
     /// heading rather than only at zero.
     pub fn tile_at(&self, x: f32, y: f32) -> (i32, i32) {
+        let design = self.design_point_at(x, y);
+        (
+            (design.x / TILE as f64).floor() as i32,
+            (design.y / TILE as f64).floor() as i32,
+        )
+    }
+
+    /// A point on the canvas, in design world units — the tile arithmetic
+    /// above before the floor, and the room's own coordinates aboard, since a
+    /// design unit is a room unit (`bims::aboard`). What a click on the deck
+    /// is handed to the room as: a marquee corner, an order, a fixture.
+    pub fn design_point_at(&self, x: f32, y: f32) -> DVec2 {
         let (vx, vy) = self.ship_view.to_view(x, y);
         // Screen is y-down and the system is y-up, so the screen offset is
         // turned back into system space before it is turned back into the
         // grid. Through the angle the ship was *drawn* at, which is the
         // heading less the camera's turn — head up, that is nothing at all.
         let system = dvec2(vx as f64, -(vy as f64));
-        let design = angle::unrotate_design(system, self.ship_turn())
-            .add(self.world.ship.dynamics.centre_of_mass);
-        (
-            (design.x / TILE as f64).floor() as i32,
-            (design.y / TILE as f64).floor() as i32,
-        )
+        angle::unrotate_design(system, self.ship_turn())
+            .add(self.world.ship.dynamics.centre_of_mass)
     }
 
     /// A point on the canvas, as a position in the system. What a click on the

@@ -15,6 +15,7 @@ pub mod bim;
 pub mod character;
 pub mod clock;
 pub mod dish;
+pub mod door;
 pub mod draw;
 pub mod filth;
 pub mod game;
@@ -46,12 +47,43 @@ use game::Game;
 /// both sufficient and safe in practice.
 static mut GAME: Option<Game> = None;
 
-fn game() -> &'static mut Game {
+/// A room that lives somewhere else, for the exports below to act on
+/// instead of [`GAME`]. See [`host_aboard`].
+static mut ABOARD: Option<fn() -> Option<&'static mut Game>> = None;
+
+/// Point every `bims_*` export at a room that is not this crate's own.
+///
+/// The ship game runs this room *aboard* the designed ship — a `Game` held
+/// inside `crates/world`, stepped on the world's clock — and its page wants
+/// the same panels the room's page has: the selection, the timetable, the
+/// work list, the fixture menus. Those are the exports in this file, and
+/// they are already in `ship.wasm`, because a `#[no_mangle]` in an rlib is
+/// exported from every cdylib that links it. What they were missing was a
+/// room to act on. `provider` is asked on every call rather than a pointer
+/// being kept, so nothing here can outlive a world that was replaced.
+///
+/// Once installed, [`bims_init`] and [`bims_update`] are not for that host
+/// to call: the world steps the room, and a second clock would be two
+/// simulations disagreeing about where the crew are. The coordinates every
+/// export takes are still the room's own — design world units aboard — and
+/// it is the host's job to get the pointer into them.
+pub fn host_aboard(provider: fn() -> Option<&'static mut Game>) {
+    unsafe { ABOARD = Some(provider) }
+}
+
+/// The room, if there is one yet: the one aboard when a host has said so,
+/// this crate's own otherwise.
+fn game_if_any() -> Option<&'static mut Game> {
     unsafe {
-        (*(&raw mut GAME))
-            .as_mut()
-            .expect("bims_init was not called")
+        match *(&raw const ABOARD) {
+            Some(aboard) => aboard(),
+            None => (*(&raw mut GAME)).as_mut(),
+        }
     }
+}
+
+fn game() -> &'static mut Game {
+    game_if_any().expect("no room yet: bims_init was not called, or the world has not opened")
 }
 
 /// Floats per shape in the draw buffer. The host uses this to walk the slice.
@@ -252,6 +284,21 @@ pub extern "C" fn bims_store_tofu() -> u32 {
     game().store_tofu()
 }
 
+/// Pots of stew on the shelf, cooked ahead to the manager's target.
+#[unsafe(no_mangle)]
+pub extern "C" fn bims_store_stew() -> u32 {
+    game().store_stew()
+}
+
+/// Cook a stew for the cold store, off the hob's menu. The same errand the
+/// stew job starts by itself; refused without a vegetable and a block of
+/// tofu to make it of. Not `bims_make_stew`, which is the table stew — two
+/// vegetables, eaten at once.
+#[unsafe(no_mangle)]
+pub extern "C" fn bims_stock_stew() -> u32 {
+    game().make_stew(bim::PLAYER) as u32
+}
+
 /// Helpings left in the pot on the hob. A stew is cooked once and eaten twice,
 /// so this is what says whether the Bim has to cook at all.
 #[unsafe(no_mangle)]
@@ -333,34 +380,26 @@ pub extern "C" fn bims_hydro_hibernating() -> u32 {
 
 // --- the manager --------------------------------------------------------
 //
-// What the place is told to keep in stock. One number for now — food, in
-// units of two thirds greens to one third soy — and everything automated
-// works to it rather than being told separately.
+// What the place is told to keep in stock: vegetables, blocks of tofu and
+// pots of stew in the cold store, by `manager::Stock` code — 0, 1, 2. The
+// bay plants to the first two and the galley cooks to the third.
 
 #[unsafe(no_mangle)]
-pub extern "C" fn bims_food_target() -> u32 {
-    game().food_target()
+pub extern "C" fn bims_target(which: u32) -> u32 {
+    manager::Stock::from_code(which).map_or(0, |which| game().target(which))
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn bims_set_food_target(units: u32) {
-    game().set_food_target(units);
+pub extern "C" fn bims_set_target(which: u32, count: u32) {
+    if let Some(which) = manager::Stock::from_code(which) {
+        game().set_target(which, count);
+    }
 }
 
-/// The two halves of that target, as counts of the actual things.
+/// The most the manager will accept of anything, so the host's inputs agree
+/// with it.
 #[unsafe(no_mangle)]
-pub extern "C" fn bims_target_veg() -> u32 {
-    game().target_veg()
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn bims_target_tofu() -> u32 {
-    game().target_tofu()
-}
-
-/// The most the manager will accept, so the host's input agrees with it.
-#[unsafe(no_mangle)]
-pub extern "C" fn bims_food_target_max() -> u32 {
+pub extern "C" fn bims_target_max() -> u32 {
     manager::MOST
 }
 
@@ -426,8 +465,10 @@ pub extern "C" fn bims_is_alive(who: u32) -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn bims_crew() -> u32 {
     // Asked before `bims_init`, to size the host's tables: the classic room
-    // always has its two, and the game, once there is one, agrees.
-    unsafe { (*(&raw mut GAME)).as_ref() }
+    // always has its two, and the game, once there is one, agrees. Aboard
+    // it is the ship's crew — one, in the simulation — which is why this
+    // goes through the same accessor as everything else and not `GAME`.
+    game_if_any()
         .map(|game| game.crew_count())
         .unwrap_or(bim::CREW as u32)
 }
@@ -448,6 +489,12 @@ pub extern "C" fn bims_player() -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn bims_galley_held_by() -> u32 {
     game().galley_held_by()
+}
+
+/// And the shower: one cubicle, one body in it.
+#[unsafe(no_mangle)]
+pub extern "C" fn bims_shower_held_by() -> u32 {
+    game().shower_held_by()
 }
 
 /// The same for the heads: one pan, one door.
@@ -669,6 +716,12 @@ pub extern "C" fn bims_urge(who: u32) -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn bims_discomfort(who: u32) -> u32 {
     game().discomfort(who as usize)
+}
+
+/// Game hours of food poisoning left, 0 when well.
+#[unsafe(no_mangle)]
+pub extern "C" fn bims_poisoning(who: u32) -> f32 {
+    game().poisoning(who as usize)
 }
 
 /// How filthy the Bim itself is, 0 clean to 1 covered.
@@ -896,6 +949,55 @@ pub extern "C" fn bims_toggle_door_lock() {
     game().toggle_door_lock(bim::PLAYER);
 }
 
+// --- the ship's doors ----------------------------------------------------
+//
+// A designed ship has a powered door in every bulkhead; see `door.rs`. They
+// open by themselves for anyone who walks up, and these are the player's
+// four words to one — open (hold), close, lock, unlock — each an errand
+// that walks James to the panel.
+
+/// Which of the ship's doors the last right-click landed on, when
+/// `bims_hit_at` said it was one (`HIT_SHIP_DOOR`).
+#[unsafe(no_mangle)]
+pub extern "C" fn bims_hit_door() -> u32 {
+    game().hit_door() as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn bims_ship_door_count() -> u32 {
+    game().ship_door_count() as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn bims_ship_door_is_open(door: u32) -> u32 {
+    game().ship_door_is_open(door as usize) as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn bims_ship_door_is_held(door: u32) -> u32 {
+    game().ship_door_is_held(door as usize) as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn bims_ship_door_is_locked(door: u32) -> u32 {
+    game().ship_door_is_locked(door as usize) as u32
+}
+
+/// Which door is under a point, one-based, or 0 for none. For the readout.
+#[unsafe(no_mangle)]
+pub extern "C" fn bims_ship_door_at(x: f32, y: f32) -> u32 {
+    game().door_at(x, y).map_or(0, |i| i as u32 + 1)
+}
+
+/// Send James to work a door: `order` is 0 hold open, 1 close, 2 lock,
+/// 3 unlock. A number that is none of those does nothing.
+#[unsafe(no_mangle)]
+pub extern "C" fn bims_order_door(door: u32, order: u32) {
+    if let Some(order) = door::Order::from_code(order) {
+        game().order_door(bim::PLAYER, door as usize, order);
+    }
+}
+
 /// Whether the Bim could set off for the heads. A locked door only stops one
 /// on the wrong side of it; already in there, it starts at the pan.
 #[unsafe(no_mangle)]
@@ -908,6 +1010,19 @@ pub extern "C" fn bims_can_use_toilet() -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn bims_use_toilet() {
     game().use_toilet(bim::PLAYER);
+}
+
+/// Whether the player's Bim could take a shower now: there is one, nobody
+/// is in it, and there is a way to it.
+#[unsafe(no_mangle)]
+pub extern "C" fn bims_can_shower() -> u32 {
+    game().can_shower(bim::PLAYER) as u32
+}
+
+/// Take a shower. Does nothing when it cannot — see `bims_can_shower`.
+#[unsafe(no_mangle)]
+pub extern "C" fn bims_take_shower() {
+    game().take_shower(bim::PLAYER);
 }
 
 // --- the clock ----------------------------------------------------------

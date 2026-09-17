@@ -68,21 +68,29 @@ pub struct Dynamics {
     /// fly the heading it was left on.
     pub alpha: f64,
     /// How many engines burn when the ship is pushing forward, and how many
-    /// when it is pushing back. The fuel bill is per engine per minute, so
-    /// these are what it is counted off.
+    /// when it is pushing back. What the painter lights; the fuel bill is
+    /// per unit of thrust and comes off the acceleration instead.
     pub forward_engines: u32,
     pub backward_engines: u32,
     /// Whether there is anywhere to fly it from.
     pub has_helm: bool,
-    /// Whether there is a way off it, which is the difference between docking
-    /// at a station and holding station beside one.
+    /// Whether there is a way off it — an airlock that opens onto space, a
+    /// port — which is the difference between docking at a station and
+    /// holding station beside one. An airlock buried in the deck is not one.
     pub has_airlock: bool,
 }
 
 impl Dynamics {
-    /// What one minute of burning costs, with `engines` of them lit.
-    pub fn fuel_per_minute(&self, engines: u32) -> f64 {
-        data::FUEL_PER_ENGINE_MINUTE * engines as f64
+    /// What one minute of burning costs at `accel` along the ship's line.
+    ///
+    /// Fuel goes as **thrust**, not as a count of engines: a heavy engine
+    /// pushing five times as hard burns five times as much, or it would be
+    /// the only engine worth having. The thrust is the acceleration times
+    /// the mass, which is why this takes the segment's `accel` rather than
+    /// its engine count — the count is what the painter lights, and the two
+    /// are read off the same segment. Nothing while coasting or turning.
+    pub fn fuel_per_minute(&self, accel: f64) -> f64 {
+        data::FUEL_PER_THRUST_MINUTE * accel.abs() * self.mass.get()
     }
 
     /// Whether the ship can turn at all.
@@ -137,7 +145,7 @@ pub fn dynamics(design: &ShipDesign, crew_count: u32) -> Result<Dynamics, Dynami
         design
             .parts
             .iter()
-            .filter(|p| p.kind == PartKind::Engine && p.rotation.facing() == facing)
+            .filter(|p| p.kind.def().pushes() && p.rotation.facing() == facing)
             .count() as u32
     };
 
@@ -151,7 +159,7 @@ pub fn dynamics(design: &ShipDesign, crew_count: u32) -> Result<Dynamics, Dynami
         forward_engines: count(Facing::Forward),
         backward_engines: count(Facing::Backward),
         has_helm: design.count(PartKind::Helm) > 0,
-        has_airlock: design.count(PartKind::Airlock) > 0,
+        has_airlock: shipdesign::port(design).is_some(),
     })
 }
 

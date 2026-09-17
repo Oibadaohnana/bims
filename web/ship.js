@@ -62,6 +62,13 @@ const PART_NAMES = [
   "Shelf",
   "Shower",
   "Thruster",
+  "Heavy engine",
+  "Diagonal wall",
+  "Diagonal outside wall",
+  "Smelter",
+  "Workbench",
+  "Suit locker",
+  "Armoury",
 ];
 
 /** The palette, grouped the way a ship is thought about rather than the way
@@ -74,13 +81,14 @@ const PART_NAMES = [
 const PART_GROUPS = [
   // Hull first, in the order a ship is actually built: deck, skin, then the
   // ways through it. The frame is not a tool of its own — see NOT_A_TOOL.
-  { name: "Hull", kinds: [0, 1, 16, 2, 23] },
-  { name: "Systems", kinds: [3, 27, 17, 18, 19, 20, 21, 22, 24] },
+  { name: "Hull", kinds: [0, 1, 29, 16, 30, 2, 23] },
+  { name: "Systems", kinds: [3, 28, 27, 17, 18, 19, 20, 21, 22, 24] },
   { name: "Crew", kinds: [4, 9, 10, 26] },
   { name: "Galley", kinds: [5, 6, 7, 8] },
   { name: "Heads", kinds: [11, 12] },
-  { name: "Storage", kinds: [25] },
+  { name: "Storage", kinds: [25, 33] },
   { name: "Bay", kinds: [13, 14] },
+  { name: "Workshop", kinds: [31, 32, 34] },
 ];
 
 /** Kinds the palette does not offer, though the ship knows them. Structure
@@ -91,25 +99,33 @@ const PART_GROUPS = [
  * still drawn, still peeled off by a right-click after the deck. */
 const NOT_A_TOOL = new Set([15]);
 
-/** Who the crew are, by lobby slot. The simulation has crew member 0 and
- * crew member 1; the names exist here and in `CREW_NAMES` in web/bims.js —
- * the room's copy — and nowhere in wasm. The first two are the room's, so
- * the pair a player met on the deck are the pair aboard the ship. Painted
- * over each head by `paintCrewNames`, after the shapes: the draw buffer
- * holds rectangles and ellipses and nothing else. */
-const CREW_NAMES = ["James", "Kate", "Priya", "Tomas"];
+// Who the crew are — `CREW_NAMES`, by lobby slot — and how their names sit
+// over their heads (`NAME_SIZE`, `NAME_LIFT`, `NAME_YOURS`, `NAME_THEIRS`)
+// come from web/crew.js, which this page loads first. The crew aboard are
+// the room's Bims and the room's panels are that file, so the names live
+// there once; nothing in wasm knows them. Painted over each head by
+// `paintCrewNames`, after the shapes: the draw buffer holds rectangles and
+// ellipses and nothing else.
 
-/** How the names sit: the size, how far above the head, and yours against
- * everybody else's. The lift is a body's height in design units, so it is
- * scaled with the view. */
-const NAME_SIZE = 12;
-const NAME_LIFT = 46;
-const NAME_YOURS = "#7fd1a8";
-const NAME_THEIRS = "#e7efe9";
+/** What the people living on a station are called. The wasm knows a
+ * resident as a station and a seat and nothing else, so the names are
+ * dealt out here, by station and seat, off one list: enough that the two
+ * on one station never share a name, and the same pair every time the ship
+ * comes back. Nothing in wasm knows them. */
+const RESIDENT_NAMES = [
+  "Ada", "Tomas", "Priya", "Yusuf", "Mei", "Olu", "Sanne", "Ravi",
+  "Ines", "Kofi", "Hana", "Bram", "Leila", "Jonas", "Nour", "Emil",
+];
+
+function residentName(station, who) {
+  return RESIDENT_NAMES[(station * 2 + who) % RESIDENT_NAMES.length] ?? `Resident ${who + 1}`;
+}
 
 /** What a station sells, indexed by `physics::ResourceId`. The first four are
- * materials and the last two are food; what makes one food rather than metal
- * is which hold it goes in, and that is `economy::storage`. */
+ * materials and the next two are food; what makes one food rather than metal
+ * is which hold it goes in, and that is `economy::storage`. Galvum is the
+ * rare one, and an emitter is made rather than sold — which station sells
+ * what is `ship_sold_here`, not this table. */
 const RESOURCE_NAMES = [
   "Ore",
   "Metal",
@@ -117,10 +133,16 @@ const RESOURCE_NAMES = [
   "Components",
   "Vegetables",
   "Tofu",
+  "Galvum",
+  "Emitters",
+  "Suits",
+  "Handguns",
+  "Vests",
+  "Medkits",
 ];
 
 /** Where goods are stowed, indexed by `economy::Storage`. */
-const STORAGE_NAMES = ["Shelves", "Fuel tanks", "Cold stores"];
+const STORAGE_NAMES = ["Shelves", "Fuel tanks", "Cold stores", "Lockers"];
 
 /** How many units a buy or sell button moves. Three sizes, because a hundred
  * units of ore one at a time is not a decision anybody is making. */
@@ -145,6 +167,7 @@ const EDIT_LINES = {
   14: "There is not that much aboard to sell.",
   15: "Sell what is in it first.",
   16: "There are not the materials aboard to build that.",
+  17: "This station does not sell that.",
 };
 
 /** What is wrong with the design. Indexed by `IssueCode` in
@@ -176,6 +199,10 @@ const ISSUE_LINES = {
   28: "No airlock, so no way off it — a station can only be held beside.",
   29: "No sensor array. Nothing will be seen beyond eyesight.",
   30: "No fuel aboard, so no trip can be started.",
+  31: "The airlock is sealed in — no side of it opens onto space, so the ship cannot dock by it. Put it in the skin.",
+  32: "An engine is firing into the ship — the tiles behind its bell have to be open space. Put it at the stern, bell outwards.",
+  33: "Nothing powers this. Run conduit under it from a reactor.",
+  34: "This run draws more than its reactor makes. The batteries will go flat and the ship will brown out.",
 };
 
 /** Why a trip could not be planned. Indexed by `flight::PlanError`; 0 never
@@ -199,10 +226,20 @@ const REFUSALS = {
   2: "there is not the money",
   3: "there is nowhere aboard to put it",
   4: "there is not that much aboard to sell",
-  5: "that is not your order to give",
+  5: "nobody of yours is at the helm",
   6: "there is no trip to stop",
   7: "the sum will not go",
+  8: "the ship is coming alongside; wait until it is tied up",
+  9: "this station does not sell that",
 };
+
+/** What the ship is doing, indexed by `world::ShipState::code`. Under way
+ * the trip's phase is named instead — see `paintGameReadout`. */
+const STATE_NAMES = ["Docked", "Holding", "Under way", "Casting off", "Undocking", "Docking"];
+const STATE_DOCKED = 0;
+const STATE_TRAVELLING = 2;
+const STATE_CASTING_OFF = 3;
+const STATE_UNDOCKING = 4;
 
 /** Which part of a trip the ship is in. Indexed by `flight::Phase`. */
 const PHASE_NAMES = ["Aligning", "Burning", "Turning", "Braking", "Holding"];
@@ -224,6 +261,32 @@ const EVENT_LINES = {
   8: (units) => `${units} aboard.`,
   9: (units) => `${-units} sold.`,
   10: (why) => `That could not be done — ${REFUSALS[why] ?? "no reason given"}.`,
+  11: () => "Casting off: everybody to their own side of the airlock.",
+  12: () => "Clear of the berth.",
+  13: (id) => `Coming alongside station ${id}.`,
+  // The two crafting lines are handed what the recipe makes, in words — see
+  // `madeName` in boot(), which is the only line that has to ask wasm.
+  14: (_, made) => `Made ${made}.`,
+  15: (_, made) => `Nothing made: the materials for ${made} were gone.`,
+  // A walk outside: the ore, and the galvum, packed as ore + 100 × galvum.
+  16: (packed) => {
+    const ore = packed % 100;
+    const galvum = Math.floor(packed / 100);
+    if (ore === 0 && galvum === 0) return "Back from outside with nothing: the shelves are full.";
+    return `Back from outside with ${ore} ore${galvum > 0 ? ` and ${galvum} galvum` : ""}.`;
+  },
+  // A body crossing a line — `health::HealthEvent`, 1 to 10, after 16. The
+  // value is who.
+  17: (who) => `${CREW_NAMES[who] ?? "Somebody"} has picked up a dose of radiation.`,
+  18: (who) => `${CREW_NAMES[who] ?? "Somebody"}'s dose is critical — it is doing damage.`,
+  19: (who) => `${CREW_NAMES[who] ?? "Somebody"} has radiation sickness.`,
+  20: (who) => `${CREW_NAMES[who] ?? "Somebody"}'s sickness has subsided; the dose is still critical.`,
+  21: (who) => `${CREW_NAMES[who] ?? "Somebody"}'s dose is below critical again.`,
+  22: (who) => `${CREW_NAMES[who] ?? "Somebody"}'s dose is clear.`,
+  23: (who) => `${CREW_NAMES[who] ?? "Somebody"} has cancer.`,
+  24: (who) => `${CREW_NAMES[who] ?? "Somebody"}'s cancer has advanced.`,
+  25: (who) => `${CREW_NAMES[who] ?? "Somebody"}'s cancer is terminal.`,
+  26: (who) => `${CREW_NAMES[who] ?? "Somebody"} has died.`,
 };
 
 /** What each kind of body is called. Indexed by `worldgen::BodyKind`. */
@@ -247,6 +310,29 @@ const STATION_KIND_NAMES = [
  * differently: what is held against a trip under way is not the crew's to
  * sell. */
 const FUEL = 2;
+
+/** `economy::Storage::ColdStore`. The one hold the room has a fixture for:
+ * its rows in the items panel ring the cold store on the deck. */
+const COLD_STORE = 2;
+
+/** What the crew can actually eat, by `physics::ResourceId`. The cold store
+ * aboard is the room's, stocked off the manifest when the world opens and
+ * restocked at every dock — what is eaten and grown between does not come
+ * back off `ship_cargo`, so the items panel reads the room for these two
+ * rather than the hold. Anything without a line here is read off the hold. */
+const ROOM_HELD = {
+  4: (wasm) => wasm.bims_store_veg(),
+  5: (wasm) => wasm.bims_store_tofu(),
+};
+
+/** What is aboard that is not a `ResourceId` at all: things the crew make
+ * rather than buy, which the room counts and the manifest has never heard
+ * of. Each goes in the items panel under the hold it is kept in, with a key
+ * for its icon rule. Stew is the first; anything else made aboard is a
+ * line here. */
+const MADE_ABOARD = [
+  { key: "stew", name: "Stew, ready", hold: COLD_STORE, held: (wasm) => wasm.bims_store_stew() },
+];
 
 /** The two views. Indexed by `ship::game::ViewMode`. */
 const VIEW_NAMES = ["Ship", "System map"];
@@ -355,6 +441,10 @@ const STRIDE_FALLBACK = 12;
 
 const KIND_RECT = 0;
 const KIND_ELLIPSE = 1;
+/** The bottom-left half of the box, spun about the box's centre: the one
+ * shape the diagonal walls wanted. `crates/ship/src/draw.rs` is the other
+ * half of the pair. */
+const KIND_TRIANGLE = 2;
 
 boot().catch((err) => {
   console.error(err);
@@ -426,6 +516,12 @@ async function boot() {
       // `mode=1` is the simulation: no design phase, the playtest ship, the
       // world at once. A number, like every other setting.
       mode: whole(number("mode", MODE_GAME), MODE_GAME, MODE_SIMULATION),
+      // `random=1` is the simulation somewhere else each time: a random
+      // seed unless the query gave one, and a dock somebody lives on
+      // picked at random across that galaxy — `nix run .#test`. `roll` is
+      // the pick, for a harness that wants the same somewhere twice.
+      random: whole(number("random", 0), 0, 1) === 1,
+      roll: asked.has("roll") ? whole(number("roll", 0), 0, U32_MAX) : null,
       // What the grid opens with. The playtest ship unless the query says
       // an empty one — a ship is a better place to start from than nothing,
       // and it costs the crew nothing; the numbers are `PRESET_*` in wasm.
@@ -483,10 +579,20 @@ async function boot() {
   // The world. Falling back to the wasm's own default seed rather than to a
   // number written down here, so there is one copy of it; the spawn has no
   // fallback at all, and crosses as NONE when it was not given.
-  const seedHi = chosen.seedHi ?? wasm.ship_default_seed_hi();
-  const seedLo = chosen.seedLo ?? wasm.ship_default_seed_lo();
-  const star = chosen.star ?? NONE;
-  const station = chosen.station ?? NONE;
+  // Somewhere at random, when asked: the seed and the roll are the page's
+  // — `Math.random`, since nothing about them has to agree with anybody —
+  // and which dock the roll lands on is wasm's, so the same roll on the
+  // same seed is the same place on every machine.
+  const dice = () => Math.floor(Math.random() * 0x1_0000_0000);
+  const seedHi = chosen.seedHi ?? (chosen.random ? dice() : wasm.ship_default_seed_hi());
+  const seedLo = chosen.seedLo ?? (chosen.random ? dice() : wasm.ship_default_seed_lo());
+  let star = chosen.star ?? NONE;
+  let station = chosen.station ?? NONE;
+  if (chosen.mode === MODE_SIMULATION && chosen.random && star === NONE) {
+    const roll = chosen.roll ?? dice();
+    star = wasm.ship_pick_dock(seedHi, seedLo, chosen.galaxy, 0, roll);
+    station = wasm.ship_picked_station();
+  }
 
   if (chosen.mode === MODE_SIMULATION) {
     // Straight into the world on the playtest ship. wasm fills in what the
@@ -627,6 +733,13 @@ async function boot() {
       return net.order({ deal: { resource, units, buying } });
     },
 
+    /** Keep so many of a resource made at the benches. A command like a
+     * deal, because the benches work to it and every player's ship has to
+     * be making the same thing. */
+    keep(resource, units) {
+      return net.order({ keep: { resource, units } });
+    },
+
     /** Somebody dropped out. A stub, deliberately: the crew count is frozen
      * at Start and stays frozen for this step, so a ship designed for four
      * still wants four bunks after one leaves. Sizing the ship down under the
@@ -698,6 +811,8 @@ async function boot() {
       const deal = what.deal;
       if (deal.buying) wasm.ship_cmd_buy(slot, deal.resource, deal.units);
       else wasm.ship_cmd_sell(slot, deal.resource, deal.units);
+    } else if (what.keep) {
+      wasm.ship_cmd_keep(slot, what.keep.resource, what.keep.units);
     }
   }
 
@@ -746,7 +861,7 @@ async function boot() {
     button.dataset.part = String(kind);
 
     const swatch = document.createElement("span");
-    swatch.className = "swatch";
+    swatch.className = "tint";
     // The colour comes out of wasm, which is what paints the part on the
     // canvas. One table, so a button cannot be a different colour from the
     // thing it places.
@@ -865,7 +980,8 @@ async function boot() {
       const price = document.createElement("span");
       price.className = "price";
       // Fixed for the whole phase — one price list, every station — so it is
-      // written once here rather than repainted.
+      // written once here rather than repainted. So is whether this station
+      // sells it at all: the phase is docked at one station for its length.
       price.textContent = euros(tradePrice(id));
       const units = document.createElement("span");
       units.className = "units";
@@ -881,7 +997,7 @@ async function boot() {
 
       row.append(name, price, units, deal);
       goods.push(row);
-      goodRows.push({ row, units, id });
+      goodRows.push({ row, units, id, sold: wasm.ship_sold_here(id) !== 0 });
     }
     byId("goods").replaceChildren(...goods);
 
@@ -933,9 +1049,10 @@ async function boot() {
       for (const button of cell.row.querySelectorAll("button")) {
         const buy = button.dataset.buy;
         const step = Number(buy ?? button.dataset.sell);
-        button.disabled = !editable || (buy ? step * price > left || step > room : step > aboard);
+        button.disabled =
+          !editable || (buy ? !cell.sold || step * price > left || step > room : step > aboard);
       }
-      cell.row.className = aboard > 0 ? "good carried" : "good";
+      cell.row.className = `good${aboard > 0 ? " carried" : ""}${cell.sold ? "" : " unsold"}`;
     }
     for (const cell of holdRows) {
       const total = wasm.ship_storage_capacity(cell.class);
@@ -1077,6 +1194,13 @@ async function boot() {
   /** Whether the page has already moved over. */
   let gameShown = false;
 
+  /** The crew's panels — the room's own, out of web/crew.js: the tray with
+   * the timetable, the work list and the management row, the selected
+   * Bim's needs and diary, the agendas, the fixture menus. `null` until the
+   * world opens, because everything they read is a `bims_*` export and those
+   * act on the room aboard, which does not exist before there is a world. */
+  let deck = null;
+
   /** Move the page over to the game: swap the canvas, size it, and build the
    * panels that only exist out here.
    *
@@ -1096,16 +1220,65 @@ async function boot() {
     buildSpeeds();
     buildOrientation();
     buildGameTrade();
+    crewAboard();
+    // After the crew's panels: the food rows ring the cold store and the ?
+    // is the room's affordance, and both want `deck`.
+    buildItems();
     paintGame();
   }
 
-  /** The two buttons that say which way up the view is. Wired once; which
+  /** How many the crew's panels were built for. A docking brings the
+   * station's residents into the ship's room and leaving takes them out,
+   * and the panels are rebuilt for whoever is there now. */
+  let deckCrew = 0;
+
+  /** Build the crew's panels, once there is a room for them to read. Not
+   * before: a page whose world never opened — a spawn the galaxy has not
+   * got — shows the game screen with nothing in it, and every `bims_*` call
+   * would trap on a room that is not there. */
+  function crewAboard() {
+    if (deck !== null || wasm.ship_world_ready() === 0) return;
+    // The room's own idea of who is steered and how many are aboard, not the
+    // lobby's: the room simulates at most two of a crew, and only its
+    // `PLAYER` takes orders — see `crates/game/src/bim.rs`.
+    deckCrew = wasm.bims_crew();
+    deck = crewHost({
+      wasm,
+      player: wasm.bims_player(),
+      crewCount: deckCrew,
+      // Docked, the station's residents are in the room after the crew,
+      // and the panels name them the way the canvas does.
+      name: (who) =>
+        who < wasm.ship_crew_count()
+          ? undefined
+          : residentName(wasm.ship_resident_station() - 1, who - wasm.ship_crew_count()),
+    });
+  }
+
+  function keepCrewPanels() {
+    if (deck === null) return;
+    const now = wasm.bims_crew();
+    if (now !== deckCrew) {
+      deckCrew = now;
+      deck.closeMenu();
+      deck.rebuildCrew(now);
+    }
+  }
+
+  /** The two buttons that say which way up the view is, and the two that
+   * say whether it follows the crew member you steer. Wired once; which
    * one is on is read off wasm every frame by `paintOrientation`, since the
-   * N key changes it too and a button marked off its own click would lie. */
+   * N and F keys change them too and a button marked off its own click
+   * would lie. */
   function buildOrientation() {
     for (const button of byId("view-buttons").querySelectorAll("button")) {
       button.addEventListener("click", () => {
         wasm.ship_set_head_up(Number(button.dataset.headUp));
+      });
+    }
+    for (const button of byId("follow-buttons").querySelectorAll("button")) {
+      button.addEventListener("click", () => {
+        wasm.ship_set_follow(Number(button.dataset.follow));
       });
     }
   }
@@ -1114,6 +1287,10 @@ async function boot() {
     const on = wasm.ship_head_up();
     for (const button of byId("view-buttons").querySelectorAll("button")) {
       button.className = Number(button.dataset.headUp) === on ? "on" : "";
+    }
+    const follow = wasm.ship_follow();
+    for (const button of byId("follow-buttons").querySelectorAll("button")) {
+      button.className = Number(button.dataset.follow) === follow ? "on" : "";
     }
   }
 
@@ -1183,6 +1360,153 @@ async function boot() {
     byId("game-holds").replaceChildren(...holds);
   }
 
+  /** The items panel, on the left under the agendas: a row a resource, an
+   * icon and a count, grouped by where it is stowed — the shelves, the
+   * tanks, the cold store. Built once off `ship_resource_count()` and
+   * `ship_storage_count()` rather than off the name table, so a resource the
+   * host has no icon for still gets a row and an empty slot rather than
+   * vanishing. */
+  const itemRows = [];
+
+  function buildItems() {
+    if (itemRows.length > 0) return;
+    const rows = [];
+    /** One row: the icon slot keyed for its rule, the count, and where the
+     * count comes from. */
+    const itemRow = (first, name, iconKey, held, hold, keep) => {
+      const row = document.createElement("div");
+      const base = first ? "item first-of-hold" : "item";
+      row.className = base;
+      row.setAttribute("aria-label", name);
+      const icon = document.createElement("i");
+      icon.className = "icon";
+      Object.assign(icon.dataset, iconKey);
+      Object.assign(row.dataset, iconKey);
+      const count = document.createElement("span");
+      count.className = "count";
+      row.append(icon, count);
+      // Something the benches make gets the target it is made to: "keep
+      // so many", stepped up and down, a command like a deal. The number is
+      // read back off wasm every paint, so two players see one target.
+      let target = null;
+      if (keep !== null) {
+        const box = document.createElement("span");
+        box.className = "keep";
+        // What making one takes, on the box, so the number has a meaning.
+        box.title = `Keep this many made. ${recipeLines(keep)}`;
+        const less = keepButton(keep, -1);
+        target = document.createElement("span");
+        target.className = "target";
+        const more = keepButton(keep, 1);
+        box.append(less, target, more);
+        row.appendChild(box);
+      }
+      // A food row rings the cold store on the deck, the way the tray's
+      // stock table does — a highlight, not a tooltip.
+      if (deck !== null && hold === COLD_STORE) deck.points(row, SPOT_FRIDGE);
+      rows.push(row);
+      itemRows.push({ row, count, held, base, shown: "", target, keep, shownTarget: "" });
+    };
+    /** Which resources a recipe makes, so a row knows whether it wants a
+     * target at all. Read off the wasm's table once. */
+    const made = new Set();
+    for (let i = 0; i < wasm.ship_recipe_count(); i++) made.add(wasm.ship_recipe_output(i));
+    for (let class_ = 0; class_ < wasm.ship_storage_count(); class_++) {
+      let first = true;
+      for (let id = 0; id < resourceCount; id++) {
+        if (wasm.ship_storage_of(id) !== class_) continue;
+        const fromRoom = ROOM_HELD[id];
+        itemRow(
+          first,
+          RESOURCE_NAMES[id] ?? `Resource ${id}`,
+          { resource: String(id) },
+          fromRoom ? () => (deck !== null ? fromRoom(wasm) : wasm.ship_cargo(id)) : () => wasm.ship_cargo(id),
+          class_,
+          made.has(id) ? id : null,
+        );
+        first = false;
+      }
+      // Then what is made aboard and kept in the same hold. Only while
+      // there is a room to count it.
+      for (const made of MADE_ABOARD) {
+        if (made.hold !== class_ || deck === null) continue;
+        itemRow(first, made.name, { made: made.key }, () => made.held(wasm), class_, null);
+        first = false;
+      }
+    }
+    const panel = byId("items");
+    panel.replaceChildren(...rows);
+    if (deck !== null) {
+      const explains = document.createElement("span");
+      explains.className = "explains";
+      explains.appendChild(
+        deck.questionMark(
+          "What is aboard, by where it is kept: ore, metal and components " +
+            "on the shelves; fuel in the tanks; vegetables and tofu in the " +
+            "cold store. The food is what the crew can eat now — the cold " +
+            "store is refilled from the manifest at every dock.",
+          "What the icons mean",
+        ),
+      );
+      panel.appendChild(explains);
+    }
+  }
+
+  /** Every frame; only a count that moved is written. */
+  function paintItems() {
+    for (const cell of itemRows) {
+      if (cell.target !== null) {
+        const target = String(wasm.ship_craft_target(cell.keep));
+        if (target !== cell.shownTarget) {
+          cell.shownTarget = target;
+          cell.target.textContent = target;
+        }
+      }
+      const held = cell.held();
+      const shown = String(held);
+      if (shown === cell.shown) continue;
+      cell.shown = shown;
+      cell.count.textContent = shown;
+      cell.row.className = held > 0 ? `${cell.base} held` : cell.base;
+    }
+  }
+
+  /** Every recipe that makes `resource`, in words: "2 ore → 1 metal at the
+   * smelter, 30 min". Off the wasm's table, so the words cannot drift from
+   * what the benches do. */
+  function recipeLines(resource) {
+    const lower = (id) => (RESOURCE_NAMES[id] ?? `resource ${id}`).toLowerCase();
+    const lines = [];
+    for (let i = 0; i < wasm.ship_recipe_count(); i++) {
+      if (wasm.ship_recipe_output(i) !== resource) continue;
+      const inputs = [];
+      for (let j = 0; j < wasm.ship_recipe_input_count(i); j++) {
+        inputs.push(`${wasm.ship_recipe_input_units(i, j)} ${lower(wasm.ship_recipe_input(i, j))}`);
+      }
+      const station = (PART_NAMES[wasm.ship_recipe_station(i)] ?? "a bench").toLowerCase();
+      lines.push(
+        `${inputs.join(" + ")} → ${wasm.ship_recipe_output_units(i)} ${lower(resource)} at the ${station}, ${wasm.ship_recipe_minutes(i)} min.`,
+      );
+    }
+    return lines.join(" ");
+  }
+
+  /** How far one click on a keep button moves the target. */
+  const KEEP_STEP = 5;
+
+  function keepButton(resource, direction) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "deal-on";
+    button.dataset.keep = direction > 0 ? "more" : "less";
+    button.textContent = direction > 0 ? "+" : "\u2212";
+    button.addEventListener("click", () => {
+      const now = wasm.ship_craft_target(resource);
+      net.keep(resource, Math.max(0, now + direction * KEEP_STEP));
+    });
+    return button;
+  }
+
   function gameDealButton(resource, step, buying) {
     const button = document.createElement("button");
     button.type = "button";
@@ -1199,11 +1523,13 @@ async function boot() {
   /** Everything on the game screen. Repainted every frame, because almost all
    * of it changes every frame: a clock, a velocity, a fuel gauge. */
   function paintGame() {
+    keepCrewPanels();
     paintClock();
     paintHelm();
     paintSpeeds();
     paintOrientation();
     paintGameTrade();
+    paintItems();
     paintShipFacts();
     paintGameReadout();
   }
@@ -1257,10 +1583,28 @@ async function boot() {
     else if (aimed.node) wasm.ship_preview_node(mapIndexOf(aimed.node.kind, aimed.node.id));
     else wasm.ship_preview_point(aimed.x, aimed.y);
 
+    // The ship is flown from the helm. Nothing can be aimed at until the
+    // crew member you steer is standing there, and the panel says so
+    // rather than quoting a trip nobody can confirm.
+    const manned = wasm.ship_at_helm(wasm.ship_local_slot()) !== 0;
+    const watch = byId("helm-watch");
+    watch.textContent = manned
+      ? `${CREW_NAMES[wasm.ship_local_slot()] ?? "Your crew member"} is at the helm.`
+      : "Nobody of yours is at the helm.";
+    watch.className = manned ? "manned" : "";
+    byId("take-helm").disabled = manned;
+    if (!manned && aimed !== null) {
+      aimed = null;
+      wasm.ship_preview_clear();
+    }
+
     const plan = byId("plan");
     const state = wasm.ship_preview_state();
     const rows = [];
-    if (state === 2) {
+    if (!manned) {
+      plan.className = "";
+      rows.push(["", "Take the helm to plot a trip."]);
+    } else if (state === 2) {
       plan.className = "refused";
       rows.push(["", PLAN_ERRORS[wasm.ship_preview_error()] ?? "That cannot be flown."]);
     } else if (state === 1) {
@@ -1274,6 +1618,9 @@ async function boot() {
       if (stopping > 0) rows.push(["Stopping first", spell(stopping)]);
       rows.push(["Fuel", `${Math.ceil(wasm.ship_preview_fuel())} of ${wasm.ship_fuel_aboard() - wasm.ship_fuel_reserved()} spare`]);
       rows.push(["Ends", wasm.ship_preview_docks() !== 0 ? "Docked" : "Holding"]);
+    } else if (wasm.ship_world_state() === STATE_TRAVELLING) {
+      plan.className = "";
+      rows.push(["", "Under way. Change target to plot a new one, or Brake to stop here."]);
     } else {
       plan.className = "";
       rows.push(["", "Open the map and click somewhere to plot a trip."]);
@@ -1293,8 +1640,18 @@ async function boot() {
       return line;
     }));
 
-    byId("confirm").disabled = aimed === null || state !== 1;
-    byId("abort").disabled = wasm.ship_world_state() !== 2;
+    byId("confirm").disabled = !manned || aimed === null || state !== 1;
+    // A fresh aim wants the map and the helm, and nothing else.
+    byId("change-target").disabled = !manned;
+    // Brake stops a ship under way — once; a ship already stopping has
+    // nothing more to brake with. Abort calls off a departure while the
+    // ship is still casting off or pushing off the berth. The two are the
+    // same command at the seam (`net.stop`) and never both live, because
+    // what the ship does with it depends on which of those it is doing.
+    const ship = wasm.ship_world_state();
+    byId("brake").disabled =
+      !manned || ship !== STATE_TRAVELLING || wasm.ship_trip_aborting() !== 0;
+    byId("abort").disabled = !manned || ![STATE_CASTING_OFF, STATE_UNDOCKING].includes(ship);
   }
 
   /** What the helm is pointed at, and how far off it is.
@@ -1354,7 +1711,7 @@ async function boot() {
   /** The station, which is only there while the ship is tied to one. Money
    * works at a dock and nowhere else — see `shipdesign::materials`. */
   function paintGameTrade() {
-    const docked = wasm.ship_world_state() === 0;
+    const docked = wasm.ship_world_state() === STATE_DOCKED;
     const panel = byId("game-trade");
     if (docked) panel.removeAttribute("hidden");
     else panel.setAttribute("hidden", "");
@@ -1369,14 +1726,17 @@ async function boot() {
       const price = tradePrice(cell.id);
       // Fuel held against a trip under way is not the crew's to sell.
       const reserved = cell.id === FUEL ? wasm.ship_fuel_reserved() : 0;
+      // What this dock has on the shelf. Asked every paint rather than once,
+      // because the next dock is a different station.
+      const sold = wasm.ship_sold_here(cell.id) !== 0;
       for (const button of cell.row.querySelectorAll("button")) {
         const buy = button.dataset.buy;
         const step = Number(buy ?? button.dataset.sell);
         button.disabled = buy
-          ? step * price > left || step > room
+          ? !sold || step * price > left || step > room
           : step > aboard - reserved;
       }
-      cell.row.className = aboard > 0 ? "good carried" : "good";
+      cell.row.className = `good${aboard > 0 ? " carried" : ""}${sold ? "" : " unsold"}`;
     }
     for (const cell of gameHoldRows) {
       const total = wasm.ship_storage_capacity(cell.class);
@@ -1386,10 +1746,37 @@ async function boot() {
     }
   }
 
+  /** The reactors against the consumers, and what the batteries have. A
+   * brownout is said in words, because a number that reads "0 of 3000"
+   * does not say the bay has stopped. */
+  function powerLine() {
+    const made = wasm.ship_power_supply();
+    const drawn = wasm.ship_power_draw();
+    const held = wasm.ship_power_storage();
+    const charge = wasm.ship_power_charge();
+    const batteries = held > 0 ? `, ${Math.round(charge)} of ${Math.round(held)} stored` : "";
+    const state = wasm.ship_power_brownout() !== 0 ? " — brownout" : "";
+    return `${Math.round(drawn)} drawn of ${Math.round(made)} made${batteries}${state}`;
+  }
+
+  /** Each crew member's radiation dose, or "none". Minutes in the open,
+   * which is what the health crate counts in; a walk outside in a suit is a
+   * quarter of that. */
+  function doseLine() {
+    const dosed = [];
+    for (let who = 0; who < net.players; who++) {
+      const dose = wasm.ship_crew_dose(who);
+      if (dose > 0.5) dosed.push(`${CREW_NAMES[who] ?? `Crew ${who + 1}`} ${Math.round(dose)}`);
+    }
+    return dosed.length > 0 ? dosed.join(", ") : "none";
+  }
+
   function paintShipFacts() {
     const by = wasm.ship_destination_by();
     const rows = [
       ["Fuel", `${wasm.ship_fuel_aboard()} aboard, ${wasm.ship_fuel_reserved()} held`],
+      ["Power", powerLine()],
+      ["Dose", doseLine()],
       ["Mass", wasm.ship_mass().toFixed(0)],
       ["Acceleration", wasm.ship_acceleration(0).toFixed(4)],
       ["Parts", String(wasm.ship_part_total())],
@@ -1416,25 +1803,52 @@ async function boot() {
 
   function paintGameReadout() {
     byId("view-name").textContent = VIEW_NAMES[wasm.ship_view_mode()] ?? "View";
+    const state = wasm.ship_world_state();
     byId("trip-phase").textContent =
-      wasm.ship_world_state() === 2
+      state === STATE_TRAVELLING
         ? wasm.ship_trip_aborting() !== 0
           ? "Stopping"
           : (PHASE_NAMES[wasm.ship_trip_phase()] ?? "Under way")
-        : wasm.ship_world_state() === 0
-          ? "Docked"
-          : "Holding";
+        : (STATE_NAMES[state] ?? "Holding");
     byId("velocity").textContent = `${wasm.ship_world_speed().toFixed(1)} u/min`;
     // Degrees, because a heading in radians is a number nobody can steer by.
     const degrees = ((wasm.ship_world_heading() * 180) / Math.PI + 360) % 360;
-    // Which tile the pointer is over, turned back through the heading. Only in
-    // the ship view, and only when it is actually over the hull — a pointer
-    // out in the black is out in the black rather than on the nearest edge.
-    const tile =
-      wasm.ship_view_mode() === VIEW_SHIP && wasm.ship_game_tile_inside() !== 0
-        ? ` · ${wasm.ship_game_tile_x()}, ${wasm.ship_game_tile_y()}`
-        : "";
-    byId("heading").textContent = `${degrees.toFixed(0)}°${tile}`;
+    byId("heading").textContent = `${degrees.toFixed(0)}°`;
+    paintGameHover();
+  }
+
+  /** What the pointer is over, in the ship view: the part under it and the
+   * tile, and what the room aboard makes of the same point — a fixture and
+   * its state ("Hob · lit"), and whatever is lying on the deck there.
+   *
+   * Two answers about one point, and the room's wins where it has one: the
+   * room names the galley, the heads, the bunks and the bay, and knows
+   * whether the hob is lit, which the design does not. Everywhere else — the
+   * helm, a tank, the hull, bare deck — the part is the name. Off the hull
+   * it says nothing at all: a pointer out in the black is out in the black
+   * rather than on the nearest edge.
+   *
+   * Repainted every frame rather than on pointer moves, like the room's own
+   * readout, because the hob gets lit under a pointer that is standing
+   * still. */
+  function paintGameHover() {
+    let thing = "";
+    let onIt = "";
+    if (
+      gameHoverAt !== null &&
+      overDeck() &&
+      wasm.ship_game_tile_inside() !== 0
+    ) {
+      const part = wasm.ship_game_hovered_part();
+      thing = part ? (PART_NAMES[wasm.ship_part_kind(part)] ?? "Something") : "—";
+      const r = onDeck(gameHoverAt);
+      const room = deck.spotReadout(r.x, r.y);
+      if (!PLAIN_SPOTS.has(room.spot)) thing = room.thing;
+      onIt = room.onIt;
+      thing = `${thing} · ${wasm.ship_game_tile_x()}, ${wasm.ship_game_tile_y()}`;
+    }
+    byId("game-what").textContent = thing;
+    byId("game-on-it").textContent = onIt;
   }
 
   // --- what just happened --------------------------------------------------
@@ -1451,11 +1865,32 @@ async function boot() {
     const count = wasm.ship_event_count();
     if (count === 0) return;
     for (let i = 0; i < count; i++) {
-      const line = EVENT_LINES[wasm.ship_event_code(i)];
+      const code = wasm.ship_event_code(i);
+      const line = EVENT_LINES[code];
       if (!line) continue;
-      logLines.push(line(wasm.ship_event_value(i)));
+      const value = wasm.ship_event_value(i);
+      logLines.push(line(value, code === 14 || code === 15 ? madeName(value) : undefined));
     }
     wasm.ship_events_clear();
+    paintLog();
+  }
+
+  /** What a recipe makes, in words, off the wasm's table: "4 components". */
+  function madeName(recipe) {
+    const units = wasm.ship_recipe_output_units(recipe);
+    const name = (RESOURCE_NAMES[wasm.ship_recipe_output(recipe)] ?? "something").toLowerCase();
+    return `${units} ${name}`;
+  }
+
+  /** Something the page has to say during the game — an order the Bim
+   * refused — goes on the log with the events, because that is where things
+   * said to the player go out here; `#said` is the design phase's. */
+  function logSay(text) {
+    logLines.push(text);
+    paintLog();
+  }
+
+  function paintLog() {
     while (logLines.length > LOG_LINES) logLines.shift();
     byId("log").replaceChildren(...logLines.map((text) => {
       const div = document.createElement("div");
@@ -1474,6 +1909,8 @@ async function boot() {
   /** Plot a trip to whatever a click on the map landed on — a thing, or the
    * empty space beside it, which is a perfectly good place to go. */
   function aimAt(x, y) {
+    // Not from anywhere but the helm; `paintHelm` says why.
+    if (wasm.ship_at_helm(wasm.ship_local_slot()) === 0) return;
     const picked = wasm.ship_map_pick(x, y, MAP_PICK_SLOP);
     if (picked !== 0) {
       const i = picked - 1;
@@ -1486,6 +1923,50 @@ async function boot() {
     wasm.ship_preview_point(at.x, at.y);
   }
 
+  // --- the deck ------------------------------------------------------------
+  //
+  // In the ship view the pointer is over the room aboard, and it does what it
+  // does on the room's own page: a left click or a marquee selects a Bim, a
+  // right click on the deck sends the one that takes orders there, and a
+  // click on a fixture opens its menu. All of that is the room's — the
+  // `bims_*` exports act on the room the world is stepping — and what this
+  // page adds is the coordinates: a canvas point read back through the
+  // ship's camera and heading into the room's own units, `ship_room_x`/`_y`.
+  //
+  // The marquee is therefore drawn on the deck rather than on the glass — it
+  // turns with the ship, like everything else aboard — which is exactly the
+  // box the room tests the crew against.
+
+  /** A canvas point in the room's coordinates aboard. */
+  function onDeck(p) {
+    return { x: wasm.ship_room_x(p.x, p.y), y: wasm.ship_room_y(p.x, p.y) };
+  }
+
+  /** Whether the pointer is over the deck at all: the world is open and it is
+   * the ship, not the map, that is up. */
+  function overDeck() {
+    return deck !== null && wasm.ship_view_mode() === VIEW_SHIP;
+  }
+
+  let marqueePointer = null;
+  let marqueeStart = null;
+  /** Where the pointer is over the game canvas, for the readout. Kept as a
+   * canvas point and turned into a room point every frame, because the ship
+   * turns under a pointer that is standing still. */
+  let gameHoverAt = null;
+
+  // Right-clicking a fixture opens its menu. Here rather than on pointerdown,
+  // because a menu opened on pointerdown would be shut again by the
+  // click-away handler for the very same event — the same reason as on the
+  // room's page.
+  gameCanvas.addEventListener("contextmenu", (event) => {
+    event.preventDefault?.();
+    if (!overDeck()) return;
+    const r = onDeck(gameAt(event));
+    const fixture = wasm.bims_hit_at(r.x, r.y);
+    if (fixture) deck.openMenu(fixture, event);
+  });
+
   gameCanvas.addEventListener("pointerdown", (event) => {
     const p = gameAt(event);
     if (event.button === 1) {
@@ -1495,7 +1976,30 @@ async function boot() {
       event.preventDefault?.();
       return;
     }
-    if (wasm.ship_view_mode() === VIEW_MAP) aimAt(p.x, p.y);
+    if (wasm.ship_view_mode() === VIEW_MAP) {
+      aimAt(p.x, p.y);
+      return;
+    }
+    if (!overDeck()) return;
+    const r = onDeck(p);
+    if (event.button === 2) {
+      event.preventDefault?.();
+      deck.closeMenu();
+      // On bare deck a right-click is an order; on a fixture the contextmenu
+      // handler above takes it instead.
+      if (!wasm.bims_hit_at(r.x, r.y)) {
+        const refused = ORDER_REFUSED[wasm.bims_order_move(r.x, r.y)];
+        if (refused) logSay(refused);
+      }
+      return;
+    }
+    if (event.button !== 0) return;
+    deck.closeMenu();
+    // Capture so a drag that leaves the canvas still finishes cleanly.
+    marqueePointer = event.pointerId;
+    marqueeStart = { x: event.clientX, y: event.clientY };
+    gameCanvas.setPointerCapture?.(event.pointerId);
+    wasm.bims_drag_begin(r.x, r.y);
   });
 
   gameCanvas.addEventListener("pointermove", (event) => {
@@ -1505,16 +2009,51 @@ async function boot() {
       panFrom = p;
       return;
     }
-    if (wasm.ship_view_mode() === VIEW_SHIP) wasm.ship_game_hover(p.x, p.y);
+    if (wasm.ship_view_mode() !== VIEW_SHIP) {
+      gameHoverAt = null;
+      return;
+    }
+    gameHoverAt = p;
+    wasm.ship_game_hover(p.x, p.y);
+    if (event.pointerId === marqueePointer) {
+      const r = onDeck(p);
+      wasm.bims_drag_update(r.x, r.y);
+    }
   });
+
+  /** Finish a marquee, or let go of it. A click that landed on a fixture
+   * opens its menu instead of selecting. */
+  function endMarquee(event, apply) {
+    if (event.pointerId !== marqueePointer) return;
+    marqueePointer = null;
+    if (gameCanvas.hasPointerCapture?.(event.pointerId)) {
+      gameCanvas.releasePointerCapture?.(event.pointerId);
+    }
+    if (!apply || deck === null) {
+      wasm.bims_drag_cancel();
+      return;
+    }
+    const r = onDeck(gameAt(event));
+    const fixture = wasm.bims_drag_end(r.x, r.y);
+    const moved =
+      marqueeStart &&
+      Math.hypot(event.clientX - marqueeStart.x, event.clientY - marqueeStart.y) > CLICK_SLOP;
+    if (fixture && !moved) deck.openMenu(fixture, event);
+  }
 
   gameCanvas.addEventListener("pointerup", (event) => {
-    if (!panning) return;
-    panning = false;
-    gameCanvas.releasePointerCapture?.(event.pointerId);
+    if (panning) {
+      panning = false;
+      gameCanvas.releasePointerCapture?.(event.pointerId);
+      return;
+    }
+    endMarquee(event, true);
   });
 
+  gameCanvas.addEventListener("pointercancel", (event) => endMarquee(event, false));
+
   gameCanvas.addEventListener("pointerleave", () => {
+    gameHoverAt = null;
     if (!panning) wasm.ship_game_leave();
   });
 
@@ -1524,13 +2063,32 @@ async function boot() {
     wasm.ship_zoom(p.x, p.y, Math.exp(-event.deltaY * ZOOM_PER_PIXEL));
   });
 
+  byId("take-helm").addEventListener("click", () => {
+    // A room order, like a right-click on the deck: it crosses no seam.
+    wasm.ship_order_helm();
+  });
+
   byId("confirm").addEventListener("click", () => {
     if (aimed === null) return;
     net.fly(aimed);
   });
 
+  byId("brake").addEventListener("click", () => {
+    net.stop();
+  });
+
   byId("abort").addEventListener("click", () => {
     net.stop();
+  });
+
+  // A fresh aim: the map, with nothing aimed at, so the next click is the
+  // new target and Confirm flies it — a redirect if the ship is under way.
+  // An affordance and nothing more; clicking the map does the same.
+  byId("change-target").addEventListener("click", () => {
+    if (wasm.ship_at_helm(wasm.ship_local_slot()) === 0) return;
+    aimed = null;
+    wasm.ship_preview_clear();
+    wasm.ship_set_view_mode(VIEW_MAP);
   });
 
   // --- saying something --------------------------------------------------
@@ -1687,12 +2245,36 @@ async function boot() {
     afterChange();
   }
 
+  // --- the settings sheet --------------------------------------------------
+  //
+  // Every key, explained, on one sheet. Escape opens it — after shutting
+  // whatever Escape has always shut, a fixture's menu or an aim — and
+  // Escape or the button closes it. There is no hint line on the deck any
+  // more; this is where the keys are.
+
+  const settings = byId("settings");
+
+  function settingsOpen() {
+    return !settings.hidden;
+  }
+
+  function showSettings(on) {
+    settings.hidden = !on;
+  }
+
+  byId("settings-close").addEventListener("click", () => showSettings(false));
+
   // --- the keyboard ------------------------------------------------------
 
   const held = new Set();
 
   window.addEventListener("keydown", (event) => {
     const key = String(event.key ?? "").toLowerCase();
+    // With the sheet up, Escape puts it away and nothing else is a key.
+    if (settingsOpen()) {
+      if (key === "escape") showSettings(false);
+      return;
+    }
     if (key === "m" && playing()) {
       wasm.ship_set_view_mode(wasm.ship_view_mode() === VIEW_MAP ? VIEW_SHIP : VIEW_MAP);
       return;
@@ -1700,6 +2282,29 @@ async function boot() {
     if (key === "n" && playing()) {
       wasm.ship_set_head_up(wasm.ship_head_up() ? 0 : 1);
       return;
+    }
+    if (key === "f" && playing()) {
+      wasm.ship_set_follow(wasm.ship_follow() ? 0 : 1);
+      return;
+    }
+    // The deck's keys, the same three as on the room's page. Only once the
+    // world is open: before that `r` turns the ghost, below.
+    if (deck !== null) {
+      if (event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
+      if (key === "1") {
+        wasm.bims_select_group(1);
+        return;
+      }
+      if (key === "r") {
+        wasm.bims_toggle_recruited();
+        deck.paintRecruited();
+        return;
+      }
+      if (key === "escape" && deck.menuOpen()) {
+        // A menu is the one thing Escape shuts without opening the sheet.
+        deck.closeMenu();
+        return;
+      }
     }
     if (key === "r") {
       wasm.ship_rotate_ghost();
@@ -1712,6 +2317,7 @@ async function boot() {
       // `paintHelm` puts one back the moment there is something to quote.
       aimed = null;
       wasm.ship_preview_clear();
+      showSettings(true);
       return;
     }
     if ("wasd".includes(key)) held.add(key);
@@ -1728,6 +2334,11 @@ async function boot() {
     panning = false;
     wasm.ship_drag_cancel();
     wasm.ship_clear_focus();
+    // And no marquee left on the deck, for the same reason.
+    if (marqueePointer !== null) {
+      marqueePointer = null;
+      wasm.bims_drag_cancel();
+    }
   });
 
   function pumpKeys(dt) {
@@ -1821,6 +2432,21 @@ async function boot() {
         continue;
       }
 
+      if (kind === KIND_TRIANGLE) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(rot);
+        ctx.beginPath();
+        ctx.moveTo(-w / 2, -h / 2);
+        ctx.lineTo(-w / 2, h / 2);
+        ctx.lineTo(w / 2, h / 2);
+        ctx.closePath();
+        if (line > 0) ctx.stroke();
+        else ctx.fill();
+        ctx.restore();
+        continue;
+      }
+
       if (rot === 0 && radius === 0 && line === 0) {
         ctx.fillRect(x - w / 2, y - h / 2, w, h);
         continue;
@@ -1862,6 +2488,31 @@ async function boot() {
       ctx.strokeStyle = "rgba(6, 10, 9, 0.85)";
       ctx.strokeText(name, x, y);
       ctx.fillStyle = who === yours ? NAME_YOURS : NAME_THEIRS;
+      ctx.fillText(name, x, y);
+    }
+  }
+
+  /** The residents' names, the same way, over the station's deck. Their
+   * colour is nobody's: they are not crew and take no orders. */
+  function paintResidentNames() {
+    const count = wasm.ship_resident_count();
+    if (count === 0) return;
+    const ctx = stageCtx;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.font = `600 ${NAME_SIZE}px ui-sans-serif, system-ui, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "alphabetic";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = 3;
+    const s = wasm.ship_view_scale();
+    const station = wasm.ship_resident_station() - 1;
+    for (let who = 0; who < count; who++) {
+      const x = wasm.ship_view_x() + wasm.ship_resident_x(who) * s;
+      const y = wasm.ship_view_y() + wasm.ship_resident_y(who) * s - NAME_LIFT * s;
+      const name = residentName(station, who);
+      ctx.strokeStyle = "rgba(6, 10, 9, 0.85)";
+      ctx.strokeText(name, x, y);
+      ctx.fillStyle = NAME_THEIRS;
       ctx.fillText(name, x, y);
     }
   }
@@ -1934,7 +2585,12 @@ async function boot() {
     paint();
     if (playing()) {
       paintGame();
-      if (wasm.ship_view_mode() === VIEW_SHIP) paintCrewNames();
+      crewAboard();
+      deck.paint();
+      if (wasm.ship_view_mode() === VIEW_SHIP) {
+        paintCrewNames();
+        paintResidentNames();
+      }
     }
     else paintReadout();
     requestAnimationFrame(frame);

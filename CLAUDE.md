@@ -12,13 +12,14 @@ all three, without being asked — and **Ctrl+C in that terminal stops the
 server**. Neither half is optional: do not add a step that makes someone open a
 tab themselves, and do not leave the server running after Ctrl+C.
 
-There are three things to run, and each is a name rather than a flag:
+There are four things to run, and each is a name rather than a flag:
 
 | command | `./run` | opens | port |
 | --- | --- | --- | --- |
 | `nix run .` / `nix run .#game` | `./run game` | the whole game in order — menu, setup or lobby, world and station, ship design, then the world docked where you said | `:8080/builder.html` |
 | `nix run .#simulation` | `./run simulation` | straight into the world on the playtest ship | `:8083/ship.html?mode=1` |
 | `nix run .#room` | `./run room` | the behaviour test room — Bims on a deck | `:8084/index.html` |
+| `nix run .#test` | `./run test` | the simulation somewhere else each time — docked at a random station somebody lives on, in a random galaxy | `:8085/ship.html?mode=1&random=1` |
 
 **8080 used to serve the room**, and `builder`, `ship` and `serve` used to be
 names; all four are gone rather than aliased. A server from an older build
@@ -26,7 +27,7 @@ still sitting on a port is refused, not reused — `nix run .` on a machine
 where the old room server is still up says "a different build is on 8080",
 and the answer is Ctrl+C in that terminal.
 
-All three come out of **one served directory** and differ only in which page is
+All four come out of **one served directory** and differ only in which page is
 opened, so they must not share a default port: the second one started would
 find the first already there, decide Bims was running, and hand you the wrong
 page. `--default-port` in `dev-server.py` is what keeps them apart, and a new
@@ -41,7 +42,7 @@ unchanged after a rebuild that changed the rest — which is exactly the stale
 server this check exists to catch, and the game with only `lobby.wasm` named
 would have been exactly that after every change to the designer.
 
-The `./run` forms are the same three against the **live** `web/` rather than
+The `./run` forms are the same four against the **live** `web/` rather than
 the store copy — that is the one to use while editing. Anything after the
 name (`--no-open`, a port) goes to the server; an old name prints the usage.
 
@@ -152,9 +153,23 @@ there fails silently: a parse error in `bims.js` means `boot()` never runs and
 the page is a black canvas with no message. Two separate breakages shipped that
 way. So:
 
+**`./check` runs all of it.** The quick tier — `./check` — is the git-tree
+check, the JavaScript traps below, `cargo fmt`, the wasm build, every
+`scratchpad/*-check.mjs` and the libraries' `cargo test`, in about two
+minutes; `./check full` adds the native probes (compiled fresh into
+`target/probes/`, never the stale binaries in `scratchpad/`) and `nix flake
+check`. `./check <step>...` runs a subset, `./check --list` explains each.
+Full output is under `target/check/`; only the failing lines are printed.
+"Done" means `./check` is green, and a step that was red before the change
+should be said so out loud rather than folded into the report. It re-execs
+itself under `nix-shell shell.nix` if the toolchain is not on PATH, and
+a global Claude Code hook (`~/.claude/hooks/nix-toolchain-env.sh`) puts it there for every session
+(`.envrc` does the same for a human with direnv). What each step does is
+below.
+
 - `nix flake check` — builds the wasm and gates `cargo fmt`. Necessary, not
   sufficient.
-- `nix-shell -p nodejs --run "node --check web/bims.js web/builder.js web/ship.js"`
+- `nix-shell -p nodejs --run "node --check web/bims.js web/builder.js web/ship.js web/crew.js"`
   — catches the parse errors that produce a black page.
 - Actually execute the host. Node with a stub DOM (`document.getElementById`,
   a no-op 2D context, captured event listeners) can load `web/bims.js` through
@@ -605,6 +620,35 @@ ellipses and nothing else, so text cannot come through it.
 asserts the names are drawn, in the right place, in the right colours. That is
 the only part of the rendering a stub can see at all.
 
+## The bed is a bed, and its footprint is still the bunk's
+
+`Berth` in `crates/game/src/room.rs` draws a single bed now — headboard,
+footboard, mattress, pillow, duvet — where it used to draw a bunk bed with a
+ladder. The **footprint did not change**: the classic room's is still
+94×172, the old upper deck plus the strip the lower one stuck out by, and
+`station()` and `lie_pos()` are the bunk's numbers expressed off the frame.
+That is deliberate. The footprint is what the nav grid is built on, and a
+bed one pixel smaller is every route re-lengthened and every seed the probes
+pin re-rolled — see "Adding furniture moves everything". Make the bed
+smaller and expect `probe`, `crew`, `sweep`, `neglect` and `social` to move.
+
+`social.rs` already fails at HEAD — seeds 1 and 7, "the bar hovers about its
+trigger" — before and after the bed changed; it is not the bed.
+
+## The ship's game view has the room's readout
+
+`paintGameHover` in `web/ship.js` names what the pointer is over in the ship
+view, in `#game-readout`: the part under it off the design
+(`ship_game_hovered_part`, then `ship_part_kind`, which reads the **live**
+ship in either phase) and, where the room aboard has a name for the spot,
+the room's word with its state — "Hob · lit", and whatever is lying on the
+deck there. `spotReadout(x, y)` in `web/crew.js` is that second half and it
+is the same function the room's own `#hover` box uses, so the two pages say
+the same thing about the same deck. `PLAIN_SPOTS` beside `DECK_SPOTS` is
+which `SPOT_` codes are only a word for *where* — outside, deck, bulkhead —
+and on the ship those give way to the part's name, since every part the
+room does not draw reads as one of them.
+
 ## Looking at the room without a browser
 
 `scratchpad/layout.rs` dumps one frame of the real draw buffer as SVG and takes
@@ -984,13 +1028,14 @@ apart, and that gap is set by the *names* rather than by the bodies: a body is
 `PartKind` for the variant, `PARTS` in `crates/shipdesign/src/parts.rs` for
 the row, `PART_COLORS` in `crates/ship/src/paint.rs` for the colour,
 `PART_NAMES` in `web/ship.js` for the word, and `PART_GROUPS` beside it for
-which heading it lives under. The three arrays are fixed-length, so those
+which heading it lives under. A part with a recipe made at it is a sixth:
+a row in `recipes::RECIPES`, and `aboard.rs` makes it a bench off that. The three arrays are fixed-length, so those
 three are compile errors; the two tables in the host are not, and
 `scratchpad/ship-check.mjs` is what catches them. Same shape as `memory.rs`'s `What` and
 `work.rs`'s `Job`, and for the same reason: no strings cross the boundary, so
 the ship knows `PartKind::Hob` and only the host knows "Hob".
 
-The row itself is six decisions, and four of them are easy to get wrong by
+The row itself is seven decisions, and five of them are easy to get wrong by
 leaving them at the default:
 
 - **`layer` and `requires`.** What the part *is* and what has to be there
@@ -1009,6 +1054,9 @@ leaving them at the default:
   `Engine` and nowhere else, turning force on `Thruster` and nowhere else. A
   part that did both would make "which engines are burning" — and therefore
   the fuel bill — a different question for every design.
+- **`power` and `charge`.** Whether it draws, and how much. Leaving a
+  workstation at nought is a machine that runs in a brownout and never
+  needs the conduit under it; see "Power is a column" below.
 
 The first three are fixed-size arrays, so leaving one out is a compile error.
 The last two are not, and both fail quietly — which is what
@@ -1027,6 +1075,148 @@ The game half has four more tables with the same rule: `PLAN_ERRORS`,
 `REFUSALS`, `PHASE_NAMES` and `EVENT_LINES`, plus `BODY_KIND_NAMES` and
 `STATION_KIND_NAMES` for what is on the map. A `WorldEvent` whose code has no
 line in `EVENT_LINES` is dropped from the log the same way.
+
+## Power is a column, a flood and one number
+
+`PartDef::power` is signed — `REACTOR_OUTPUT` on the reactor, negative on
+what draws, nought elsewhere — and `PartDef::charge` is `BATTERY_CHARGE` on
+the battery and nothing else. `supplies()`, `draws()` and `stores()` are
+the questions; `defs_are_sound` keeps each on exactly its kind the way it
+keeps thrust on engines, and insists everything `parts::essential` names
+(life support, doors) draws. A new consumer is one row: set `power`.
+
+`shipdesign::power::networks` is the rule. A part is on a network when a
+tile of its footprint carries conduit on the **utility** layer — no
+adjacency, under it or not at all — and networks are conduit runs joined
+four-neighbour, plus one more join: two conduit tiles under one
+*electrical* part are one network (the reactor is the wire between them; a
+table is not). Only a network with a reactor is `live()`. `validate` warns
+`Unpowered = 33` (every dark consumer in one issue, tiles = footprints) and
+`PowerShort = 34` (one per live run drawing more than it makes, tiles = the
+run); neither is an error, for the flight warnings' reason.
+
+`World::run_power` is stage 6: `charge += (supply − draw) · STEP_MINUTES`,
+clamped to the wired batteries' storage, closed form. `Power::brownout()`
+is `draw > supply && charge == 0`, and `World::powered(kind)` is what a
+chain will ask: some part of that kind wired, and not browned out unless
+the kind is essential. **Nothing aboard reads it yet** — the smelter will.
+`Ship::charge` opens full, is clamped in `on_ship_changed` (a battery taken
+off takes its charge), and is in `world_checksum`.
+
+Both fixtures are wired — `REFERENCE_CONDUIT`, `PLAYTEST_BRANCHES` off the
+spine in column 8 — which moved `REFERENCE_HASH`, `REFERENCE_PARTS`,
+`PLAYTEST_HASH`, `PLAYTEST_PARTS` and `REFERENCE_CHECKSUM`;
+`the_fixtures_are_wired` pins that neither warns and the playtest ship
+draws 57 of 100. `ship-check.mjs`'s `buildShip` lays the same run by
+dragging conduit, which is an area tool like deck. **The station layout is
+not wired**: nothing reads a station's power and it is only checked for
+errors, so its reactors and batteries are still furniture.
+
+## A new resource needs six edits, and the compiler catches three
+
+`ResourceId` in `crates/physics/src/data.rs` — appended, `ALL` and
+`RESOURCES` grown with it — then `trade_price` and `storage` in `economy`
+(both `match`es, so a missing arm is a compile error), `CARGO_SLOTS` in
+`crates/shipdesign/src/design.rs` (an array length; `cargo_is_the_right_length`
+pins it, and **every design hash moves** because the cargo is hashed at
+fixed length — re-pin `REFERENCE_HASH`, `PLAYTEST_HASH` and
+`REFERENCE_CHECKSUM`), `RESOURCE_NAMES` in `web/ship.js`, and an icon rule
+in `web/ship.html` (`simulation-check.mjs` fails on a missing one). Then
+decide **who sells it**: `StationKind::sells` in `crates/worldgen/src/data.rs`
+is the only place that is written down, and its test enumerates every
+pair. Galvum is the outposts' alone, an emitter is nobody's, a derelict
+sells nothing. `Refusal::NotSoldHere = 9` is the world's answer and
+`EditError::NotSoldHere = 17` the design phase's — the editor asks
+`Editor::market`, the spawn station's kind, before it asks `apply`, since
+`shipdesign` knows no stations. `ship_sold_here` is the one export both
+phases read.
+
+## A recipe is a row, a bench is a solid, and the hold is the world's
+
+`shipdesign::recipes::RECIPES` is the table: a station `PartKind`, inputs,
+one output, minutes, and `vents` — the smelter may lose mass and nothing
+may gain it; `every_recipe_holds_together` pins the arithmetic against
+the resource table, which is why `Emitter` weighs 16 and `Components` 2.
+`recipes::at(kind)` is how anything asks "is this a bench"; `aboard.rs`
+uses it to build `Layout::benches` (a `room::Bench`: the part's code, its
+frame, its use spot) — the **only** `shipdesign` use, still in `aboard.rs`.
+
+The chain is `Kind::Craft { recipe, bench }`, two steps, `GoToBench` and
+`Work`, with the length riding in `rest_minutes` the way a doze's does,
+because the room has no recipe table. **The room moves no cargo.** `Work`'s
+`leave` pushes the recipe onto `Room::crafted`; `World::step` drains it
+with `Game::take_crafted` after the room steps and moves the hold —
+`finish_craft`, which re-checks `can_make` and emits `Crafted` or
+`CraftLost`. Going in, the world hands the room `Vec<Order>` every step
+(`Game::set_craft_orders`, from `World::craft_orders`: target unmet, inputs
+aboard, room for the output net of the inputs, `powered(station)`, one
+order per bench of that kind). `Job::Craft` is offered while any order's
+bench is free — `Exclusive::Bench(index)` — and `craft_on_offer` takes the
+first, so recipe order is preference order.
+
+Targets are `World::craft_targets`, in `world_checksum`, set by
+`Command::SetCraftTarget` (`net.keep` → `ship_cmd_keep`) and clamped to
+the class's capacity. Nought at the start, for the same reason as the
+stew target. The items panel's `.keep` box is the control and
+`recipeLines` is what reads the `ship_recipe_*` exports — all seven of
+them, or the boundary check names the unused one. `JOB_CRAFT = 18`,
+`SPOT_BENCH = 19` (ringing only; the readout names the part), and
+`WORK_NAMES`/`WORK_SPOTS` in `web/crew.js` grew a row.
+
+`PartKind::Armoury = 34` is the third bench, and the one that is also a
+container (`Storage::Locker`, four); `Handgun = 9`, `Vest = 10` and
+`Medkit = 11` are what it makes, all in the locker class. **A held item
+is a resource in the locker class** — a count, no per-item state — until
+something needs a charge or wear; the suit was the first and these are the
+next three. `a_target_for_a_handgun_runs_the_whole_chain_from_the_hold` is
+the user's original example run end to end.
+
+The playtest ship has a smelter and a workbench aft, both `R180` so they
+are worked from the row forward of them (the row aft is the stern), a
+second shelf, and 40 ore; `REACTOR_OUTPUT` went to 120 so the ship as it
+comes is not short. `a_target_for_metal_has_a_bim_smelt_ore_at_the_bench`
+runs the whole seam natively and `simulation-check.mjs`'s keep section
+from a click.
+
+## The outside is a clock, not a place
+
+A walk outside — `Kind::Eva`, eight steps from `GoToSuitLocker` to
+`PutSuitBack` — never gives the outside a nav grid. `StepOut`'s `leave`
+calls `Character::go_outside(room.outside, facing)`, which is **sitting**
+under another name: `seated = true` at a spot a tile beyond the port's
+collar (`Layout::outside`, from `dock::port` in `aboard.rs`), so nothing
+shoves the body back through the hull and nothing walking the deck is
+slowed by it, with `Uniform::Suit` over whatever was worn. `StepIn`'s
+`enter` calls `come_inside(room.gangway)`. `Outside`'s length rides in
+`rest_minutes` like a doze's. **Any path that gives a chain up has to bring
+the body in**: `let_go` does, before the step match, for both `suspend` and
+`abandon`, and a resumed walk goes out again from the gangway with the
+minutes it had.
+
+The world says when: `World::eva_offer` — `Holding`, `Frame::Local` of a
+belt, a port, a suit in the hold, shelf room, and per-crew `dose <
+EVA_DOSE_LIMIT` — becomes `Game::set_eva(Option<Eva>)` every step;
+`Job::Mine` is offered while it says yes and `Exclusive::Airlock` is free.
+The suit is **counted, never taken out of the hold** — that exclusive is
+what stops two Bims wearing one suit. `Outside`'s `leave` counts
+`Room::walks_done`; the world drains it and `finish_walk` reads
+`worldgen::belt_yield(seed, star, body, kind)` — a stream of its own,
+`Purpose::BeltYield`, so no galaxy checksum moved — onto the shelf, as much
+as fits, and emits `Mined { ore, galvum }` (value packed `ore + 100·galvum`).
+
+Stage 8 is live now: `World::health` is a `health::HealthState` per crew,
+dosed at `SUIT_INTENSITY` while `Game::is_outside(who)` and sheltered
+otherwise, its events forwarded as `WorldEvent::Health` (codes 17–26 =
+16 + `HealthEvent::code`). It is in the checksum. **The crate's body and the
+room's are two bodies**: nothing yet tells the room a Bim the crate says has
+died, and only the suit doses anybody — the exposure map is still unwired.
+The dose limit is what keeps the two from disagreeing about death.
+
+The three `leave` arms for `StepOut`, `Outside` and `Work` are in
+`Task::leave`, not in the "things that happen the moment a step begins"
+block of `enter` — both blocks have a `Shower => ch.wash(1.0)` arm to anchor
+on, and the first time round they landed in `enter`, which counted a walk the
+moment it began.
 
 ## A part weighs its recipe, and there is no mass column
 
@@ -1095,6 +1285,34 @@ Three consequences that are not obvious:
   frame; everything else stands on it. Walking every occupied tile instead
   would let a wall touching nothing but another wall count as holding the
   ship together.
+
+## An engine fires into space, and is worked on from any side
+
+Two rules on the main engines, both in `validate.rs`, both with the
+painter behind them so they are seen before the checks panel says so:
+
+- **`IssueCode::ExhaustBlocked = 32` is an error.** `exhaust_tiles(part)`
+  is the row of tiles straight behind the bell — aft is grid-down at `R0`,
+  the way the engine does *not* push, and turns with it — and every one of
+  them has to hold no frame (`exhaust_blocked`). An engine inside the hull
+  with deck behind it is firing into a room; the fix is to stand it in the
+  skin, its last row on the stern ring (decked, since an engine stands on
+  deck; sealed, since an engine shields), the way the fixtures now do —
+  `reference` has `REFERENCE_ENGINE_STERN`, the harness ships peel two
+  stern tiles and put the engine at `(7, 16)`. That moved `REFERENCE_HASH`,
+  `REFERENCE_CHECKSUM` and the harness builds.
+- **`parts::any_side_will_do(kind)` — every engine — is used from the ring
+  round its footprint**, corners left out, and the validator wants **one**
+  ring tile to be standable rather than all of them (`use_spots` and
+  `reachability` both branch on it). Any other part still stands where its
+  table row says; the rotation test that pinned the engine's single spot by
+  hand pins the bay's instead.
+
+`paint::exhausts` washes the exhaust tiles of every placed engine in the
+flame's colour with a tongue pointing aft, and in the warning colour with
+a cross on every tile of the ship it would cook; the ghost gets the same
+whether or not it is placeable, and marks only the ring tiles a body could
+stand on. `ship-layout.mjs given | spots | ghost` are the pictures.
 
 ## Radiation is a warning that outranks the errors
 
@@ -1226,11 +1444,12 @@ out in the function:
 2. the clock;
 3. flight;
 4. discovery and the local frame;
-5. **crew** — empty;
-6. **construction** — empty;
-7. **health and radiation** — empty.
+5. **crew** — the room aboard, stepped;
+6. **power** — the reactors against the wired consumers, into the batteries;
+7. **construction** — empty;
+8. **health and radiation** — empty.
 
-The last three are extension points, not oversights. Whatever goes in them
+The last two are extension points, not oversights. Whatever goes in them
 goes in *there*, on *that* clock. A second clock or a second loop is two
 simulations that will disagree, and the failure reads as a ship in two places.
 
@@ -1321,16 +1540,198 @@ one is about two targets agreeing.
 
 ## Two placeholder numbers are pinned to scenarios, not to taste
 
-`FUEL_PER_ENGINE_MINUTE` in `flight::data` and `torque_thrust` on the thruster
+`FUEL_PER_THRUST_MINUTE` in `flight::data` and `torque_thrust` on the thruster
 in `shipdesign::parts` are both chosen against `flyer` and a stated outcome:
 one full tank crosses the world generator's longest reference hop, and four
-thrusters turn the ship through half a circle inside two game hours. The tests
+thrusters turn the ship through half a circle inside two game hours. The fuel
+constant is written as the small engine's bill over its thrust — `0.0015 /
+500.0` — so that engine burns what it always did and the heavy one five times
+that; see the next section. The tests
 that pin them are `one_full_tank_crosses_the_longest_reference_hop` and
 `four_thrusters_flip_the_reference_inside_two_hours`, and
 `what_the_fixture_actually_flies_like` beside them prints the numbers for
 whoever has to move one next. Changing either without rerunning those is how
 a flip becomes a worse deal than a backward engine in every case and the
 choice between them stops being a choice.
+
+## Two engines, and "is it an engine" is asked of the table
+
+`PartKind::Engine` and `PartKind::HeavyEngine` are both main engines: five
+times the push for three and a half times the weight, so the heavy one is the
+better engine per tonne and the worse one to carry, and a 3×4 for €75 000
+against a 2×3 for €20 000. **Nothing lists the two kinds.** `PartDef::pushes()`
+(`thrust > 0.0`) is the question, and `turns()` is its partner for the
+thruster; the validator, `mass::engines`, `flight::dynamics`,
+`World::can_modify_part` and the painter's `exhaust` and `part` all ask it,
+so a third size is one row in the table. `defs_are_sound` is the one place
+the kinds are named, because it is the thing checking the column.
+
+**Fuel goes as thrust, not as a count of engines.** `Dynamics::fuel_per_minute`
+takes a segment's `accel` and multiplies by the mass — that is the thrust
+burning — rather than the `engines` count, which is still on every `Segment`
+and `Effort` because it is what the painter lights. A flat rate per engine
+would have made the heavy engine the only engine worth having.
+`the_heavy_engine_is_faster_and_dearer_over_the_same_hop` in
+`crates/flight/src/tests.rs` pins the trade: swapped into the flyer it crosses
+the longest hop sooner and burns more doing it, and its minute costs exactly
+five times the small one's whatever the ship weighs.
+
+The `yard` in `crates/shipdesign/src/tests.rs` stocks **exactly** the heavy
+engine's recipe, because it is the heaviest recipe there is and the
+"one unit short" case builds one and is then refused a wall. A part with a
+bigger recipe than 150 metal and 100 components wants that fixture moved with
+it, and a fourth shelf.
+
+## A station is a place, and the ship docks beside it
+
+`crates/world/src/station.rs` turns every `StationBlueprint` of the system
+into a `ShipDesign` through `apply` — the same parts, the same rules — sized
+by kind (26 to 40 tiles) and dressed by `map_seed`, with the port in the
+west skin and the array in the north. `World::stations` holds them from
+`World::start`; `Station::all_of` is the only place they are built, and
+`station::layout` **caches by (kind, seed)** because a layout is two
+thousand `apply`s and the world test suite went from two seconds to a
+minute before it did.
+
+Five things that hang off that:
+
+- **Docking is airlock to airlock, outside the hull.** `shipdesign::dock::port`
+  is a design's first airlock and the side of it with nothing beyond, and
+  `Station::berth` turns the ship so its port faces the station's and puts
+  the two outer faces on one point. `World::dock_at` is the one place the
+  ship is set down (with `World::start`); `target_position` of a station is
+  the *berth*, so a trip ends outside the station rather than at its
+  middle. `the_ship_docks_airlock_to_airlock_outside_the_station` checks
+  every ship tile is clear of the station's frame.
+- **An airlock in the deck is a door to nowhere.** `Dynamics::has_airlock`
+  is now "has a port", and `IssueCode::AirlockSealedIn = 31` warns about an
+  airlock with hull on every side. The flyer fixture's airlock moved from
+  `(16, 8)` on the deck into the starboard skin at `(18, 11)` for exactly
+  this, and so did the harness builds in `flyer.mjs` and `ship-check.mjs`.
+  A ship without a port gets a berth anyway — held off the door by its own
+  size, heading north — because a world opens docked whether or not the
+  ship can go aboard.
+- **A station's room opens within fifty tiles and closes beyond.**
+  `World::residents` is one `crew::Residents` — the room again, `Aboard::new`
+  on the station's design, seeded by `map_seed`, its clock wound on to the
+  world's with `Game::wind_clock` — for the nearest station within
+  `RESIDENTS_RANGE` of its *hull* (`Station::clearance`), kept out to
+  `LOCAL_HYSTERESIS` further, dropped past that. **Every** station gets one,
+  a derelict's with nobody in it (`residents_of` is 0), because the room is
+  what has the pictures of the fixtures — without it a station is coloured
+  blocks. `Game::with_layout` therefore allows an **empty** crew now; the
+  ship's room never is (players are `max(1)`), and `Game::simulate` guards
+  its tie-break remainder. Dropped means *forgotten*: come back and they
+  start at their bunks. It is in `world_checksum` after the crew.
+- **The spawn is the first station somebody lives on**, not the first
+  station: `World::spawn` skips derelicts, because a crew that opens docked
+  at a wreck sees nobody and blocks. That moved the simulation's dock and
+  `REFERENCE_CHECKSUM`. `the_local_frame_has_a_hysteresis_and_uses_it`
+  drifts *away from the nearest other node* rather than along `+x` for the
+  same reason — in the new spawn system `+x` walked into the parent body's
+  frame.
+- **The airlock has a collar.** `dock::PROTRUSION` is half a tile, the
+  `Port::face` is the end of the collar, and `hull::airlock` draws it that
+  long out of the open side — so two docked airlocks meet collar to collar,
+  hulls a tile apart, with the doors parted and the deck showing through.
+  The picture and the berth read the same constant; move one and you move
+  both. Airlocks stay 1×2 — two tiles along the skin, one deep.
+- **Three pictures by distance**, all in `world_paint::stations`: out to
+  `STATION_VISIBLE` a plate with the icon on it, inside `LOCAL_RADIUS_STATION`
+  the hull tile by tile with parts as their colours, and while the room is
+  open the room's own pictures with the residents walking between them. A
+  station is never turned — heading nought — so its picture goes through
+  `camera_turn` alone, via `DrawList::append_turned_at`. `local_node` draws
+  bodies only now; the ring a docked ship used to sit inside is gone. The
+  mated airlocks are drawn **open** (`hull::part`'s `mated`) and they *are*
+  a way through — see the next section.
+
+`ship-layout.mjs docked | residents | approach | crossing` are the pictures.
+
+## The mated airlocks are a door, and the door is a picture clock
+
+`Game::airlock_ajar` in `crates/ship/src/game.rs` is how far the two mated
+doors stand open, 0 to 1. `tick_airlock` (called from `ship_render`, beside
+`frame`) eases it towards open while anybody in the joined room is within
+`AIRLOCK_HAIL` — a tile and a half — of the ship's port face, and towards
+shut otherwise; `hull::airlock` slides the two halves apart by it, on the
+ship's door and the station's alike, since they are one passage. It is a
+**picture** clock like `frame`: nothing that decides anything reads it, and
+the passage is walkable whatever the door looks like — a Bim ordered
+through a shut-looking door walks through it and the door opens as it
+arrives. `the_airlock_opens_for_whoever_comes_to_it_and_shuts_behind_them`
+in `crates/ship/src/tests.rs` pins the easing and the shutting.
+
+If a Bim ever "cannot go through an airlock" in the browser, check the
+served build first: `nix run .` serves the store copy it started with, and
+the crossing was verified natively (`docked_the_ship_and_the_station_are_one_room_and_the_crew_can_cross`)
+and from a right-click in `simulation-check.mjs`.
+
+## Docked, the ship and the station are one room
+
+`crates/world/src/docking.rs` lays the ship's design and the station's
+down again as **one** `ShipDesign` — the ship first, at its own coordinates
+plus a whole-tile shift; the station turned into the ship's frame by the
+quarter turns the berth put between them; and the one tile between the two
+hulls, where the collars meet, decked — and `World::dock_at` opens the
+room on that (`Aboard::joined`). One deck, one nav grid, so a right-click
+on the station's deck walks James through the airlocks and the residents
+wander aboard. `set_off` takes it apart again (`Aboard::unjoined`): the
+crew back into a room of the ship alone, the residents let go, the
+station's room reopening fresh next step.
+
+What that rests on, and what will bite:
+
+- **`Aboard` has an `offset` and a `crew` count.** `offset` is where the
+  ship's origin sits in the room's grid (nought alone); `position(who)` is
+  in the **ship's** frame whatever the room, so the checksum and the crew
+  names do not care. The painter adds the offset to the room's centre
+  (`room_centre` in `paint_ship`) and `ship_room_x`/`_y` add it to the
+  pointer — those two are the only places it is added. `crew` says which
+  of the room's Bims are the ship's: below it crew, from it residents.
+  `ship_crew_count` is `crew`; `ship_resident_count` is the rest while
+  joined, else the station's own room.
+- **The room's berths and seats are `Vec`s now**, as many as the layout has
+  bunks and chairs, ship's first, so everybody has their own bed;
+  `BERTHS`/`SEATS` are the classic room's two. `Game::with_layout` caps the
+  crew at the beds there are, and a room may have **none** (a derelict's).
+  `plate_on_table` goes through `plate_at`/`set_plate_at`, clamped, and
+  `solids()` lists the beds where the classic room always did — between
+  the table and the bay — because the push-out walks solids in order and
+  a different order re-rolls every probe seed.
+- **Moving a Bim between rooms drops its errand.** `Game::take_crew`
+  abandons every chain (`Task::abandon`: what was carried goes back in the
+  store, whoever was in bed is stood up) and `Game::adopt` stands each
+  one where they were, snapped to the nearest free nav cell — a spot
+  beside a bunk sits on the edge of the bunk's inflated footprint and
+  reads free or not by how the grid happened to fall — or at their bunk
+  if that is more than a body's margin away, which is what a crew member
+  left on the station at departure gets.
+- **One galley.** The joined room maps the first of each fixture kind by
+  id — the ship's — so the station's galley, heads, bay and locker are
+  furniture to walk round while docked, and the residents cook and wash
+  aboard. Their own room, kept open with nobody in it, is what draws the
+  station's fixtures; the joined room draws the ship's and everybody's
+  bunks, chairs and bodies, over it. The cold store is restocked from the
+  ship's cargo at every join and unjoin, like at world start.
+- **The crew panels rebuild when the room's crew changes.**
+  `crewHost().rebuildCrew(n)` in `web/crew.js` tears down and rebuilds the
+  sheets and agendas only; `keepCrewPanels` in `ship.js` calls it from
+  `paintGame` when `bims_crew()` moves, and passes `name` so residents are
+  named as on the canvas. The stub's `remove()` exists for this.
+- **Joining costs ~3000 `apply`s** — a second in a debug test, tens of
+  milliseconds in wasm — once per dock. Not cached: the ship's design
+  changes.
+- **A ship docked side on has the station turned**, so the station's
+  fixtures are used from the wrong side (see "Every fixture is used from
+  the south"). The playtest ship's airlock is to starboard and every
+  station's port is in its west skin, so that ship docks at heading 0.
+  `a_station_is_turned_into_the_frame_of_a_ship_docked_side_on` covers the
+  arithmetic with a bow airlock; the `debug_assert` in `docking::join`
+  checks every turned part's tiles against `covered`.
+
+`docked_the_ship_and_the_station_are_one_room_and_the_crew_can_cross` walks
+James over and back; `simulation-check.mjs` does it from a right-click.
 
 ## The camera never rotates; the ship does
 
@@ -1368,6 +1769,34 @@ the ship rather than the window when head up, or the corners go bare after
 the turn; and a view setting is not a `Command` — it is this browser's own
 and crosses no seam. `ship-layout.mjs headup` and `... mapup` are the pictures.
 
+## The ship view is about the crew member you steer
+
+`Camera::focus` is the point, in the camera's units about the ship's
+centre of mass, that sits in the middle of the window at a pan of nought
+and that the pan is clamped about. `Game::follow_player` sets it to
+`crew_on_screen(PLAYER)` every frame from `ship_render`, so the view
+follows James off the ship and through the airlock, and cannot be dragged
+until he is off the edge — it used to clamp about the *ship*, which is why
+he could not be zoomed in on across the station. Everything is still
+**drawn** about the ship — the painter, `stations`, the pointer — and only
+`offset_x`/`offset_y` know about the focus, so nothing else had to change;
+`Camera::zoom` is written in terms of `to_view` for the same reason. The
+map's focus stays nought, the ship.
+`the_camera_follows_the_crew_member_the_player_steers` pins it, including
+a zoom about a corner and a pan to the limit.
+
+**`Game::follow` is the player's exception, and `Camera::set_loose` is
+how.** The Follow / Free camera buttons and `F` (`ship_set_follow`, beside
+`ship_set_head_up`) let the ship view go: `follow_player` then sets
+nothing, and the camera is *loose* — a pan moves the **focus** rather than
+the clamped pan, and nothing clamps it, so the view goes wherever it is
+dragged. Letting go folds the pan into the focus first (`absorb_pan`) so
+nothing on screen moves for the flip of a switch; tethering again zeroes
+nothing, the next `follow_player` sets the focus and the view snaps back.
+One camera and one transform either way — do not add a second camera for
+the free one. The same test pins both halves and `ship-check.mjs` has a
+section on the buttons and the key.
+
 ## The ship is drawn in its own frame, and the exhaust is read off the plan
 
 `paint_ship` builds the whole ship — rim, exhaust, tiles, the hull's
@@ -1399,7 +1828,9 @@ rules that fall out of it:
   never look at placement; the picture does, because a corner thruster
   puffing into the hull is a picture of a broken ship.
 - **The exhaust is drawn under the hull, and a plume starts where it
-  clears the skin.** The playtest ship's engine sits inside the hull, and a
+  clears the skin.** (An engine can no longer be inside the hull — see the
+  exhaust rule — but the walk aft costs nothing and keeps the picture right
+  for a design that predates it.) The playtest ship's engine sits inside the hull, and a
   flame from its bell was a dim smudge at the stern with the bright end
   under the deck; `plume` walks the tiles aft until one holds nothing and
   begins there. An engine flush with the stern is unchanged.
@@ -1407,6 +1838,13 @@ rules that fall out of it:
   clock counted in `ship_render` and read by nothing that decides anything
   — never the RNG, which is the simulation's, and never `world.steps`,
   which stops at a pause. Hash it; do not draw from the stream.
+- **The starfield streams on the world's clock.** `Starfield::advance`
+  (`Game::stream_sky`, from `ship_render`) moves each layer on by the
+  log-mapped speed times the minutes the clock moved since the last frame,
+  wrapped to the tile — so a steady speed is a steady stream, a pause holds
+  the sky, and 24x is twenty-four times the stream. It used to be a
+  displacement off the speed, which at any constant speed is a still
+  picture. `the_sky_streams_on_the_world_s_clock_and_only_under_way` pins it.
 
 `ship-layout.mjs turn` and `... burn` are the pictures, both head up so a
 puff into the hull or a flame over the deck is obvious. The map marker is
@@ -1634,6 +2072,18 @@ repaints the panel — so the script clicks the star again before stepping.
 It is how a relay was checked to be sitting in deep space rather than
 mis-drawn beside its planet.
 
+## `?random=1` is the simulation somewhere else
+
+`nix run .#test` is `ship.html?mode=1&random=1`. The page rolls a seed and
+a pick with `Math.random` — nothing about them has to agree with anybody —
+and `ship_pick_dock(seed, galaxy, roll)` turns the pick into a station
+somebody lives on, the `roll`-th across the whole galaxy
+(`world::spawn_anywhere`, which generates every system, as the lobby does).
+`ship_picked_station` is the other half of the same answer. A `seedHi`/
+`seedLo`/`roll` on the query pins it, which is how `simulation-check.mjs`
+looks at it: the same roll is the same place, a different roll another,
+and roll 0 is the simulation's own dock. Never a derelict.
+
 ## `ship.html` has three ways in, and no spawn of its own
 
 `web/ship.html` reads `mode`, `star` and `station` off its query with
@@ -1701,9 +2151,10 @@ Five things that hang off that and will bite:
   classic layout had them; a part turned to face another way is used from
   the wrong side. `aboard.rs` says so at the top. Fixing it is the room's
   stations learning a direction each.
-- **At most two of a crew are simulated.** A Bim's index is its berth and
-  its seat, and the room has `BERTHS` and `SEATS` of two. A layout with
-  fewer bunks or chairs than that repeats the last one to fill the slots.
+- **At most as many of a crew as the layout has bunks are simulated.** A
+  Bim's index is its berth and its seat; the room has a berth per bunk and
+  a seat per chair of the design, and the classic room its `BERTHS` and
+  `SEATS` of two. A layout with none of one gets a single stand-in.
 - **The RNG order in `Game::new` is pinned by every probe.** The classic
   room draws each Bim's start position *between* the Bims, from the one
   stream; `with_room` takes a closure for exactly that reason. Drawing them
@@ -1740,8 +2191,10 @@ already do.
 `paint_body` and `paint_station` in `crates/ship/src/world_paint.rs` are
 the pictures, by `BodyKind` and `StationKind`, drawn from ellipses and
 rectangles about a centre and a diameter, and used twice: at icon size on
-the map (pixels over the map scale) and hull-sized alongside, drawn **under**
-the hull so a docked ship sits inside its station's ring. Nothing in them
+the map (pixels over the map scale) and, for a body, hull-sized alongside,
+drawn **under** the hull as the ground. A station alongside is no longer
+its icon — it is a hull of its own, drawn by `world_paint::stations`; see
+"A station is a place". Nothing in them
 may paint `VOID` to cut a shape — the derelict's broken ring is short
 straight pieces, because a void bite painted over the deck was the first
 thing that went wrong. The map also rings whatever the helm is aimed at,
@@ -1771,3 +2224,532 @@ Two knock-ons for harnesses: `ship-check.mjs`'s `session()` appends
 own; and `flow-check.mjs` accepts the preset as it stands, because that is
 now the shortest path a player has to the world. `ship-layout.mjs given` is
 the picture.
+
+## The room's panels are one script, and the ship page has them too
+
+`web/crew.js` and `web/crew.css` are the crew's panels — the selected Bim's
+needs, health and diary, the agendas, the tray with the timetable, the work
+list and the management row, the fixture menus, and the tooltips everything
+hangs off — shared by the room (`index.html` + `bims.js`) and the ship
+(`ship.html` + `ship.js`). Both pages load `crew.js` **before** their own
+script (`async = false`, or two dynamically added scripts race) and call
+`crewHost({ wasm, player, crewCount })`; `scratchpad/stub.mjs` runs it
+first whenever the markup names it. The name tables the room's codes index
+— `CREW_NAMES`, `JOB_NAMES`, `MEMORY_LINES`, `CHAT_TOPICS`, `SPOT_NAMES`,
+the `HIT_` codes — live in it and nowhere else, so the collision checks
+above want a third comparison: a top-level name in `crew.js` must not be
+declared again in either page, at the top or inside `boot()`.
+
+What makes that possible is that **`ship.wasm` already exports every
+`bims_*`**: a `#[no_mangle]` in an rlib is exported from every cdylib that
+links it. They were dead — acting on the room crate's own static, which the
+ship page never initialises — until `bims::host_aboard` gave them a
+provider, which `ship_init` and `ship_simulate` point at
+`world.aboard.room`. Two rules that follow:
+
+- **The ship page must never call `bims_init`, `bims_update`,
+  `bims_resize` or `bims_view_*`.** The world steps the room and the ship's
+  camera draws it; a second clock is two simulations. `ship-check.mjs`
+  fails on the first two and the view three.
+- **Every `bims_*` coordinate is a room coordinate**, which aboard is a
+  design world unit. `ship_room_x`/`_y` are the canvas read back through
+  the ship's camera and heading — `Game::design_point_at`, the same
+  arithmetic `tile_at` floors — and `web/ship.js` converts *before* every
+  `bims_drag_*`, `bims_hit_at` and `bims_order_move`. The marquee is
+  therefore drawn on the deck and turns with the ship; that is the box the
+  room tests the crew against, not the one on the glass.
+
+`bims_crew()` goes through the same accessor: it used to read the room's
+own static so it could be asked before `bims_init`, and aboard that
+reported the classic room's two for a ship with one Bim, which was a trap
+in `bims_is_selected(1)` on the first paint. Anything else in
+`crates/game/src/lib.rs` that reaches `GAME` directly has the same bug
+waiting.
+
+The ship's design screen used to have a `<div id="work">` for its three
+columns; it is `#columns` now, because `#work` is the tray's table in
+`crew.css`. Two pages sharing a stylesheet share an id space — **and a class
+space**. `crew.css` styles `.what` bare (the 17-pixel `?` button), and the
+ship page's readouts used `class="what"` for their labels: "Docked" and
+the hover text were being squeezed into a box the size of a letter and
+clipped. They are `.named` now, the palette swatch is `.tint` (crew's
+`.swatch` is the timetable legend) and the settings sheet is
+`.settings-sheet`. `tray-check.mjs` reads every bare class rule out of
+`crew.css` and fails a page whose own `<style>` has a rule for the same
+class — that is the signature: two stylesheets over one element. Markup
+that carries crew's own component (the legend's `<i class="swatch">`) is
+fine and is not what it looks for.
+
+The ship page's `r` is two keys: the ghost's rotation in the design phase,
+recruit once `deck` exists. Escape shuts a fixture's menu if one is open;
+otherwise it stops aiming and opens the **settings sheet** (`#settings` in
+`web/ship.html`), and Escape or its button closes that. It no longer
+clears the selection — clicking empty deck does. The sheet is where the
+keys are explained, and the hint line under the readout is gone.
+`simulation-check.mjs` reads the sheet off the file (the stub keeps no
+markup text) and fails if any key `ship.js` handles — every `key === "x"`
+and the `"wasd"` set — has no `<kbd>` on it, so a new key needs a row.
+
+The hover readout is its own box, `#game-hover`, under `#game-readout`,
+and it hides itself (`:has(.what:empty)`) rather than sitting empty.
+
+## The ship is flown from the helm, and a post is not an order
+
+`World::can_command(slot)` is true only while that player's crew member is
+within `HELM_REACH` (a tile) of the first helm's use spot — `helm_spot()`,
+`at_the_helm(slot)` — and Confirm, Brake and Abort ask it; speed and
+trading do not. **Brake and Abort are one command** (`Command::Abort`,
+`net.stop()`) behind two buttons that are never both live: Brake for a
+ship `Travelling` and not already stopping (`ship_trip_aborting`), Abort
+for one `CastingOff` or `Undocking`. **Change target** is host-only — it
+clears the aim and opens the map, which is what a click on the map did
+already — and crosses no seam. Slot *i* is Bim *i*, the same pairing as the bunks. Two consequences:
+
+- **Every test and harness that confirms a trip has to put a Bim there
+  first.** `World::man_the_helm_for_probe(slot)` /
+  `ship_man_helm_for_probe(slot)` stand one at the seat without the walk;
+  `set_off` in `crates/world/src/tests.rs` does that and runs the departure
+  through. And it has to be done **again before a later Confirm**: the Bim
+  goes off about its errands — at 24x a short trip is an afternoon — and
+  `ship-check.mjs` and `simulation-check.mjs` both re-man the helm before
+  the second trip for exactly that reason. The page's own way is
+  `ship_order_helm()` (the **Take the helm** button) and `ship_at_helm(slot)`;
+  `aimAt` in `web/ship.js` refuses to aim from anywhere else.
+- **A post is a standing order, not a chain.** `Character::post` is where a
+  Bim has been told to stand; `Game::send_to` sets it (interrupting the
+  errand and walking there), `Game::walk_to` is the same walk *without* the
+  post, `return_to_post` walks back once whatever took the Bim away is
+  done, and `order_move` clears it. It holds the Bim still exactly as
+  `recruited` does. `return_to_post` only re-routes when the last route has
+  been walked to its end — "hands the Bim a fresh route every frame: it
+  never moves" is the trap it is written round — and `POST_SLACK` is how far
+  off the post counts as on it. `adopt` shifts a post and **the route in
+  progress** with the body: before it shifted the route, a Bim carried
+  between rooms mid-walk marched off to where its old waypoint used to be.
+
+## Leaving a station is three states, and arriving is one
+
+`ShipState` has `CastingOff`, `Undocking` and `Docking` beside the three it
+had, codes 3, 4 and 5; `world::data` has `UNDOCK_MINUTES`, `DOCK_MINUTES`
+and `CASTING_OFF_LIMIT`. A Confirm at a berth is refused straight away if
+`plan_from_here` fails, and otherwise begins `CastingOff` with the target in
+`Ship::pending`: every step `Aboard::send_everybody_home` posts the
+station's people ashore (`ashore`, the corridor inside the station's port)
+and walks the crew back (`gangway`, the deck inside the ship's), and
+`everybody_home` is asked against the **ship's** design, not the joined one.
+Then `unjoin_rooms`, and `Undocking` pushes the ship straight out along
+`way_out` — the station's `face()` — by `undock_distance()` (its own span),
+eased, heading untouched; `set_off` plans the trip from where that ends. A
+trip to a station is aimed at `hold_point`, the same spot the push-off ends
+at, and `finish` hands a docking plan to `Docking`: half of `DOCK_MINUTES`
+sliding and turning onto the berth's heading to the hold point, half
+straight in, then `dock_at`. Two things that bit:
+
+- **"Docked" is two questions now.** The painter and the airlock ask
+  `ShipState::alongside()` — docked *or* casting off, the rooms joined —
+  and trade, `ship_docked_at` and the station panel ask `Docked` alone.
+  `settle_residents` skips both. Anything new that matches `Docked` has to
+  pick one.
+- **A Confirm at a berth is not `Travelling` on the next step, and a trip to
+  a station is not `Docked` the step the plan ends.** `until_stopped` in the
+  world tests runs on through `Docking`; the harnesses wait on
+  `ship_world_state() === 2` before reading a plan and on `!== 5` before
+  reading a dock. A test that reads either the step after is reading the
+  wrong state, not finding a bug. `REFERENCE_CHECKSUM` moved with all of
+  this and with the second player standing at the helm in `reference_run`.
+- **Nobody is aboard at the start**, so a probe of the walk ashore has to
+  bring a resident onto the ship first — `bring_a_resident_aboard` in the
+  world tests — or the ship casts off in the same step and the probe
+  measures nothing.
+
+`ship-layout.mjs undocking | docking` are the pictures. The map keeps its
+zoom between visits (`Game::set_mode` no longer refits), and the crew and
+the station's people are told apart by `character::Uniform` — the coverall
+is the room's, the yoke and the hair are the person's; `Residents::open` is
+the one place the station's is put on.
+
+## A corner piece is a whole tile, and only the picture is a triangle
+
+`PartKind::DiagonalWall = 29` and `DiagonalOutsideWall = 30` are the wall and
+the outside wall cut across their tile at forty-five degrees. **Every rule
+treats them as the straight kind**: one object a tile, `blocks_movement`,
+`requires: Some(Layer::Structure)`, and the hull one `shields` — the
+exposure fill is four-neighbour, so a staircase of them touching corner to
+corner is as tight as a straight run, and nothing in `validate` or the room's
+nav knows the other half of the tile is empty. Do not "improve" that by
+letting the fill or a body through the open half; the fill would then leak
+through every chamfer and the nav would plan through a wall.
+
+Which half is solid is the part's `Rotation`, through one function:
+`parts::solid_corner` — `R0` is the **south-west** corner, then clockwise
+with `R`. The draw format grew its one new shape for this,
+`KIND_TRIANGLE = 2`: the bottom-left half of the box at `rot` nought, which
+is `R0`'s corner, so the triangle's turn *is* the part's turn. Both
+`draw.rs` files, both replay loops (`ship.js`, `bims.js`) and
+`ship-layout.mjs`'s SVG dumper know the kind; `hull::corner` is the one
+place the turn, the outward normal and the hypotenuse's angle are worked
+out, and every painter reads it — the designer's frame and object and ghost,
+the hull's diagonal plate and the shadow along the hypotenuse, `fittings`'
+diagonal bulkhead, and the frame triangle under a corner piece in both
+views. A second copy of that arithmetic is a chamfer filled on one side by
+one painter and bevelled on the other by another.
+
+Two things that follow:
+
+- **A chamfer's end tiles replace straight hull.** A cut of `c` from a
+  corner at `(x0, y0)` is void where `(x - x0) + (y - y0) < c`, corner pieces
+  where it equals `c`, and the ship beyond — so the run's two ends sit *on*
+  the skin rows, in place of the plating there. `ship-check.mjs`'s chamfer
+  section peels those two before laying the run, and the frame out of the
+  void corner as well, or the tiles left behind are exposed and the count
+  never reaches nought. `playtest_outline` in `fixture.rs` and `outline` in
+  `station.rs` are that rule written down.
+- **A diagonal drag is a staircase**, `editor::diagonal_line`: one tile a
+  step along the shorter of the two distances, every tile at the ghost's
+  turn. A removing drag is still a rectangle — it would take the deck beside
+  the run too — so the harness peels a run one tile at a time.
+
+## The station has rooms, and the layout is a walkability contract
+
+`station::build_layout` is a chamfered square with two three-tile corridors
+crossing in the middle — the west one runs in from the port — and four rooms
+off them: galley and mess north-west, quarters with the heads north-east,
+hydroponics south-west, engineering south-east. Every room has a **two-tile
+doorway** onto each corridor and every fixture stands with **two clear tiles
+in front of it**, because the room's nav inflates every solid by
+`BODY_MARGIN` (23) on a 52-unit tile and a one-tile gap leaves six units,
+which it will not walk. That rule is not only about corridors: **two solids
+one tile apart corner to corner leave a diagonal gap it will not squeeze
+through either**. The reactor at `(x0 + 3, y0)` and the tank at
+`(x0, y0 + 3)` did exactly that and cut the whole of engineering off — every
+tile in it read as free deck, `validate` was happy, and `send_for_probe`
+returned false for all of it. The tank is at `y0 + 4` for that reason.
+
+`a_station_s_rooms_can_all_be_walked_from_its_door` in
+`crates/world/src/tests.rs` is the contract: it builds the room's own `Nav`
+from the layout and asks it for a route from the deck inside the port to
+every use spot and every open deck tile, for every kind at three seeds. Run
+it after moving anything in the layout; `validate` will not tell you.
+
+Knock-ons: the layout is one plan sized by kind, and the seed decides only
+how many bays, shelves, tables and batteries — two seeds are two stations
+without being two buildings. Only the **first** bay, cold store and so on
+by id is the room's fixture; the rest are furniture the painter draws as
+blocks, which is why a second bay is a green square. And the deck just
+inside the port is corridor and stays open: `simulation-check.mjs` finds the
+station's deck by scanning to starboard from James.
+
+## The playtest ship is three compartments, and its numbers are pinned
+
+`playtest_ship()` is a chamfered bow with the bridge in it, the main deck,
+and engineering aft of a second bulkhead, with a two-tile doorway in each —
+the ASCII on `playtest_ship()`'s doc comment is the quickest way to see it,
+and it is hand-copied from a dump, so redraw it when the ship moves. The airlock is in the **starboard** skin at
+`(17, 11)`, so it docks at heading nought and the station is to starboard,
+which `simulation-check.mjs` relies on; the engine is at `(9, 16)` with the
+two stern ring tiles decked so its bell *is* the stern and nothing of the
+ship is aft of it. Moving anything moves `PLAYTEST_HASH` and
+`PLAYTEST_PARTS` in `fixture.rs`, the hob's tile in `ship-check.mjs` and
+`ship-layout.mjs given` (`(6, 7)` on the twenty grid, `(16, 17)` on the
+lobby's forty), and possibly `world::fixture::REFERENCE_CHECKSUM`.
+
+`ship-layout.mjs simulation` and `... station` are the pictures — `mode=1`,
+no ship built by hand, the playtest ship docked at its spawn an hour in.
+They are the only moments that show the fittings and the station's rooms at
+all, since every other game moment builds the flyer.
+
+## Fittings are the pictures the room has none of
+
+`crates/ship/src/fittings.rs` draws what `hull` and the room between them do
+not: the plain wall and the diagonal wall, the door (its leaves parted along
+the part's long side, in its own frame), the conduit, the helm, the
+shelf and the shower, in each part's own frame through `hull::Local` so a
+turned part is drawn turned. `world_paint::hull_tiles` asks `hull::part`
+first and `fittings::part` second and draws a block for whatever both
+refuse — the reactor, the tank, life support, the battery are still blocks.
+The design phase deliberately keeps its blocks (`paint.rs`'s module note);
+these are for the game's scale only.
+
+## A ship's doors are powered, and a lock is the only thing the nav sees
+
+`crates/game/src/door.rs` is a designed `Door` part aboard: a sliding door
+that **opens by itself** for any body within `REACH` and shuts `SHUT_AFTER`
+after the doorway is clear. The part is **1×2, like the airlock** — two
+tiles along the bulkhead, one deep, so one door is the whole of a two-tile
+doorway — and which way its leaves slide is its **rotation**, through
+`parts::door_slides_along_x` (the long side of the turned footprint: `R0`
+in a bulkhead running north–south, `R90` in one running east–west). It
+used to be one tile with the direction guessed off the neighbours, which
+is why a door standing in nothing was drawn one way and walked another;
+now `aboard.rs` and `fittings::door` read the same function, and
+`fittings::door` draws in the part's own frame through `hull::Local` so it
+turns with the part. A doorway in a layout is therefore **one `put`**:
+`playtest_ship` and `station::build_layout` both place the door at the
+run's first tile, `R90` along a row and `R0` down a column, and
+`PLAYTEST_PARTS` is 594. The bathroom door is worked by hand and is a
+solid when shut, with a grid per state in `Maps`; a ship has a door in
+every bulkhead and a grid per combination is not a thing, so **an unlocked
+door is never a solid** — the pathfinder plans through it open or shut, and
+the leaves are open by the time the body arrives. `Room::doors` holds them
+(`Layout::doors` from `aboard.rs`, which reads which way the leaves slide
+off the rotation), `Game::update` ticks them with everybody's position,
+and the room draws them (`Door` is in `drawn_by_room`).
+
+**Locked is the one state routing has to know about**, and it costs a
+rebuild of `maps`: `Game::refresh_maps` when `locked_doors().len()` changes,
+`refresh_blockers` when `shut_doors().len()` does. `Nav::new` now
+rasterises each solid over the cells its inflated box reaches instead of
+testing every cell against every solid — the same predicate, so the grids
+are identical, and a joined room's rebuild is milliseconds. A lock is
+ordered but the leaves **wait for anyone in the opening** (`IN_THE_WAY`),
+and nav treats the door as solid from the order, so a route planned after
+the click already goes round.
+
+The player's four words are the bathroom door's — `door::Order` Open (hold),
+Close (let go), Lock, Unlock — and each is an errand through
+`Switch::Door(index, order)` that walks James to the panel
+(`Door::station`, a `STAND_OFF` out of the opening on his side). The host
+asks `bims_hit_door()` after `bims_hit_at` said `HIT_SHIP_DOOR = 9`; the
+readout's `SPOT_SHIP_DOOR = 17` carries its state through
+`bims_ship_door_at(x, y)`. `a_locked_door_is_a_wall_and_an_unlocked_one_is_not`
+in `crates/world/src/tests.rs` pins the routing half and
+`simulation-check.mjs`'s door section the menu half. Two things that bit:
+
+- **The camera follows James.** A pixel a harness found a door at is
+  stale once he has walked to its panel — `findDoor` in the section looks
+  again, by asking the room what is under each tile, not by reusing pixels.
+- **A station's room kept open while docked draws no doors**
+  (`Game::set_doors_drawn(false)` in `World::dock_at`). The joined room has
+  the same doors with the people going through them, and two pictures of
+  one door would be a door in two states.
+
+## The bay is six tiles, and which side it is worked from is data
+
+`PartKind::HydroBay` is `(6, 1)` with six use spots along its north side,
+one a tray; the room's `Bay` already had `SPOTS = 6` trays, so each tile is
+one of them. `Bay::at(frame, side)` lays the trays along the long axis and
+stands the Bim on `side` — `Layout::bay_side`, which `aboard.rs` reads off
+the part's first use spot — so a bay turned to `R90` or `R270` is six trays
+down and worked from the east or the west, rather than "used from the wrong
+side" like the rest. The pictures still grow plants upwards in every tray.
+
+**The side is which edge of the frame the spot lies beyond, never which
+way it is off the centre.** The first spot is at the *end* of the run, and
+measured from the middle of six tiles it reads as off the end — which laid
+the trays *across* the bay, six strips one tile long, with the Bim working
+them from the west. `the_bay_aboard_is_a_tray_a_tile_worked_from_the_spots_side`
+in `crates/world/src/tests.rs` pins a tray a tile for a bay lying and one
+standing, through `Bay::station`. Fixing it moved where the Bim stands to
+tend, which re-rolled the solo session in `ship-check.mjs` enough that the
+crew member was off the helm at the redirect; the harness now takes the
+helm again before it, the page's way.
+
+Laying a run of six is where the corner-to-corner rule bites hardest, and
+`a_station_s_rooms_can_all_be_walked_from_its_door` found both cases in one
+afternoon: a run ending diagonally against the locker pinched the locker's
+spot, and a run two tiles from the chamfer's corner piece — one tile
+between them — left the whole strip under it as deck nobody could reach.
+The station's runs start three tiles in from the west wall and stop three
+rows off the south one, and the locker went to the west wall.
+
+`nav_map_of_a_station` beside that test is `#[ignore]`d on purpose: it
+prints the nav grid of one station as a digit per tile, and it is the
+first thing to run when the walkability test names a tile that looks fine.
+
+## The items panel reads two sources, and its icons are a third table
+
+`#items` on the ship page — left, under the agendas — is a row a resource
+with an icon and a count, grouped by `ship_storage_of`. `buildItems` in
+`web/ship.js` builds it off `ship_resource_count()`, and the icons are CSS
+rules in `web/ship.html`, `#items .icon[data-resource="n"]`, one a
+`ResourceId` — a new resource wants one there as well as a `RESOURCE_NAMES`
+entry, and `simulation-check.mjs` reads the file and fails on a missing one
+(the row still appears, with a bare slot).
+
+The counts are not all `ship_cargo`. The cold store aboard is the room's
+(`bims_store_veg`/`_tofu`): stocked off the manifest when the world opens
+and at every dock, and what is eaten and grown in between never goes back
+on `ship_cargo`. `ROOM_HELD` in `ship.js` is which resources read the room,
+because that is what the crew can eat; the station panel beside it reads
+the manifest, so the two can disagree about vegetables while docked. That
+is the manifest gap in `crates/world/src/crew.rs`'s module note showing,
+not the panel. The `?` on the panel's corner is wrapped in `.explains`
+rather than positioned by `.what` — that class is crew.css's, and a rule
+for it here fails `tray-check.mjs`.
+
+## Stew for the store is a third count, a third target, and the cook row's
+
+`Room::stew` is pots of stew on the shelf, beside `veg` and `tofu`, and
+`manager::Stock` is the three targets — `Veg`, `Tofu`, `Stew`, codes 0–2,
+through `bims_target(which)`/`bims_set_target(which, n)`. The food-units
+dial and its 2:1 split are gone: `bims_food_target`, `bims_target_veg` and
+friends no longer exist, and the management tab has three inputs
+(`#veg-target`, `#tofu-target`, `#stew-target`, in `#keeps`) on both pages.
+**The stew target starts at nought** on purpose: a default above it would
+have the crew cook the store down from the first morning and re-roll every
+probe that pins where they stand.
+
+Two chains in `task.rs` hang off it, both sharing the meal chain's steps
+where they can:
+
+- **`Kind::Batch`** is the cook row's stew errand and the hob menu's "Cook a
+  stew for the store" (`bims_stock_stew`, not `bims_make_stew`, which is
+  the table stew). One vegetable, then one block of tofu, each through
+  the fridge–board–knife loop — `laps(kind)` is what says twice, and
+  `TakeVegetable` picks the crop off `chopped` — then the pot, and instead
+  of a plate `PackStew` empties the pot into a tub (`Held::Stew`) and
+  `CarryStewToStore … StowStew` puts it away. The store's door is
+  `OpenStoreForStew`/`ShutStoreOnStew`, **not** `OpenFridge`/`CloseFridge`:
+  the chain has already been through those on the way to the board, and a
+  step that appears twice in one chain is one `rewind` and `progress_of`
+  cannot tell apart.
+- **`Kind::Reheat`** is what a hungry Bim does when `room.stew > 0`:
+  `make_food` tries leftovers, then the shelf, then the knife. `TakeStew`
+  takes the count down as the tub leaves the shelf, `TipStewIntoPot`
+  fills the pot most of the way to cooked, and from `TurnStoveOn` on it is
+  the meal chain.
+
+A tub in the hands is banked like a harvest — `let_go(.., for_good, ..)`
+puts it back on the shelf only when the chain is given up for good, since
+a suspended chain keeps it on `Saved.main`, and `take_crew` asks
+`Saved::holds_stew()`. **There is no stew row on the work list**: stew for
+the store is `Job::Cook`'s, beside a meal — `work_on_offer` offers Cook
+while the Bim is hungry *or* `wants_stew()` (short of the target **and**
+`can_make_stew()`, so a target with nothing to make it of is not a job that
+comes round every frame), and `do_some_work` has the hungry one eat first
+and only a Bim that is not cook for the shelf. That means the row being on
+offer says nothing about which half wants it: `scratchpad/stew.rs` reads
+`wants_stew_for_probe()` for the shelf's half, because a Bim that happens
+to be hungry when the probe looks would otherwise read as the shelf
+asking. It is the probe: target → shelf asks → stew on the shelf → stops
+at the target → a hungry Bim warms one up, measured from the moment the
+warming begins, since the Bim may be halfway through a pot *for* the shelf
+when hunger bites and finishes that first. Job codes 15 and 16
+(`JOB_STEW`, `JOB_REHEAT`) are in `JOB_NAMES` and `ACTIVITY`; the ship's
+items panel lists it under `MADE_ABOARD` with its own `data-made="stew"`
+icon rule, because it is not a `ResourceId` and the manifest has never
+heard of it.
+
+The management tab's three targets are a **Target column** of the `#stock`
+table, one input in the row of the thing it is a target for
+(`targetInput` in `web/crew.js`; the ids `veg-target`/`tofu-target`/
+`stew-target` and the cells `#veg-control`… survive, since the harness
+types into them), and the one explanation is a `?` on the column heading.
+The `#keeps` row is gone. The table has three rows — vegetables, tofu and
+stew, all in the cold store; the pot on the hob has no row, a meal in the
+making being the agenda's business. A target cell rings the bay or the
+hob while its row rings the cold store, and `pointerenter`/`leave` do not
+bubble, so `points(el, spot, back)` takes a third argument: what to ring
+when the pointer leaves — the row's spot for a cell inside a row, nothing
+otherwise. Without it, leaving the cell for the row put the ring out while
+the row was still under the pointer, and `smoke.mjs` says so.
+
+Never pipe `rustc` into `head`: `head` closing the pipe kills the compiler
+with SIGPIPE before it writes the binary, and the "no such file" that
+follows looks like a compile error that is not there.
+
+## The helm is a job, and the room only knows it through the world
+
+`Job::Helm` — "Controlling the ship", the sixth row — is on offer while
+`Game::helm` is `Some` and nobody is *posted* within `HELM_SLACK` of the
+seat, by the job or by the player's own Take the helm alike. The room has
+no idea where the helm is or whether the ship wants anybody at it: the
+world says, **every step**, through `Aboard::set_helm` → `Game::set_helm`
+in stage 5 — the seat while the ship is anywhere but `Docked` or
+`CastingOff` (the crew are being walked home then), `None` otherwise. The
+classic room never gets one and never offers the row. Whoever takes the
+job is `send_to` the seat — a post, exactly like the button — and recorded
+as `helmsman`, so that `set_helm(None)` at the berth lifts *that* post and
+no other; a helmsman ordered elsewhere loses the post and the record with
+it, and the job comes round for whoever is free. `SPOT_HELM = 18` exists
+only so the row can ring the helm's footprint (`Layout::helm`, off the
+first `Helm` part); `Room::spot` never returns it, the ship's readout names
+the part itself. `under_way_the_helm_is_a_job_and_somebody_takes_it` in
+`crates/world/src/tests.rs` pins it — and note it has to `select_group(1)`
+before `order_move`, which refuses an unselected James.
+
+## Washing is its own need, and it is not Cleanliness
+
+`Need::Hygiene` — "Washing" on the panel, index 5, with a trigger row of
+its own in `TRIGGER_NEEDS` — drains on the waking day like food and comes
+round about once a day (`SHOWERS_PER_DAY`, `SHOWER_COST`), and the errand
+is `Kind::Shower`: `GoToShower`, then `Shower` for `SHOWER_MINUTES` under
+`Exclusive::Shower`, restoring the need and `ch.wash(1.0)` — the whole of
+the Bim's own filth off, which the basin never managed. `JOB_SHOWER = 17`.
+
+It is deliberately **not** a clock on `Need::Cleanliness`. That one is the
+*deck* — it follows the mess round the Bim — and the stages of being sick
+in `filth::Ordeal` hang off it reaching nothing, so a time drain on it
+would have a crew with nowhere to wash falling ill on a spotless deck.
+The classic room has no shower (`Room::shower` is `None`;
+`Layout::shower` comes off the first `Shower` part's use spot aboard), and
+there a Bim simply goes on wanting one: `take_shower` refuses, and nothing
+else comes of it. `first_station` returns `None` for a chain with nowhere
+to go and `can_begin` reads that as "starts on the spot", so **`take_shower`
+asks `room.shower.is_some()` itself** — any other errand whose station is
+optional needs the same guard.
+`a_bim_aboard_takes_a_shower_when_a_day_s_grime_has_caught_up_with_it` in
+the world tests empties the need by hand rather than waiting a day for it.
+
+## A meal is judged by the mess round the hob, not by the stains it makes
+
+`Game::judge_the_food` runs the frame the pot finishes cooking
+(`Room::update` flags it) or a bowl is filled (`FillBowl` calls
+`made_a_bowl`): every tile within `GALLEY_REACH` (two) of the hob at or
+below `filth::SPOILS_FOOD` is one roll at `BAD_FOOD_PER_DIRTY_TILE` (a
+fifth), one bad roll is `Room::food_bad`, and a Bim `restoring`
+`Need::Food` off a bad galley is `poison`ed — `Bim::poisoned_for`, two
+days, the restroom drain trebled through `Needs::update`'s `purging` and
+the hour of holding on skipped in `Ordeal::update`, so the need reaching
+nothing *is* the accident. `What::FoodPoisoning = 31`, `bims_poisoning`
+is the hours left for the health panel's `poisoning` line. A bowl is
+judged because it is made in the same galley, and a reheated stew is
+judged again because it is the hob it is warmed on — the shelf keeps no
+record of a bad tub. `scratchpad/poison.rs` is the probe.
+
+**`SPOILS_FOOD` is the wetting line, not `WORTH_SWEEPING`**, and that is
+the trap: the cook's own chopping flicks a stain or two onto the deck on
+the way (`JOB_MESSES`, `GRIME_COST`), a single stain is already past
+"worth sweeping", and judged by that the galley poisoned the cook every
+meal on a deck nobody had touched — `diary.rs`'s quiet four days came
+back a page of accidents and `crew.rs` lost Kate. A clean galley draws
+nothing from the RNG, so a clean run is unchanged; a fouled one re-rolls
+every seed from the first meal.
+
+## Aboard, a fixture is drawn inside its tile
+
+The room's pictures were drawn at the classic room's offsets, and on a
+ship's one-tile part they ran out of the tile: the pot overhung its
+neighbours, the fridge's shelves ran out through its side, the chair was
+wider than its tile and the dishwasher was only its door. The rule now is
+that everything the room draws for a part is laid out **off the part's
+rect**, not at fixed offsets: `Room::hob_scale` fits the burner inside a
+one-tile hob and the pot is `POT_SIZE` of that; the fridge's shelves and
+stock are placed in fractions of its interior; `CHAIR_SIZE` is 48×42 with
+the backrest a unit inside the tile; and `Dishwasher::body` is the whole
+tile aboard (`None` in the classic room, where the counter is the body).
+`ship-layout.mjs simulation` rendered to PNG is how to check — there is no
+assertion that can see a picture spill.
+
+The shower has a menu, like the pan: `HIT_SHOWER = 10` → "Take a shower"
+(`bims_can_shower`, `bims_take_shower`, `bims_shower_held_by`), and
+`SPOT_SHOWER = 21` names it in the readout and rings it. The simulation
+harness has a section for it. Codes 19 and 20 are the bench and the suit
+locker, added beside these; `SPOT_NAMES` in `crew.js` is indexed by code,
+so every one of them needs its entry there in order, whoever adds it.
+
+## The ship page's left column is in a fixed order
+
+`#left-stack` holds, top down: `#items`, `#game-readout`, `#game-hover`,
+`#agendas`. The agendas are the only thing there whose height moves, so
+they go last; `#game-hover` keeps its height (`visibility: hidden`, not
+`display: none`) when there is nothing under the pointer, or the agendas
+would jump every time the pointer crossed a part. Anything new on the
+left goes into the stack above the agendas, not at an absolute position.
+
+## The hob is one burner, left of centre
+
+`Room::burner` is where the pot stands and the only ring that lights. It
+sits at `centre - 30`, where the left of the old pair was, because the
+cooking station is measured off `pot_pos` and centring it would move where
+the Bim stands and re-roll every probe seed for a picture.

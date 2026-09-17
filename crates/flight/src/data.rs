@@ -4,7 +4,7 @@
 //! are placeholders **against a scenario** rather than against nothing, and
 //! that is the only thing that makes them checkable:
 //!
-//! - [`FUEL_PER_ENGINE_MINUTE`] is set so that the flyable fixture
+//! - [`FUEL_PER_THRUST_MINUTE`] is set so that the flyable fixture
 //!   (`shipdesign::fixture::flyer`) can cross the world generator's longest
 //!   reference hop on one full tank and still have something left. A ship that
 //!   cannot reach the far side of its own system is a ship with nowhere to go.
@@ -38,13 +38,19 @@ pub const ARRIVAL_RADIUS_BODY: f64 = 15_000.0;
 /// have to special-case anyway.
 pub const ALIGN_TOLERANCE: f64 = 0.01;
 
-/// Units of fuel one burning engine gets through in a game minute.
+/// Units of fuel one unit of thrust gets through in a game minute.
 ///
-/// See the module note: this is chosen against the longest reference hop, not
-/// out of the air. Engines that are not burning — during an align, during a
-/// flip, while holding, while docked — use nothing at all, and thrusters use
-/// nothing ever.
-pub const FUEL_PER_ENGINE_MINUTE: f64 = 0.0015;
+/// Per **thrust**, not per engine: there are two sizes of main engine, and
+/// one that pushed five times as hard for the same fuel would be the only
+/// one worth buying. Written as the reference engine's bill over its thrust,
+/// so `shipdesign::PartKind::Engine` — 2 000 of thrust — burns exactly the
+/// 0.0015 a minute it always did and the heavy engine five times that.
+///
+/// See the module note: the reference bill is chosen against the longest
+/// reference hop, not out of the air. Engines that are not burning — during
+/// an align, during a flip, while holding, while docked — use nothing at
+/// all, and thrusters use nothing ever.
+pub const FUEL_PER_THRUST_MINUTE: f64 = 0.0015 / 2_000.0;
 
 /// The floor under a ship's moment of inertia.
 ///

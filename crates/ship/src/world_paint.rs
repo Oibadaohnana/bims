@@ -38,6 +38,7 @@
 
 use flight::Phase;
 use shipdesign::parts::{Layer, TILE};
+use shipdesign::{Grid, ShipDesign};
 use world::ShipState;
 use worldgen::math::{DVec2, dvec2};
 use worldgen::{BodyKind, Node, StationKind};
@@ -46,7 +47,7 @@ use crate::draw::{Color, DrawList};
 use crate::game::{Game, ViewMode};
 use crate::hull;
 use crate::paint::PART_COLORS;
-use crate::starfield::{FIELD, Starfield};
+use crate::starfield::FIELD;
 
 const VOID: Color = Color::rgb(0.02, 0.03, 0.04);
 const FRAME: Color = Color::rgb(0.10, 0.11, 0.13);
@@ -115,13 +116,14 @@ fn paint_ship(game: &Game, list: &mut DrawList) {
     list.rect(0.0, 0.0, half_w * 3.0, half_h * 3.0, 0.0, VOID);
 
     // Everything out there, drawn square to the window and then turned with
-    // the camera — which is not at all unless the view is head up.
+    // the camera — which is not at all unless the view is head up. The
+    // planet the ship is at is the ground under it; the stations are drawn
+    // where they are, already turned, by `stations`.
     let out_there = list.len();
     starfield(game, list);
-    // Whatever the ship is alongside, under the hull: a station the ship is
-    // docked to has the hull inside its ring, and a planet is the ground.
     local_node(game, list);
     list.turn_from(out_there, game.camera_turn() as f32);
+    stations(game, list);
 
     // The ship, drawn in its own frame — design units about the design's
     // origin, the grid it was laid out in — and turned with it at the end.
@@ -140,51 +142,17 @@ fn paint_ship(game: &Game, list: &mut DrawList) {
     hull::shadow(&mut ship, design, &grid);
     hull::exhaust(&mut ship, design, &grid, firing, centre, game.frame);
 
-    // Frame, then deck, then what is standing on them — the same order the
-    // design phase paints in, so the two views read as one ship. The parts
-    // the room aboard draws for itself — the galley, the heads, the table,
-    // the bunks, the bay, the locker — are left to it: it has the pictures.
-    // The hull's own working parts have pictures of their own in `hull`.
+    // The parts the room aboard draws for itself — the galley, the heads,
+    // the table, the bunks, the bay, the locker — are left to it: it has the
+    // pictures. The airlock is drawn open while the ship is docked, because
+    // it is mated to the station's and a way through.
     let rooms = bims::aboard::drawn_by_room(design);
-    let tile = TILE as f32;
-    for layer in [
-        Layer::Structure,
-        Layer::Floor,
-        Layer::Object,
-        Layer::Utility,
-    ] {
-        for part in &design.parts {
-            if part.layer() != layer || rooms.contains(&part.id) {
-                continue;
-            }
-            if layer == Layer::Object && hull::part(&mut ship, part, &grid, firing) {
-                continue;
-            }
-            let color = match layer {
-                Layer::Structure => FRAME,
-                Layer::Floor => DECK,
-                _ => PART_COLORS[part.kind as usize],
-            };
-            let inset = if layer == Layer::Object { 3.0 } else { 0.0 };
-            for (x, y) in part.tiles() {
-                let m = tile_middle(x, y);
-                ship.push(
-                    crate::draw::KIND_RECT,
-                    m.x as f32,
-                    m.y as f32,
-                    tile - inset,
-                    tile - inset,
-                    0.0,
-                    if layer == Layer::Object { 4.0 } else { 0.0 },
-                    0.0,
-                    color,
-                );
-            }
-        }
-    }
+    let mated = game.mated_airlock().map(|id| (id, game.airlock_ajar));
+    hull_tiles(&mut ship, design, &grid, firing, &rooms, mated);
     hull::lights(&mut ship, design, &grid, game.frame);
 
     // The tile under the pointer, rung. Part of the ship, so turned with it.
+    let tile = TILE as f32;
     if let Some((x, y)) = game.hover
         && design.holds((x, y))
     {
@@ -211,23 +179,194 @@ fn paint_ship(game: &Game, list: &mut DrawList) {
     // the ship's picture rather than in it because it is a separate buffer;
     // over the lights and the hover ring too, which touches nothing the
     // room draws.
-    list.append_turned(game.world.aboard.room.shapes(), centre, turn);
+    // The room's picture is in the room's own units, which are the ship's
+    // shifted by the ship's offset into them — nothing while the ship is
+    // on its own, the join's shift while it is docked.
+    let offset = game.world.aboard.offset;
+    let room_centre = (centre.0 + offset.x as f32, centre.1 + offset.y as f32);
+    list.append_turned(game.world.aboard.room.shapes(), room_centre, turn);
+}
+
+/// Frame, then deck, then what is standing on them, then what runs through
+/// them — the same order the design phase paints in, so the two views read
+/// as one ship. `skip` is what somebody else draws: the parts the room has
+/// pictures for. The hull's own working parts have pictures in `hull`;
+/// everything else is its colour, a tile at a time.
+fn hull_tiles(
+    list: &mut DrawList,
+    design: &ShipDesign,
+    grid: &Grid,
+    firing: hull::Firing,
+    skip: &[u32],
+    open_airlock: Option<(u32, f32)>,
+) {
+    let tile = TILE as f32;
+    for layer in [
+        Layer::Structure,
+        Layer::Floor,
+        Layer::Object,
+        Layer::Utility,
+    ] {
+        for part in &design.parts {
+            if part.layer() != layer || skip.contains(&part.id) {
+                continue;
+            }
+            if layer == Layer::Object && hull::part(list, part, grid, firing, open_airlock) {
+                continue;
+            }
+            if crate::fittings::part(list, part) {
+                continue;
+            }
+            let color = match layer {
+                Layer::Structure => FRAME,
+                Layer::Floor => DECK,
+                _ => PART_COLORS[part.kind as usize],
+            };
+            let inset = if layer == Layer::Object { 3.0 } else { 0.0 };
+            for (x, y) in part.tiles() {
+                let m = tile_middle(x, y);
+                // The frame under a corner piece is the same half of the
+                // tile, as in the design phase: the edge of the ship is the
+                // chamfer, not the square behind it.
+                if layer == Layer::Structure
+                    && let Some(rotation) = hull::diagonal_at(design, grid, (x, y))
+                {
+                    let c = hull::corner(rotation);
+                    list.triangle(m.x as f32, m.y as f32, tile, tile, c.rot, color);
+                    continue;
+                }
+                list.push(
+                    crate::draw::KIND_RECT,
+                    m.x as f32,
+                    m.y as f32,
+                    tile - inset,
+                    tile - inset,
+                    0.0,
+                    if layer == Layer::Object { 4.0 } else { 0.0 },
+                    0.0,
+                    color,
+                );
+            }
+        }
+    }
+}
+
+/// Every station near enough to be in the picture, drawn where it is and
+/// as big as it is, so that one **approaches** rather than appears.
+///
+/// Three distances, three pictures. Out to `STATION_VISIBLE` a station is a
+/// plate the size of its hull with its icon on it — a shape getting nearer,
+/// and nothing to simulate. Inside the local frame's radius it is its
+/// hull, tile by tile, the parts inside it as their colours. And while the
+/// ship is within the residents' range the room aboard it is open, so the
+/// fixtures are the room's pictures and the people living there walk about
+/// between them — the same way the ship's own room is drawn over its hull.
+///
+/// A station does not turn, so its picture is turned by the camera alone;
+/// the ship's own airlock is mated to the station's while docked, and both
+/// are drawn open.
+fn stations(game: &Game, list: &mut DrawList) {
+    let here = game.world.ship.position();
+    let turn = game.camera_turn() as f32;
+    let docked = game.world.ship.state.alongside();
+    for station in &game.world.stations {
+        let clearance = station.clearance(here);
+        if clearance > world::data::STATION_VISIBLE {
+            continue;
+        }
+        // Where the station's middle lands: system offset, y flipped, then
+        // turned with the camera.
+        let offset = station.centre().sub(here);
+        let at = crate::game::turned(offset.x as f32, -offset.y as f32, turn);
+        let side = station.design.build_area as f32 * TILE as f32;
+        let middle = (side / 2.0, side / 2.0);
+
+        if clearance > world::data::LOCAL_RADIUS_STATION {
+            let hull = (station.design.build_area as f32 - 2.0) * TILE as f32;
+            list.push(
+                crate::draw::KIND_RECT,
+                at.0,
+                at.1,
+                hull,
+                hull,
+                turn,
+                8.0,
+                0.0,
+                hull::HULL_FAR,
+            );
+            paint_station(list, at.0, at.1, hull * 0.8, station.kind, 6.0);
+            continue;
+        }
+
+        let grid = station.design.grid();
+        // The station's door opens with the ship's: they are one passage.
+        let open = docked
+            .filter(|&id| id == station.id)
+            .and(station.port().map(|p| (p.part_id, game.airlock_ajar)));
+        let residents = game
+            .world
+            .residents
+            .as_ref()
+            .filter(|r| r.station == station.id);
+        let skip: Vec<u32> = match residents {
+            Some(_) => bims::aboard::drawn_by_room(&station.design),
+            None => Vec::new(),
+        };
+        let mut picture = DrawList::default();
+        hull::shadow(&mut picture, &station.design, &grid);
+        hull_tiles(
+            &mut picture,
+            &station.design,
+            &grid,
+            hull::Firing::NONE,
+            &skip,
+            open,
+        );
+        hull::lights(&mut picture, &station.design, &grid, game.frame);
+        list.append_turned_at(picture.shapes(), middle, turn, at);
+        if let Some(residents) = residents {
+            list.append_turned_at(residents.aboard.room.shapes(), middle, turn, at);
+        }
+    }
+}
+
+/// Where one of a station's residents lands in the camera's units, for the
+/// host's name over their head: the same turn and shift the room's picture
+/// went through.
+pub fn resident_on_screen(game: &Game, who: u32) -> (f32, f32) {
+    // Docked, the residents are in the ship's room, after the crew, and
+    // land the way the crew do.
+    if game.world.aboard.is_joined() {
+        return crew_on_screen(game, game.world.aboard.crew_count() + who);
+    }
+    let Some(residents) = &game.world.residents else {
+        return (0.0, 0.0);
+    };
+    let Some(station) = game.world.station(residents.station) else {
+        return (0.0, 0.0);
+    };
+    let turn = game.camera_turn();
+    let side = station.design.build_area as f64 * TILE as f64;
+    let (x, y) = on_screen(
+        residents.aboard.position(who),
+        dvec2(side / 2.0, side / 2.0),
+        turn,
+    );
+    let offset = station.centre().sub(game.world.ship.position());
+    let at = crate::game::turned(offset.x as f32, -offset.y as f32, turn as f32);
+    (x + at.0, y + at.1)
 }
 
 /// The three parallax layers.
 ///
 /// In screen pixels, turned back into camera units on the way out — a
 /// backdrop covers the window rather than the world, so it does not tile four
-/// hundred times over when the view is zoomed out.
+/// hundred times over when the view is zoomed out. How far each layer has
+/// streamed is the field's own clock (`Starfield::advance`, from
+/// `ship_render`); this only draws it where it has got to.
 fn starfield(game: &Game, list: &mut DrawList) {
     let camera = &game.ship_view;
     let scale = camera.scale().max(1e-9);
-    let velocity = game
-        .world
-        .trip_state()
-        .map(|state| state.velocity)
-        .unwrap_or(DVec2::ZERO);
-    let scroll = Starfield::scroll(game.world.ship.position(), velocity);
 
     // The screen pixels to cover. The window, unless the field is about to be
     // turned round the ship: then a square about the ship's own pixel wide
@@ -251,7 +390,7 @@ fn starfield(game: &Game, list: &mut DrawList) {
     let down = ((y1 - y0) / FIELD).ceil() as i32 + 1;
 
     for (i, layer) in game.stars.layers.iter().enumerate() {
-        let slide = scroll.scale(Starfield::factor(i));
+        let slide = game.stars.slid[i];
         for speck in layer {
             let base = dvec2(
                 (speck.at.x + slide.x).rem_euclid(FIELD),
@@ -282,11 +421,12 @@ fn starfield(game: &Game, list: &mut DrawList) {
     }
 }
 
-/// Whatever the ship is alongside, drawn where it actually is.
+/// The body the ship is alongside, drawn where it actually is: the ground.
 ///
-/// **Never turned.** A station does not tip over because the ship it is
-/// holding has rolled, and the moment it did the picture would stop saying
-/// anything about which way anybody was pointing.
+/// **Never turned.** A planet does not tip over because the ship holding
+/// beside it has rolled. Stations used to be drawn here too, a ring the
+/// hull sat inside; they are places now, with hulls of their own, and
+/// [`stations`] draws every one in range where it stands.
 fn local_node(game: &Game, list: &mut DrawList) {
     let Some(node) = game.world.ship.frame.node() else {
         return;
@@ -301,11 +441,7 @@ fn local_node(game: &Game, list: &mut DrawList) {
     // the ring of, and a planet is something the ship is a speck against.
     let hull = game.world.ship.design.build_area as f32 * TILE as f32;
     match node {
-        Node::Station(id) => {
-            if let Some(station) = game.world.system.station(id) {
-                paint_station(list, x, y, hull * 1.6, station.kind, 6.0);
-            }
-        }
+        Node::Station(_) => {}
         Node::Body(id) => {
             if let Some(body) = game.world.system.body(id) {
                 paint_body(list, x, y, hull * 4.0, body.kind, 6.0);

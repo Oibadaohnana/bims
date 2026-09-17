@@ -112,8 +112,12 @@ export function buildShip(tools) {
   put(BASIN, 14, 3);
   put(BROOM_LOCKER, 16, 3);
   put(TABLE, 4, 6);
-  put(HYDRO_BAY, 10, 10);
-  put(ENGINE, 7, 13);
+  put(HYDRO_BAY, 3, 10);
+  // The engine in the stern with its bell over the edge: an engine fires
+  // aft and has to fire into space, so two tiles of stern plating come off
+  // (the deck under them stays) and the engine stands there.
+  drag(7, 18, 8, 18, 2);
+  put(ENGINE, 7, 16);
   put(BUNK, 14, 8);
   put(CHAIR, 4, 7);
 }
@@ -135,7 +139,11 @@ export function buildFlyer(tools) {
     drag(x, y, x, y, 2);
     put(kind, x, y);
   }
-  put(AIRLOCK, 16, 8);
+  // The airlock goes in the skin — a ship docks by an airlock that opens
+  // onto space, and one on the deck is a door to nowhere. Peel two tiles
+  // of plating; the deck under them stays, and the airlock stands on it.
+  drag(18, 11, 18, 12, 2);
+  put(AIRLOCK, 18, 11);
   put(FUEL_TANK, 2, 12);
   deal(VEGETABLE, 10, true);
   deal(TOFU, 10, true);

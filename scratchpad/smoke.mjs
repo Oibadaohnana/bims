@@ -106,10 +106,10 @@ if (hobAt) {
 
 const thresholds = byId.get("thresholds");
 const rows = thresholds.querySelectorAll(".trigger");
-check("two trigger rows", rows.length === 2, String(rows.length));
+check("three trigger rows", rows.length === 3, String(rows.length));
 
 const names = rows.map((r) => r.querySelector(".name").textContent);
-check("the rows are Rest and Food", names.join(",") === "Rest,Food", names.join(","));
+check("the rows are Rest, Food and Washing", names.join(",") === "Rest,Food,Washing", names.join(","));
 
 const restRow = rows[0];
 const restBox = restRow.querySelector("input");
@@ -175,12 +175,17 @@ for (const r of stockTr) {
   );
 }
 
-const foodControl = byId.get("food-control");
-check("the food target points too", foodControl.className.split(/\s+/).includes("points"));
+// The three target cells point too: the bay for what it grows, the hob for
+// the stew it cooks.
+const keeps = ["veg", "tofu", "stew"].map((key) => byId.get(`${key}-control`));
+for (const control of keeps) {
+  check(`#${control.id} points at something`, control.className.split(/\s+/).includes("points"), control.id);
+}
+const foodControl = keeps[0];
 
 // Rest on each row and watch the ring follow. Codes are from src/room.rs:
 // 5 the cold store, 6 the hob, 11 the bay.
-const wants = [5, 5, 6];
+const wants = [5, 5, 5];
 for (let i = 0; i < stockTr.length; i++) {
   stockTr[i].dispatch("pointerenter", {});
   step(1);
@@ -192,7 +197,20 @@ for (let i = 0; i < stockTr.length; i++) {
 
 foodControl.dispatch("pointerenter", {});
 step(1);
-check("the food target rings the bay", lastHighlight() === 11, String(lastHighlight()));
+check("the vegetable target rings the bay", lastHighlight() === 11, String(lastHighlight()));
+foodControl.dispatch("pointerleave", {});
+step(1);
+keeps[2].dispatch("pointerenter", {});
+step(1);
+check("the stew target rings the hob", lastHighlight() === 6, String(lastHighlight()));
+// The cell sits in the shelf stew's row, and leaving it is still being on
+// the row: the cold store's ring comes back rather than none.
+keeps[2].dispatch("pointerleave", {});
+step(1);
+check("and leaving it puts the row's ring back", lastHighlight() === 5, String(lastHighlight()));
+stockTr[2].dispatch("pointerleave", {});
+step(1);
+check("until the row is left too", lastHighlight() === 0, String(lastHighlight()));
 
 // Switching tab takes the row out from under the pointer, and no pointerleave
 // follows it. The ring has to go anyway.
@@ -405,6 +423,45 @@ check(
   lines[0]?.textContent,
 );
 console.log(`       first diary line: ${lines[0]?.textContent}`);
+
+// --- stew for the store ---------------------------------------------------
+//
+// The third target is typed into the management tab like the other two, and
+// what it starts is the whole loop: cooking on offer, a Bim cooking one from
+// a vegetable and a block of tofu, a tub on the shelf. The stock table has a
+// row for it and the work list's cooking row covers it. The mechanics are `scratchpad/stew.rs`'s;
+// this is that the page reaches them.
+wasm.bims_set_autonomous(1);
+const stewTarget = byId.get("stew-target");
+check("the stew target starts at nothing", stewTarget.value === "0", stewTarget.value);
+stewTarget.value = "2";
+stewTarget.dispatch("input", {});
+check("typing a stew target sets it", wasm.bims_target(2) === 2, String(wasm.bims_target(2)));
+check("and leaves the others alone", wasm.bims_target(0) === 20 && wasm.bims_target(1) === 10, `${wasm.bims_target(0)} ${wasm.bims_target(1)}`);
+const stewRow = byId.get("stock").querySelectorAll("tbody tr").find((r) => r.querySelector("td").textContent === "Stew");
+check("the stock table has a row for the shelf stew", stewRow !== undefined);
+const cookWork = byId.get("work").querySelectorAll("tbody tr").find((r) => r.textContent.includes("Cooking"));
+check("and the work list has one cooking row, which is its", cookWork !== undefined);
+check(
+  "and no row of its own",
+  !byId.get("work").querySelectorAll("tbody tr").some((r) => r.textContent.includes("Stew")),
+);
+let stewed = false;
+for (let i = 0; i < 600 && !stewed; i++) {
+  step(200);
+  stewed = wasm.bims_store_stew() >= 1;
+}
+step(2);
+check("a stew reaches the shelf", stewed, String(wasm.bims_store_stew()));
+check(
+  "and the stock table says so",
+  stewRow.querySelector(".qty").textContent === String(wasm.bims_store_stew()),
+  stewRow.querySelector(".qty").textContent,
+);
+// Typing over the field mid-edit is tidied back to what wasm holds.
+stewTarget.value = "";
+stewTarget.dispatch("change", {});
+check("a blank is tidied to what wasm holds", stewTarget.value === "2", stewTarget.value);
 
 // --- the loop keeps running --------------------------------------------
 

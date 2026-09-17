@@ -14,6 +14,11 @@ pub const STRIDE: usize = 12;
 
 pub const KIND_RECT: f32 = 0.0;
 pub const KIND_ELLIPSE: f32 = 1.0;
+/// A right-angled triangle, the bottom-left half of its box, spun about
+/// the box's centre. The room draws none; the constant is here because the
+/// format is one format and the ship's `draw.rs` has it.
+#[allow(dead_code)]
+pub const KIND_TRIANGLE: f32 = 2.0;
 
 /// A `line` width of zero means fill; anything greater strokes the outline.
 const FILLED: f32 = 0.0;

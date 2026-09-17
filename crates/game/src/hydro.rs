@@ -93,6 +93,8 @@ impl Plant {
 pub struct Bay {
     /// The frame itself, which is furniture and gets walked round.
     pub frame: Rect,
+    /// Which side the Bim works it from, as a unit step out of the frame.
+    side: Vec2,
     trays: [Rect; SPOTS],
     spots: [Option<Plant>; SPOTS],
 
@@ -122,25 +124,40 @@ impl Bay {
     /// also standing against the table edge, and clear of the run between the
     /// table and the heads.
     pub fn new(interior: Rect) -> Bay {
-        Bay::at(Rect::from_min_size(
-            vec2(interior.min.x + 16.0, interior.max.y - 56.0),
-            vec2(282.0, 56.0),
-        ))
+        Bay::at(
+            Rect::from_min_size(
+                vec2(interior.min.x + 16.0, interior.max.y - 56.0),
+                vec2(282.0, 56.0),
+            ),
+            vec2(0.0, -1.0),
+        )
     }
 
-    /// A bay wherever a layout puts it. The trays divide its width; the Bim
-    /// stands along the top edge, so a bay is used from the north.
-    pub fn at(frame: Rect) -> Bay {
+    /// A bay wherever a layout puts it, worked from the side `side` steps
+    /// out to. The trays run along the frame the long way: a bay lying
+    /// east–west is six trays across, one standing north–south six trays
+    /// down, and the Bim stands beside whichever tray it is working.
+    pub fn at(frame: Rect, side: Vec2) -> Bay {
         let inner = frame.expand(-7.0);
-        let width = inner.width() / SPOTS as f32;
+        let across = side.x.abs() > side.y.abs();
         let trays = core::array::from_fn(|i| {
-            Rect::from_min_size(
-                vec2(inner.min.x + i as f32 * width + 2.0, inner.min.y),
-                vec2(width - 4.0, inner.height()),
-            )
+            if across {
+                let height = inner.height() / SPOTS as f32;
+                Rect::from_min_size(
+                    vec2(inner.min.x, inner.min.y + i as f32 * height + 2.0),
+                    vec2(inner.width(), height - 4.0),
+                )
+            } else {
+                let width = inner.width() / SPOTS as f32;
+                Rect::from_min_size(
+                    vec2(inner.min.x + i as f32 * width + 2.0, inner.min.y),
+                    vec2(width - 4.0, inner.height()),
+                )
+            }
         });
         Bay {
             frame,
+            side,
             trays,
             spots: [None; SPOTS],
             automated: true,
@@ -155,7 +172,18 @@ impl Bay {
     /// whichever tray it is working.
     pub fn station(&self, spot: usize) -> Vec2 {
         let tray = self.trays[spot.min(SPOTS - 1)];
-        vec2(tray.center().x, self.frame.min.y - 30.0)
+        if self.side.x.abs() > self.side.y.abs() {
+            let x = if self.side.x < 0.0 {
+                self.frame.min.x - 30.0
+            } else {
+                self.frame.max.x + 30.0
+            };
+            vec2(x, tray.center().y)
+        } else if self.side.y > 0.0 {
+            vec2(tray.center().x, self.frame.max.y + 30.0)
+        } else {
+            vec2(tray.center().x, self.frame.min.y - 30.0)
+        }
     }
 
     // --- what the player asks of it ---------------------------------------

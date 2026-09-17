@@ -13,9 +13,9 @@
 //! they cross the boundary as numbers through `ship_part_color_*`, so the
 //! button for a hob cannot end up a different colour from the hob.
 
-use shipdesign::parts::{Layer, PartKind, Rotation, footprint, use_spots};
+use shipdesign::parts::{Layer, PartKind, Rotation, footprint, is_diagonal, use_spots};
 use shipdesign::validate::Severity;
-use shipdesign::{ShipDesign, TILE};
+use shipdesign::{Grid, PlacedPart, ShipDesign, TILE};
 
 use crate::draw::{Color, DrawList};
 use crate::editor::Editor;
@@ -31,6 +31,8 @@ const GLOW: Color = Color::rgb(0.38, 0.86, 0.95);
 const WARN: Color = Color::rgb(0.98, 0.45, 0.32);
 const GOOD: Color = Color::rgb(0.50, 0.90, 0.60);
 const SPOT: Color = Color::rgba(0.98, 0.82, 0.35, 0.85);
+/// An engine's exhaust on the deck, while building: the flame's colour.
+const FLAME: Color = Color::rgb(1.0, 0.62, 0.22);
 
 /// One colour per [`PartKind`], indexed by discriminant. `PARTS` order, and
 /// the same order the palette is built in.
@@ -38,7 +40,7 @@ const SPOT: Color = Color::rgba(0.98, 0.82, 0.35, 0.85);
 /// Index 0 is the deck and index 15 is the frame; both are drawn as tiles
 /// rather than as objects, and both are in the table anyway so the palette
 /// buttons for them have swatches.
-pub static PART_COLORS: [Color; 28] = [
+pub static PART_COLORS: [Color; 35] = [
     Color::rgb(0.13, 0.15, 0.18), // Floor
     Color::rgb(0.30, 0.34, 0.40), // Wall
     Color::rgb(0.38, 0.86, 0.95), // Door
@@ -67,6 +69,13 @@ pub static PART_COLORS: [Color; 28] = [
     Color::rgb(0.48, 0.44, 0.36), // Shelf
     Color::rgb(0.60, 0.70, 0.76), // Shower
     Color::rgb(0.82, 0.52, 0.30), // Thruster — the engine's orange, paler
+    Color::rgb(0.90, 0.32, 0.18), // HeavyEngine — the engine's orange, deeper
+    Color::rgb(0.30, 0.34, 0.40), // DiagonalWall — the wall's grey
+    Color::rgb(0.46, 0.52, 0.58), // DiagonalOutsideWall — the hull's
+    Color::rgb(0.80, 0.42, 0.20), // Smelter — the glow of it
+    Color::rgb(0.56, 0.50, 0.38), // Workbench
+    Color::rgb(0.78, 0.80, 0.84), // SuitLocker — suit-white
+    Color::rgb(0.42, 0.38, 0.44), // Armoury — gunmetal
 ];
 
 /// The frame, drawn as the tile under everything. Dimmer than the deck and
@@ -101,9 +110,102 @@ pub fn paint(editor: &Editor, list: &mut DrawList) {
     // after the parts, so it reads as a wash over the ship rather than as
     // something underneath it.
     radiation(editor, list);
+    exhausts(editor, list);
     faults(editor, list);
     pointed_at(editor, list);
     ghost(editor, list);
+}
+
+/// Where every engine's exhaust goes, drawn on the deck while building:
+/// the row of tiles straight behind its bell, washed the flame's colour
+/// with a plume tapering aft, so which way an engine fires and how far is
+/// never a guess. Over something of the ship — an engine inside the hull,
+/// firing into a room — the wash is the warning colour with a cross on
+/// every tile it would cook, the same fault `IssueCode::ExhaustBlocked`
+/// reports in the checks panel. It is drawn for every engine, not only the
+/// one the pointer is on, because the point is to see it *before* the row
+/// in the panel.
+fn exhausts(editor: &Editor, list: &mut DrawList) {
+    let grid = editor.design.grid();
+    for part in &editor.design.parts {
+        if !part.kind.def().pushes() {
+            continue;
+        }
+        exhaust_marks(part, &grid, list, 1.0);
+    }
+}
+
+/// The marks for one engine. `strength` is how loud: full for a placed
+/// engine, fainter for the ghost of one.
+fn exhaust_marks(part: &PlacedPart, grid: &Grid, list: &mut DrawList, strength: f32) {
+    use shipdesign::validate::exhaust_tiles;
+    let t = TILE as f32;
+    let blocked = shipdesign::exhaust_blocked(part, grid);
+    let color = if blocked { WARN } else { FLAME };
+    // Aft as a unit step, from the difference between an exhaust tile and
+    // the engine's own tile beside it — the exhaust tiles are exactly one
+    // step behind the bell.
+    let tiles = exhaust_tiles(part);
+    let Some(&(ex, ey)) = tiles.first() else {
+        return;
+    };
+    let own = part.tiles();
+    let aft = own
+        .iter()
+        .map(|&(x, y)| (ex - x as i32, ey - y as i32))
+        .find(|&(dx, dy)| dx.abs() + dy.abs() == 1)
+        .unwrap_or((0, 1));
+    for &(x, y) in &tiles {
+        let inside = grid.inside((x, y));
+        let cooked = inside && grid.get(Layer::Structure, (x, y)) != 0;
+        let x0 = world(x);
+        let y0 = world(y);
+        // The wash: the tile behind the bell, and a fainter one beyond it
+        // where the plume reaches. Both drawn even off the build area — the
+        // plume goes into space, and that is what "clear" looks like.
+        list.box_between(x0, y0, x0 + t, y0 + t, 2.0, color.alpha(0.30 * strength));
+        let (x2, y2) = (world(x + aft.0), world(y + aft.1));
+        list.box_between(x2, y2, x2 + t, y2 + t, 2.0, color.alpha(0.12 * strength));
+        // A flame tongue down the middle of the tile, pointing aft.
+        let (cx, cy) = (x0 + t / 2.0, y0 + t / 2.0);
+        let (ax, ay) = (aft.0 as f32, aft.1 as f32);
+        list.line(
+            cx - ax * t * 0.35,
+            cy - ay * t * 0.35,
+            cx + ax * t * 0.45,
+            cy + ay * t * 0.45,
+            5.0,
+            color.alpha(0.85 * strength),
+        );
+        list.line(
+            cx + ax * t * 0.45,
+            cy + ay * t * 0.45,
+            cx + ax * t * 0.9,
+            cy + ay * t * 0.9,
+            2.5,
+            color.alpha(0.55 * strength),
+        );
+        if cooked {
+            // A cross over the tile it would burn.
+            let m = 10.0;
+            list.line(
+                x0 + m,
+                y0 + m,
+                x0 + t - m,
+                y0 + t - m,
+                3.0,
+                WARN.alpha(strength),
+            );
+            list.line(
+                x0 + t - m,
+                y0 + m,
+                x0 + m,
+                y0 + t - m,
+                3.0,
+                WARN.alpha(strength),
+            );
+        }
+    }
 }
 
 /// The tile grid. Faint, and drawn across the whole build area rather than
@@ -124,12 +226,22 @@ fn seams(editor: &Editor, list: &mut DrawList, span: f32) {
 /// to be visible to be built on.
 fn frame(editor: &Editor, list: &mut DrawList) {
     let t = TILE as f32;
+    let grid = editor.design.grid();
     for part in &editor.design.parts {
         if part.layer() != Layer::Structure {
             continue;
         }
         for (x, y) in part.tiles() {
             let (x0, y0) = (world(x as i32), world(y as i32));
+            // Under a corner piece the frame is drawn as the same half of the
+            // tile: the whole tile is framed as far as the rules go, but a
+            // square of frame poking out past a chamfer would read as a hole
+            // in the hull rather than as the edge of it.
+            if let Some(rotation) = crate::hull::diagonal_at(&editor.design, &grid, (x, y)) {
+                let c = crate::hull::corner(rotation);
+                list.triangle(x0 + t / 2.0, y0 + t / 2.0, t, t, c.rot, FRAME);
+                continue;
+            }
             list.box_between(x0, y0, x0 + t, y0 + t, 0.0, FRAME);
             list.stroke_between(x0, y0, x0 + t, y0 + t, 0.0, 1.0, FRAME_EDGE);
         }
@@ -194,6 +306,18 @@ fn objects(editor: &Editor, list: &mut DrawList) {
         let x1 = x0 + world(w as i32) - 2.0 * inset;
         let y1 = y0 + world(h as i32) - 2.0 * inset;
         let color = PART_COLORS[part.kind as usize];
+        if is_diagonal(part.kind) {
+            let c = crate::hull::corner(part.rotation);
+            list.triangle(
+                (x0 + x1) / 2.0,
+                (y0 + y1) / 2.0,
+                x1 - x0,
+                y1 - y0,
+                c.rot,
+                color,
+            );
+            continue;
+        }
         list.box_between(x0, y0, x1, y1, 5.0, color);
         facing_bar(part.kind, part.rotation, (x0, y0, x1, y1), list);
     }
@@ -355,16 +479,56 @@ fn ghost(editor: &Editor, list: &mut DrawList) {
     let y0 = world(hover.1);
     let x1 = x0 + world(w as i32);
     let y1 = y0 + world(h as i32);
+    // A corner piece's ghost is the corner it would fill, so `R` visibly
+    // walks it round the tile — a square ghost would make the key look dead.
+    if is_diagonal(editor.tool) {
+        let c = crate::hull::corner(editor.ghost);
+        let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+        list.triangle(cx, cy, x1 - x0, y1 - y0, c.rot, color.alpha(0.35));
+        list.push(
+            crate::draw::KIND_TRIANGLE,
+            cx,
+            cy,
+            x1 - x0 - 2.0,
+            y1 - y0 - 2.0,
+            c.rot,
+            0.0,
+            2.0,
+            color,
+        );
+        return;
+    }
     list.box_between(x0, y0, x1, y1, 4.0, color.alpha(0.20));
     list.stroke_between(x0 + 1.0, y0 + 1.0, x1 - 1.0, y1 - 1.0, 4.0, 2.0, color);
-    // Which way it is turned, and where whoever uses it will stand.
+    // Which way it is turned, and where whoever uses it will stand. A part
+    // used from any side marks only the ring tiles a body could stand on,
+    // or an engine against the hull would be ringed with spots in the wall.
     if ok {
         facing_bar(editor.tool, editor.ghost, (x0, y0, x1, y1), list);
+        let grid = editor.design.grid();
+        let any = shipdesign::parts::any_side_will_do(editor.tool);
         for (dx, dy) in use_spots(editor.tool, editor.ghost) {
-            let cx = world(hover.0 + dx) + t / 2.0;
-            let cy = world(hover.1 + dy) + t / 2.0;
+            let tile = (hover.0 + dx, hover.1 + dy);
+            if any && (grid.get(Layer::Floor, tile) == 0 || grid.get(Layer::Object, tile) != 0) {
+                continue;
+            }
+            let cx = world(tile.0) + t / 2.0;
+            let cy = world(tile.1) + t / 2.0;
             list.ellipse(cx, cy, t * 0.30, t * 0.30, SPOT);
         }
+    }
+    // And where its exhaust would go, if it has one — whether or not the
+    // ghost is placeable, since where the flame goes is the thing to know
+    // before moving it: the wash says "firing into the ship" before the
+    // part is ever put down.
+    if editor.tool.def().pushes() && hover.0 >= 0 && hover.1 >= 0 {
+        let would = PlacedPart {
+            id: 0,
+            kind: editor.tool,
+            origin: (hover.0 as u32, hover.1 as u32),
+            rotation: editor.ghost,
+        };
+        exhaust_marks(&would, &editor.design.grid(), list, 0.8);
     }
 }
 

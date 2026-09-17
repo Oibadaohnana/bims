@@ -212,7 +212,18 @@ and forgotten in the grouping turns up under **Anything else** instead of
 quietly not existing.
 
 - **Click** to place. **Drag a rectangle** for the things you fill an area
-  with — deck plating, conduit — **drag a line** for both kinds of wall.
+  with — deck plating, conduit — **drag a line** for both kinds of wall,
+  and **drag a diagonal** for the two corner pieces: a **diagonal wall**
+  and a **diagonal outside wall** fill half their tile, cut at forty-five
+  degrees, and a drag lays a staircase of them one tile a step, every
+  piece turned the ghost's way. That is how a hull gets a pointed bow or a
+  chamfered corner, the way spacecraft hulls in games of this kind do. To
+  the rules a corner piece is a whole tile — one object, a body cannot
+  pass, and the hull one seals its tile against radiation exactly as a
+  straight plate does, since the exposure fill is four-neighbour and a
+  staircase touching corner to corner is tight; only the picture is a
+  triangle, and which half is solid is the piece's turn: **R** walks it
+  round the four corners of the tile.
   **Deck plating lays its own frame**: there is no separate structure tool,
   because to anybody but the connectivity check the frame and the deck are
   one thing. A plated tile has both; the hull stands on the frame, deck or
@@ -317,14 +328,23 @@ The errors are:
 - no table, cold store, worktop, hob, dishwasher, toilet or basin;
 - somewhere a Bim has to stand is off the ship, has no deck, or is blocked;
 - parts nobody could walk between — over deck, through doors, which count as a
-  way through.
+  way through;
+- an engine firing into the ship: the tiles straight behind its bell have to
+  be open space, so an engine stands in the skin with its bell over the
+  edge. The designer washes every engine's exhaust onto the deck as you
+  build — flame-coloured out into space, warning-red with a cross on every
+  tile of the ship it would cook — for the ghost as well as for what is
+  placed, so you see it before the checks panel says it.
 
 The warnings are no engine, no engine on some axis, no hydroponic bay, no
-broom locker, no helm, nothing to eat aboard — and **radiation**.
+broom locker, no helm, nothing to eat aboard, a consumer nothing powers, a
+conduit run drawing more than its reactor makes — and **radiation**.
 
-**Engines are never an error**: a ship that cannot fly is still a ship you can
-live on, and refusing to let a player accept one would be the design phase
-having an opinion about how to play.
+**Having no engine is never an error**: a ship that cannot fly is still a
+ship you can live on, and refusing to let a player accept one would be the
+design phase having an opinion about how to play. An engine is worked on
+from whichever side a body can get at — it has hull on three sides more
+often than not — so it needs one free tile round it, not a particular one.
 
 ### Radiation, which is a warning and is louder than the errors
 
@@ -351,6 +371,25 @@ meal is a cold store, a worktop, a hob, a table with a chair and a dishwasher;
 a night is a bunk; a trip to the heads is a toilet and then a basin. It is not
 a design. If the chains change, the list changes with them, and
 `crates/shipdesign/src/validate.rs` says so at the top.
+
+### Power
+
+The reactor makes it, the battery holds it, and everything that draws — life
+support, the helm, the sensor array, the cold store, the bay, and every
+door — has to be **wired**: a tile of it carries conduit, and that conduit
+runs to a reactor. Conduit is on its own layer and runs *through* a tile,
+under whatever is standing in it, so there is no adjacency rule to learn:
+drag a run of it under the things that need it, as you would drag deck,
+and end the run under the reactor. A conduit run is a **network**; two runs
+that both end under the same reactor are one.
+
+Two warnings come of it, and neither blocks Accept, for the same reason the
+flight warnings do not — a ship that cannot run its cold store is still a
+ship you can live on, for a while. **Nothing powers this** rings every
+consumer with no live conduit under it. **This run draws more than its
+reactor makes** rings the run: one reactor is a hundred a minute, and the
+playtest ship's six consumers draw fifty-seven, so there is room for a
+workshop and not for two.
 
 ### Accepting
 
@@ -423,10 +462,30 @@ those problems, which is not an accident.
 
 ### Flying it
 
-Any player can take the helm. Open the map with **M**, click a planet, a
-station or a bare point in space, and the panel quotes the trip before anybody
-commits to it: how long, how much fuel, and whether it ends docked or holding
-alongside. Confirm sends the ship.
+The ship is flown **from the helm**. Nobody starts there: **Take the helm**
+on the helm panel walks the crew member you steer to the seat, and until
+they are standing at it the map aims at nothing and Confirm is dead — the
+panel says so. Once there they stay put rather than pottering about, go off
+to eat and sleep as the day demands, and walk back afterwards; a right-click
+sending them anywhere else is the end of it. Any player's crew member can
+take it. Then open the map with **M** — it keeps whatever zoom it was left
+at — click a planet, a station or a bare point in space, and the panel
+quotes the trip before anybody commits to it: how long, how much fuel, and
+whether it ends docked or holding alongside. Confirm sends the ship.
+**Change target** is the same thing as a button: it opens the map with
+nothing aimed at, and the next click is the new target — under way as
+much as at rest.
+
+From a berth, Confirm is first of all a **departure**. Everybody goes to
+their own side of the airlock — the station's people ashore, the crew back
+aboard, walking, nobody teleported — and the ship waits at the berth until
+they have (or for half an hour, and then leaves without them). Then it
+**pushes off**: straight out of the station's door by its own length,
+heading untouched, and only then is the trip planned, from where it has got
+to, so the turn towards the target is the trip's own first phase. **Abort**
+while it is still casting off and it stays tied up; abort during the push-off
+and it holds where the push-off ends. That is all Abort is for: a departure
+that has not become a trip yet.
 
 A trip is one straight line and four phases:
 
@@ -437,16 +496,22 @@ A trip is one straight line and four phases:
    engines, or push on the backward engines without turning at all. A ship with
    no backward engine always flips; a ship with strong ones never does.
 4. **Arrive** — docked if it was aimed at a station and has an airlock,
-   holding beside it otherwise.
+   holding beside it otherwise. Docking is the push-off backwards: the trip
+   is aimed at the point in front of the station's door and ends a station
+   radius short of it, the ship slides the rest of the way, turning onto the
+   berth's heading, and then straight in along the door's line until the
+   collars meet. Five minutes, read off the clock like everything else.
 
 There is no speed limit and no coasting in the middle. It is flat out to the
 changeover and braking from there, which is the same shape the world generator
 laid every system out against.
 
-**Abort** brings it to rest along the line it is already on — it never
-reverses — and holds there. A Confirm while it is under way is a redirect,
-which is the same thing followed by a fresh departure: it stops first, and the
-moment it has stopped it sets off again on its own. Only the latest confirmed
+**Brake** brings it to rest along the line it is already on — it never
+reverses — and holds there; a ship already stopping has nothing left to
+brake with, and the button says so. A Confirm while it is under way is a
+redirect (Change target, click, Confirm), which is the same thing followed
+by a fresh departure: it stops first, and the moment it has stopped it sets
+off again on its own. Only the latest confirmed
 target is kept, and the route line on the map is drawn in the colour of
 whoever set it.
 
@@ -460,6 +525,77 @@ the hold when the plan ends. An abort is charged for what was actually burnt:
 the part of the trip that happened, plus the stopping, and the rest of the
 reservation is handed back.
 
+### The reactor, the batteries and the brownout
+
+Every step, what the wired reactors made less what the wired consumers drew
+goes into the batteries, and the **Power** line on the ship panel says so:
+so much drawn of so much made, and what the batteries have of what they
+hold. A battery on the run arrives empty and fills at the surplus; one
+taken off takes what was in it. A ship drawing more than it makes drains
+its batteries at the difference, and when they are flat it **browns out**:
+everything optional stops — the bay, the cold store, and the workshops
+when there are workshops — and the essentials, life support and the doors,
+run on off the reactor's own output. The world opens with the batteries
+full, since the ship has been sitting at a dock.
+
+Nothing aboard reads the brownout yet — the crew go on cooking in a galley
+that has no power, for now. The smelter and the workbench will be the first
+things to stop, and they arrive next.
+
+### Making things
+
+The crew make six things, at three benches, and one mechanism does all of
+it. A **recipe** is a bench, what goes in, what comes out and how long it
+takes; the **smelter** turns two ore into one metal in half an hour, and the
+**workbench** turns one metal into four components in twenty minutes, or
+one metal, two components and one **galvum** into an **emitter** in an
+hour. Galvum is the rare one — only a mining outpost sells it — and the
+emitter is what the interesting parts will be made of: a turret, a shield,
+a mining laser. Nobody sells an emitter.
+
+What turns a recipe into an errand is a **target**: on the items panel,
+every row for something the benches can make carries a *keep so many*
+number, stepped up and down, and while the hold has fewer of that thing
+than the number — and the inputs for one, and room for it, and a bench of
+the right kind with power — the work list offers *Making things*. A Bim
+walks to the bench, stands at it for the recipe's length, and the ore comes
+out of the hold and the metal goes in. The log says what was made. If the
+ore was sold while the Bim stood there, nothing is made and the log says
+that instead. The target is a command like a deal, so every player's ship
+is making the same thing.
+
+The smelter loses mass — two ore at ten is twenty, one metal is eight, and
+the slag is vented — and it is the only recipe that may. Everything the
+workbench makes weighs exactly what went into it. Both benches draw power,
+and both stop in a brownout.
+
+### Mining, on foot
+
+Ore is gathered by a Bim in a **pressure suit**, and the whole of the
+design is that the outside is a clock, not a place. Hold station at an
+asteroid belt with a suit in the **suit locker** and room on the shelves,
+and the work list offers *Mining outside*: a Bim takes the suit from the
+locker, walks to the deck inside the airlock, goes out, and is held a tile
+beyond the collar in the suit — visor and all — for an hour and a half. Then
+it comes back in, hangs the suit up, and the belt's ore is on the shelf:
+eight to twelve units, and one of galvum on top if the belt is one of the
+third or so that carry it. Which belts are rich is the galaxy's and the same
+for everybody. The log says what came back, and says so when it was nothing
+because the shelves were full.
+
+There is no air gauge. What bounds a walk is **radiation**: the suit lets a
+quarter of the open dose through, so a walk is about twenty minutes' worth,
+and the dose comes off at half a minute a minute under cover. A Bim whose
+dose is past half the critical line is not sent out again until it has come
+down; two walks back to back are fine, a third waits. The **Dose** line on
+the ship panel is each crew member's, in minutes-in-the-open, and the log
+says when a body crosses a line — a dose picked up, a dose cleared. One
+body outside at a time: the airlock is one Bim's while a walk is on.
+
+A walk interrupted — the Bim gets hungry out there — brings the body back
+in through the door, and the walk resumes from the gangway when the Bim is
+done eating, with the time already spent outside still counted.
+
 ### Seeing where you are
 
 The system you start in is **charted**: every planet, belt and station the
@@ -468,8 +604,60 @@ a rocky world with its continents, a gas giant with its bands and ring, an
 ice world under glare, a belt of rocks; an orbital wheel, a refinery's tanks
 and stack, a mining rig in its rubble, a broken derelict, a relay's dish — on
 faint rings that show their orbits. Click one and the helm quotes the trip;
-Confirm sends the ship. The thing you are alongside is drawn under the hull
-in the ship view, so a docked ship sits inside its station's ring.
+Confirm sends the ship. A planet you are alongside is drawn under the hull
+in the ship view, as the ground.
+
+A **station is a place**, not an icon: every one in the system is a hull on
+a grid of its own — twenty-six to forty tiles across by kind, laid out from
+the blueprint's seed with the same parts and the same rules as a ship. It
+is a square hull with its corners chamfered in diagonal plating, the
+airlock in its west skin and the array on its north, and **rooms** inside:
+two corridors three tiles wide cross in the middle, the west one running
+in from the port, and the four quarters between them are the galley and
+mess, the crew's quarters with the heads along their north wall and the
+bunks down the east skin, hydroponics, and engineering — reactor, life
+support, a tank, batteries and shelves — each behind bulkheads with a
+two-tile doorway onto each corridor. The seed decides how many bays,
+shelves, tables and batteries; a bigger station gets more of each, and a
+second reactor. Bulkheads and doors, the helm, the shelves and the shower
+are drawn as themselves rather than as coloured blocks, in the room's
+palette, so a station reads as a building and a ship as a ship — and so
+are the reactor, the fuel tank, the battery and life support.
+
+**A door in a bulkhead is a powered door**, two tiles along the bulkhead
+and one deep — the whole of a doorway the crew can walk — and turned with
+`R` to stand in a bulkhead running either way. It opens by itself for
+whoever walks up to it and shuts a moment after the doorway is clear, so the crew
+and the residents come and go through them without being told, and the
+navigation plans straight through an unlocked one. The four things the
+bathroom door offers are on a right-click: **hold open**, **close** (let it
+look after itself again), **lock** and **unlock** — each an errand that
+walks James to the panel, as the bathroom door's are. A locked door is a
+wall until it is unlocked: no route is planned through it, the readout
+says `Door · locked`, and the leaves wait for anyone standing in the
+opening before they shut. The bay is a **run of six trays**, one a tile,
+worked from the row along one side of it — a bay standing north–south is
+six trays down. In the ship view it is drawn where it is and as big as it
+is, so it *approaches*: from far off a plate with its icon on it, nearer its
+hull tile by tile, and within fifty tiles of its hull the people who live
+there — two on most stations, one on a relay, nobody on a derelict, whose room
+opens all the same so its fixtures are drawn — are the room's Bims again, up and about between the room's own pictures of its
+fixtures, with names over their heads. Leave and they are forgotten; come
+back and they are at their bunks. The ship **docks beside it, airlock to
+airlock**: the trip ends at the berth, the ship is turned so its airlock
+faces the station's, the two collars — each stands half a tile out of
+its skin — meet as a tube between the hulls, and both doors are drawn
+parted. The game opens docked at the first station somebody lives on, never
+at a derelict. Escape opens a settings sheet with every key on it. An airlock has to be in the skin for that — one on the deck is a door
+to nowhere, and the checks say so. And docked, **the two are one room**: the
+ship's deck and the station's on one navigation grid with the passage
+between them, so a right-click on the station's deck sends James through the
+airlocks and the residents wander aboard — to the ship's galley, since a
+room has one and it is the ship's. Who is who is on their backs: the crew
+wear the ship's blue coverall and the station's people the station's
+orange one. Leaving takes the room apart again, once everybody has walked
+to their own side — see *Flying it* — and the residents are left to the
+station.
 
 Beyond the chart, the ship sees `VISION_RANGE` with the crew's own eyes,
 which out here is almost nothing, and a great deal further with a **sensor
@@ -498,10 +686,17 @@ to buy from. Holding station beside one is not docked — that wants an airlock 
 and out between them the pool buys nothing at all. Supply is unlimited and every
 station charges the same; what bounds a purchase is the money and the hold.
 
+What is *on the shelf* is the station's kind's: galvum only at a mining
+outpost, an emitter nowhere, nothing at a derelict — there is nobody aboard
+to sell it — and everything else everywhere somebody lives. A row the
+station does not sell is greyed with its buy buttons off, and stays, because
+what is aboard can still be sold there. Every station buys anything.
+
 ### The two views
 
 **Ship** is the live ship at tile scale, drawn turned to its heading, with the
-starfield sliding the other way behind it. The hull is plated, with running
+starfield streaming the other way behind it — faster the faster the ship is
+going, on the world's clock, so it holds at a pause and races at 24x. The hull is plated, with running
 lights to port and starboard and a strobe at the bow; the engines burn while
 the ship is under them — through the burn, and again through the brake once
 it has flipped — and the thrusters puff on the corners that turn it the way
@@ -516,6 +711,13 @@ other moment unreadable — you could not tell which way you were going, because
 "which way" would always look the same. **Head up** (the View panel, or `N`)
 is the other choice: the ship held square to the window and the sky and the
 map turned round it instead.
+
+The ship view **follows the crew member you steer**: James is what sits in
+the middle, on the deck or across a station, and a drag can shove the view
+only so far before he would be off the edge. **Free camera** (the View
+panel, or `F`) lets it go — the view stays where it is and a drag or the
+keys take it anywhere, for looking at the far end of a station while the
+crew are busy at this one — and **Follow** snaps it back to him.
 
 ### The two crates behind that
 
@@ -538,13 +740,79 @@ Which world you land in is a seed and a galaxy shape, and for now they come off
 `ship.html`'s query string with a fixed default behind them. The lobby's World
 tab will pick them instead; nothing else about them changes.
 
+## What the ship will make
+
+None of this exists yet. It is the contract the next few steps are built to,
+written down first so that each of them is measured against something, and
+each heading below is replaced by a description of the real thing as it
+lands. The order is the order of the headings: power, the resources, the
+workstations, the walk outside and the armoury — all built, and described
+under the designer and the game — then the fight, which is not.
+
+### One mechanism, the tree, and the mass
+
+Built. *Making things* under the game is the mechanism and the table as
+they stand; *Trading* has what each kind of station sells. The tree as
+planned had a locker class for suits and weapons — that arrives with the
+suit, below.
+
+### Power
+
+Built. It is *Power* under the designer and *The reactor, the batteries and
+the brownout* under the game, below.
+
+### The walk outside
+
+Built. *Mining, on foot* under the game.
+
+### The armoury
+
+Built, as far as the making goes. The **armoury** is a bench and a locker in
+one: two components and an emitter make a **laser handgun** in three
+quarters of an hour, four metal and two components a **vest**, two
+vegetables and a component a **medkit**, and it holds four of them beside
+the suits. Set a target for a handgun with galvum aboard and the benches
+run the whole chain in order without anybody sequencing them — a handgun
+is not on offer until there is an emitter, and an emitter is not until
+there are components. Nobody sells a handgun or a vest; a medkit is on
+every lived-in station's shelf. What a Bim *does* with any of them is the
+fight, below, which is not built.
+
+### The fight
+
+- **Between ships**, turrets fire on a plan-shaped clock rather than an
+  integrated one, damage lands on a tile, and a **destroyed part leaves
+  scrap, not its recipe**. That is the one place the materials contract's
+  "no loss" is broken, and it is broken on purpose and named. Outside walls
+  have hit points; a shield trades power for damage. Shields, turrets or a
+  full burn off one battery is the decision the power system was built for.
+- **Salvage** is docking at a derelict and taking its parts apart with a Bim
+  in the middle — the caller `materials.rs` says the deconstruction rule is
+  waiting for. What a derelict has left in it is generated already.
+- **Boarding** is docking to somebody hostile. The rooms join into one, one
+  nav grid, and the fight is Bims with handguns in corridors the station
+  layout already promises are walkable. A wound is a condition in the health
+  crate, arriving the way hunger and sleep are meant to; the medkit is a
+  held thing and treating is a job.
+
 ## The simulation
 
 `nix run .#simulation` is the game without the front of it: `ship.html?mode=1`
 opens the world at once, for one player, on the **playtest ship** —
 `shipdesign::playtest_ship()`, a twenty-tile hull with one of everything a
 crew of one needs to live and to fly, a full tank, metal and components on
-the shelf and a few days' food in the cold store — with `SIMULATION_MONEY`
+the shelf and a few days' food in the cold store. It is laid out the way a
+small ship would be: a bow cut back to a point in diagonal hull, with the
+bridge in it — the helm on the centreline, life support and a battery in
+the corners the cut leaves; the main deck amidships, the galley along the
+bridge bulkhead to port with the table under it, the bay in the middle,
+the bunk against the starboard skin and the airlock behind it; and
+engineering aft — the tank and the reactor down the port side, a shelf of
+stores, the heads, and the main engine set into the stern so its bell is
+the stern. Three compartments, two bulkheads with a two-tile doorway each,
+a run of conduit from the reactor to the helm, and thrusters in the skins
+fore and aft. Every doorway and every gangway is two tiles wide on purpose:
+the room's navigation cannot walk a one-tile gap. It has `SIMULATION_MONEY`
 (a placeholder €50 000) in hand. It is for playtesting the world quickly, and
 it is the one place the old "lowest star with a station" spawn survives:
 the world is the fixed default seed's, a two-arm spiral, docked at that
@@ -561,7 +829,12 @@ flies a trip to the end at 24x.
 
 Two Bims live aboard: **James** and **Kate**. Their names are written over
 their heads on the deck, each has an agenda down the left, and the one you have
-selected has its bars and its crew sheet down the right.
+selected has its bars and its crew sheet down the right. The same panels, the
+same keys and the same menus are on the ship page once the world is open —
+`1` or a drag to select, right-click the deck to move, `r` to recruit, and
+the tray at the bottom left — because the crew aboard are these Bims and the
+panels are one script, `web/crew.js`, shared by both pages. In the simulation
+there is one of them, James.
 
 They are not two kinds of thing. Both run the same needs on the same clock,
 both take themselves to bed and to the galley and to the heads for the same
@@ -646,7 +919,7 @@ game left running does not grow without end. Memory is finite; so is this.
 
 Each has **a berth of its own** and **a seat of its own**. There are two bunks —
 one against the left wall where the only bunk aboard always stood, one in the
-top-right corner, mirrored so its ladder faces the room — and two chairs, one
+top-right corner, mirrored so it is got into from the room — and two chairs, one
 each side of the table, with a place laid in front of each. A Bim goes to its
 own bed and sits in its own chair; neither is ever contested.
 
@@ -1743,26 +2016,25 @@ at the basin, and the lock it never set stays set.
 There are two bunks, one per crew member: one against the left wall, one in the
 top-right corner. A Bim only ever goes to its own. Either bunk's menu offers a
 nap of thirty minutes or a sleep of six hours; both run the same chain — walk
-over, up the ladder, under the covers, out cold, a stretch, and back down — and
+over, in, under the covers, out cold, a stretch, and back out — and
 differ only in how long the Bim stays put. The menu says what time it will be
 up, and the status line counts the rest down while James sleeps.
 
-The second bunk is the first one mirrored. A `Berth` carries which side of it
-the deck is on, and the ladder, the spot the Bim stands on to climb it and the
-way it turns to do so are all read off that rather than written into the
-drawing twice. Everything else — pillow at the top of the room, head towards
-it — is the same in both, so a sleeper lies the same way up whichever bunk it
-is in.
+The second bed is the first one mirrored. A `Berth` carries which side of it
+the deck is on, and the spot the Bim stands on to get in and the way it turns
+to do so are read off that rather than written into the drawing twice.
+Everything else — pillow at the top of the room, head towards it — is the same
+in both, so a sleeper lies the same way up whichever bed it is in.
 
-Drawing a bunk bed from directly above is the interesting part, because the top
-bunk hides the bottom one almost entirely. So the lower bed is drawn first, set
-down and to the right by `BUNK_DROP`, and what you see of it is the band of its
-own mattress and bedding along two sides, with the upper bunk's shadow falling
-across it. The Bim sleeps on the top bunk — the one you can see — and the
-bedding, the safety rails and the corner posts are drawn *after* the character,
-which is what actually puts it under the covers rather than on top of them. The
-footprint the pathfinder is given covers both bunks, so the half of the lower
-one that sticks out is solid too.
+It is a single bed, seen from above: a frame with a headboard standing proud
+at the head end and a footboard at the other, a mattress, a pillow, and a
+duvet with a turned-down cuff. The duvet and the shape of whoever is breathing
+under it are drawn *after* the character, which is what actually puts a Bim
+under the covers rather than on top of them. It used to be a bunk bed — an
+upper deck with the lower one showing along two sides — and the footprint is
+still the bunk's, a little larger than the bed drawn in it: the pathfinder,
+and so every route and every seed the probes pin, is built on that footprint,
+and the bed's station and lying position are the numbers the bunk had.
 
 ## Time
 
@@ -1788,10 +2060,12 @@ the table, the underside of the top bunk, the jambs of the bathroom door. Warm
 colours are held back for heat and for trouble, which is why a live hob and a
 locked door are the only two warm things in the room and both read instantly.
 
-The two crew are told apart by their clothes and their hair, not by where they
-happen to be standing: James is in the blue coverall with cropped hair, Kate in
-the mauve one with hers worn long, which from directly above is a second
-ellipse behind the head. Their names are written over them — James's in the
+The two crew are told apart by their hair and the yoke on their coverall, not
+by where they happen to be standing: James has cropped hair and a pale yoke,
+Kate a mauve one with hers worn long, which from directly above is a second
+ellipse behind the head. The coverall itself is the ship's blue on both —
+aboard the ship game the station's people wear the station's orange, so a
+joined deck says at a glance who is going ashore when it casts off. Their names are written over them — James's in the
 green that everything steerable uses, Kate's in plain ink, so which one takes
 orders reads without being explained.
 

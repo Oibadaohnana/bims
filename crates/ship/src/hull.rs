@@ -28,23 +28,30 @@
 //! picture does, because a corner thruster puffing *into* the hull is a
 //! picture that says the ship is broken.
 
-use shipdesign::parts::{Layer, PartKind, Rotation, TILE};
+use shipdesign::parts::{Layer, PartKind, Rotation, TILE, is_diagonal, solid_corner};
 use shipdesign::{Grid, PlacedPart, ShipDesign};
 
 use crate::draw::{Color, DrawList, KIND_ELLIPSE, KIND_RECT};
 use crate::paint::PART_COLORS;
 
 const T: f32 = TILE as f32;
+const SQRT_2: f32 = core::f32::consts::SQRT_2;
 
 // --- the palette --------------------------------------------------------------
 
 const HULL: Color = Color::rgb(0.47, 0.52, 0.59);
 const HULL_PANEL: Color = Color::rgb(0.39, 0.44, 0.51);
 const HULL_RIM: Color = Color::rgba(0.90, 0.95, 1.0, 0.45);
+/// A station too far off to draw tile by tile: one plate the size of its
+/// hull, in the hull's own colour, with its icon on it.
+pub const HULL_FAR: Color = Color::rgb(0.36, 0.41, 0.48);
 const STEEL: Color = Color::rgb(0.20, 0.22, 0.26);
 const STEEL_LIGHT: Color = Color::rgb(0.30, 0.33, 0.38);
 const STEEL_DARK: Color = Color::rgb(0.13, 0.14, 0.17);
 const RIM: Color = Color::rgba(0.85, 0.92, 1.0, 0.25);
+/// The deck seen through an open collar: the way through, when two airlocks
+/// are mated.
+const DECK_THROUGH: Color = Color::rgb(0.13, 0.15, 0.18);
 const DISH: Color = Color::rgb(0.80, 0.86, 0.92);
 const SHADOW: Color = Color::rgba(0.0, 0.01, 0.03, 0.72);
 
@@ -147,8 +154,9 @@ fn part_box(part: &PlacedPart) -> ((f32, f32), f32, f32) {
 }
 
 /// A shape laid out in a part's own frame — `u` across, `v` along `aft`,
-/// both from the part's centre — emitted turned with the part.
-struct Local {
+/// both from the part's centre — emitted turned with the part. `fittings`
+/// draws the inside of the ship in the same frame.
+pub(crate) struct Local {
     centre: (f32, f32),
     right: (f32, f32),
     aft: (f32, f32),
@@ -156,7 +164,7 @@ struct Local {
 }
 
 impl Local {
-    fn of(part: &PlacedPart) -> (Local, f32, f32) {
+    pub(crate) fn of(part: &PlacedPart) -> (Local, f32, f32) {
         let (centre, across, along) = part_box(part);
         let (right, aft, rot) = axes(part.rotation);
         (
@@ -171,7 +179,7 @@ impl Local {
         )
     }
 
-    fn at(&self, u: f32, v: f32) -> (f32, f32) {
+    pub(crate) fn at(&self, u: f32, v: f32) -> (f32, f32) {
         (
             self.centre.0 + u * self.right.0 + v * self.aft.0,
             self.centre.1 + u * self.right.1 + v * self.aft.1,
@@ -179,7 +187,7 @@ impl Local {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn push(
+    pub(crate) fn push(
         &self,
         list: &mut DrawList,
         kind: f32,
@@ -197,8 +205,75 @@ impl Local {
 }
 
 /// The middle of a tile.
-fn middle(x: u32, y: u32) -> (f32, f32) {
+pub(crate) fn middle(x: u32, y: u32) -> (f32, f32) {
     ((x as f32 + 0.5) * T, (y as f32 + 0.5) * T)
+}
+
+// --- a corner piece ---------------------------------------------------------------
+
+/// A diagonal wall's tile, as the numbers every picture of one is drawn
+/// from: the angle the format's triangle is emitted at, the unit normal
+/// out of the hypotenuse — towards the corner the wall leaves open — and
+/// the angle the hypotenuse itself runs at.
+///
+/// The format's triangle has its right angle at the bottom-left, which is
+/// [`Rotation::R0`]'s corner ([`solid_corner`]), so the triangle's turn is
+/// the part's turn and nothing more; the rest is read off the same
+/// function, so a chamfer cannot be filled on one side by the painter and
+/// bevelled on the other.
+pub struct Corner {
+    pub rot: f32,
+    pub normal: (f32, f32),
+    pub along: f32,
+}
+
+pub fn corner(rotation: Rotation) -> Corner {
+    let (sx, sy) = solid_corner(rotation);
+    Corner {
+        rot: rotation.code() as f32 * core::f32::consts::FRAC_PI_2,
+        normal: (-(sx as f32) / SQRT_2, -(sy as f32) / SQRT_2),
+        // The hypotenuse falls left to right when the solid corner is on the
+        // left or right of the *bottom* row or the *top* row — R0 and R180 —
+        // and rises for the other two.
+        along: match rotation {
+            Rotation::R0 | Rotation::R180 => core::f32::consts::FRAC_PI_4,
+            Rotation::R90 | Rotation::R270 => 3.0 * core::f32::consts::FRAC_PI_4,
+        },
+    }
+}
+
+/// The diagonal wall standing in a tile, if one is.
+pub fn diagonal_at(design: &ShipDesign, grid: &Grid, tile: (u32, u32)) -> Option<Rotation> {
+    let id = grid.get(Layer::Object, (tile.0 as i32, tile.1 as i32));
+    design
+        .part(id)
+        .filter(|p| is_diagonal(p.kind))
+        .map(|p| p.rotation)
+}
+
+/// A strip of `thick` lying along a corner piece's hypotenuse, `offset`
+/// out of it along the normal — negative is into the solid half. `length`
+/// is along the hypotenuse, which is `T * SQRT_2` corner to corner.
+fn along_hypotenuse(
+    list: &mut DrawList,
+    (cx, cy): (f32, f32),
+    corner: &Corner,
+    offset: f32,
+    length: f32,
+    thick: f32,
+    color: Color,
+) {
+    list.push(
+        KIND_RECT,
+        cx + corner.normal.0 * offset,
+        cy + corner.normal.1 * offset,
+        length,
+        thick,
+        corner.along,
+        0.0,
+        0.0,
+        color,
+    );
 }
 
 /// Whether there is nothing of the ship beyond this tile on that side.
@@ -236,7 +311,20 @@ pub fn shadow(list: &mut DrawList, design: &ShipDesign, grid: &Grid) {
         }
         for (x, y) in part.tiles() {
             let (cx, cy) = middle(x, y);
-            let open_sides: Vec<bool> = SIDES.iter().map(|&s| open(grid, (x, y), s)).collect();
+            let mut open_sides: Vec<bool> = SIDES.iter().map(|&s| open(grid, (x, y), s)).collect();
+            // A corner piece: the rim runs along the hypotenuse, and the two
+            // sides of the tile the wall does not reach have no rim of their
+            // own — the hypotenuse is the edge of the ship there.
+            if let Some(rotation) = diagonal_at(design, grid, (x, y)) {
+                let c = corner(rotation);
+                along_hypotenuse(list, (cx, cy), &c, edge / 2.0, T * SQRT_2, edge, SHADOW);
+                let (sx, sy) = solid_corner(rotation);
+                for (i, &(dx, dy)) in SIDES.iter().enumerate() {
+                    if (dx as i32, dy as i32) != (sx, 0) && (dx as i32, dy as i32) != (0, sy) {
+                        open_sides[i] = false;
+                    }
+                }
+            }
             for (i, &(sx, sy)) in SIDES.iter().enumerate() {
                 if !open_sides[i] {
                     continue;
@@ -284,7 +372,9 @@ pub fn exhaust(
 ) {
     for part in &design.parts {
         match part.kind {
-            PartKind::Engine if firing.lights(part.rotation) => plume(list, part, grid, frame),
+            kind if kind.def().pushes() && firing.lights(part.rotation) => {
+                plume(list, part, grid, frame)
+            }
             PartKind::Thruster if firing.alpha != 0.0 => {
                 let tile = part.origin;
                 let (cx, cy) = middle(tile.0, tile.1);
@@ -403,14 +493,22 @@ fn puff(list: &mut DrawList, (cx, cy): (f32, f32), side: (f32, f32), frame: u32,
 // --- the parts themselves ------------------------------------------------------
 
 /// The picture for an exterior part, if it has one. `false` means the caller
-/// draws its block.
-pub fn part(list: &mut DrawList, part: &PlacedPart, grid: &Grid, firing: Firing) -> bool {
+/// draws its block. `mated` names the airlock that is mated to another one,
+/// and how far its door stands open, if there is one.
+pub fn part(
+    list: &mut DrawList,
+    part: &PlacedPart,
+    grid: &Grid,
+    firing: Firing,
+    mated: Option<(u32, f32)>,
+) -> bool {
     match part.kind {
         PartKind::OutsideWall => {
             for tile in part.tiles() {
                 plate(list, tile, grid);
             }
         }
+        PartKind::DiagonalOutsideWall => diagonal_plate(list, part.origin, part.rotation),
         PartKind::Thruster => {
             let tile = part.origin;
             plate(list, tile, grid);
@@ -432,40 +530,11 @@ pub fn part(list: &mut DrawList, part: &PlacedPart, grid: &Grid, firing: Firing)
                 list.stroke_rect(x, y, w, h, 2.0, 1.5, RIM);
             }
         }
-        PartKind::Engine => engine(list, part, firing.lights(part.rotation)),
-        PartKind::Airlock => {
-            for tile in part.tiles() {
-                plate(list, tile, grid);
-            }
-            let (local, across, along) = Local::of(part);
-            let inset = 9.0;
-            local.push(
-                list,
-                KIND_RECT,
-                0.0,
-                0.0,
-                across - 2.0 * inset,
-                along - 2.0 * inset,
-                5.0,
-                0.0,
-                PART_COLORS[PartKind::Airlock as usize],
-            );
-            // The seam the door parts along, and a bolt either side of it.
-            local.push(
-                list,
-                KIND_RECT,
-                0.0,
-                0.0,
-                across - 2.0 * inset - 6.0,
-                3.0,
-                0.0,
-                0.0,
-                STEEL_DARK,
-            );
-            for v in [-0.3 * along, 0.3 * along] {
-                local.push(list, KIND_ELLIPSE, 0.0, v, 7.0, 7.0, 0.0, 0.0, STEEL_DARK);
-            }
-        }
+        kind if kind.def().pushes() => engine(list, part, firing.lights(part.rotation)),
+        PartKind::Airlock => match mated {
+            Some((id, ajar)) if id == part.id => airlock(list, part, grid, true, ajar),
+            _ => airlock(list, part, grid, false, 0.0),
+        },
         PartKind::SensorArray => {
             let tile = part.origin;
             plate(list, tile, grid);
@@ -487,6 +556,112 @@ pub fn part(list: &mut DrawList, part: &PlacedPart, grid: &Grid, firing: Firing)
         _ => return false,
     }
     true
+}
+
+/// An airlock: a door in the skin, and a collar standing half a tile out of
+/// it — `shipdesign::dock::PROTRUSION`, the same number the berth is worked
+/// out from, so two docked airlocks meet collar to collar in the picture
+/// exactly where they do in the arithmetic. Which way the collar points is
+/// the side with no frame beyond it (`dock::port` asks the same question);
+/// an airlock with hull all round is drawn as a door and nothing else.
+///
+/// Mated, the door is drawn parted and the collar's end open, so the two
+/// collars read as one passage between the hulls.
+fn airlock(list: &mut DrawList, part: &PlacedPart, grid: &Grid, mated: bool, ajar: f32) {
+    let tiles = part.tiles();
+    for &tile in &tiles {
+        plate(list, tile, grid);
+    }
+    let n = tiles.len() as f32;
+    let (cx, cy) = tiles.iter().fold((0.0, 0.0), |(x, y), &(tx, ty)| {
+        let (mx, my) = middle(tx, ty);
+        (x + mx / n, y + my / n)
+    });
+    let out = SIDES
+        .iter()
+        .copied()
+        .find(|&side| tiles.iter().all(|&tile| open(grid, tile, side)));
+    // How long the door is along the skin, and how deep it is through it.
+    let (along, deep) = (n * T, T);
+    // A rectangle `a` long the way the collar points and `b` wide across it.
+    let oriented = |list: &mut DrawList,
+                    x: f32,
+                    y: f32,
+                    a: f32,
+                    b: f32,
+                    radius: f32,
+                    color: Color| {
+        match out {
+            Some((sx, _)) if sx != 0.0 => list.rect(x, y, a, b, radius, color),
+            _ => list.rect(x, y, b, a, radius, color),
+        }
+    };
+    let door = PART_COLORS[PartKind::Airlock as usize];
+    let inset = 9.0;
+
+    // The door, in the skin: two halves that part along the seam, `ajar`
+    // of the way — a door, opening as somebody comes to it and shutting
+    // behind them, not a switch. The deck shows between them.
+    let (door_w, door_l) = (deep - 2.0 * inset, along - 2.0 * inset);
+    let (tx, ty) = match out {
+        Some((sx, _)) if sx != 0.0 => (0.0, 1.0),
+        _ => (1.0, 0.0),
+    };
+    let slide = 0.32 * door_l * ajar.clamp(0.0, 1.0);
+    for side in [-1.0f32, 1.0] {
+        let d = side * (door_l * 0.25 + slide);
+        oriented(
+            list,
+            cx + tx * d,
+            cy + ty * d,
+            door_w,
+            door_l * 0.5 - 1.0,
+            5.0,
+            door,
+        );
+        // A bolt on each half, which goes with it.
+        let b = side * (0.3 * along + slide);
+        list.ellipse(cx + tx * b, cy + ty * b, 7.0, 7.0, STEEL_DARK);
+    }
+    if slide < 1.0 {
+        // Shut: the seam the door parts along.
+        oriented(list, cx, cy, 3.0, door_l - 6.0, 0.0, STEEL_DARK);
+    }
+
+    // The collar, out of the skin. Nothing to draw for a buried airlock.
+    let Some((ox, oy)) = out else {
+        return;
+    };
+    let reach = shipdesign::dock::PROTRUSION as f32;
+    let skin = deep / 2.0;
+    let (kx, ky) = (
+        cx + ox * (skin + reach / 2.0),
+        cy + oy * (skin + reach / 2.0),
+    );
+    oriented(list, kx, ky, reach, along - 14.0, 2.0, STEEL);
+    oriented(
+        list,
+        kx,
+        ky,
+        reach - 4.0,
+        along - 22.0,
+        2.0,
+        if mated { DECK_THROUGH } else { STEEL_DARK },
+    );
+    // The hatch at the end: shut, or open onto the other collar.
+    let (hx, hy) = (
+        cx + ox * (skin + reach - 2.0),
+        cy + oy * (skin + reach - 2.0),
+    );
+    if !mated {
+        oriented(list, hx, hy, 4.0, along - 18.0, 1.0, RIM);
+    }
+    // A rim down each side of the collar, so it reads as a tube.
+    let (tx, ty) = (oy.abs(), ox.abs());
+    for side in [-1.0f32, 1.0] {
+        let off = side * (along / 2.0 - 8.0);
+        oriented(list, kx + tx * off, ky + ty * off, reach, 3.0, 1.0, RIM);
+    }
 }
 
 /// One plate of hull: a panel with a seam round it, and a bright bevel along
@@ -514,6 +689,39 @@ fn plate(list: &mut DrawList, tile: (u32, u32), grid: &Grid) {
             HULL_RIM,
         );
     }
+}
+
+/// Half a plate of hull, cut across the tile: the same panel and seam as
+/// [`plate`], as triangles, with the bevel along the hypotenuse — which is
+/// the edge that faces open space, whatever is beyond the two straight
+/// sides.
+fn diagonal_plate(list: &mut DrawList, tile: (u32, u32), rotation: Rotation) {
+    let (cx, cy) = middle(tile.0, tile.1);
+    let c = corner(rotation);
+    let (sx, sy) = solid_corner(rotation);
+    list.triangle(cx, cy, T - 3.0, T - 3.0, c.rot, HULL);
+    // The inner panel is shrunk about the box's centre, which moves its
+    // legs in further than its hypotenuse; nudging it into the corner evens
+    // the seam up.
+    let nudge = 1.3;
+    list.triangle(
+        cx + sx as f32 * nudge,
+        cy + sy as f32 * nudge,
+        T - 18.0,
+        T - 18.0,
+        c.rot,
+        HULL_PANEL,
+    );
+    let bevel = 7.0;
+    along_hypotenuse(
+        list,
+        (cx, cy),
+        &c,
+        -bevel / 2.0,
+        (T - 3.0) * SQRT_2 - 2.0 * bevel,
+        bevel,
+        HULL_RIM,
+    );
 }
 
 /// An engine: a housing with a bell at its aft end, and a core in the bell
@@ -547,7 +755,7 @@ fn engine(list: &mut DrawList, part: &PlacedPart, lit: bool) {
         0.0,
         STEEL_LIGHT,
     );
-    let accent = PART_COLORS[PartKind::Engine as usize];
+    let accent = PART_COLORS[part.kind as usize];
     for u in [-0.28 * across, 0.28 * across] {
         local.push(
             list,

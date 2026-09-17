@@ -60,6 +60,8 @@ pub enum What {
     /// everybody else's diary and not into the dead one's: a Bim does not
     /// record its own end, and there would be nobody to read it back.
     CrewDied = 30,
+    /// Ate something cooked in a filthy galley and was ill for two days.
+    FoodPoisoning = 31,
 }
 
 impl What {

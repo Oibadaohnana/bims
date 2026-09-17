@@ -17,7 +17,7 @@
 
 use physics::ResourceId;
 use shipdesign::design::{Edit, EditError};
-use shipdesign::parts::{Layer, PartKind, Rotation, footprint};
+use shipdesign::parts::{Layer, PartKind, Rotation, footprint, is_diagonal};
 use shipdesign::validate::{ExposureMap, Issue};
 use shipdesign::{
     Budget, Money, ShipDesign, apply, design_hash, exposure, starting_pool, validate,
@@ -84,6 +84,11 @@ pub struct Editor {
     /// The issue whose tiles are being pointed at in the list, if any.
     pub focus: Option<usize>,
 
+    /// What kind of station the design phase is docked at, which is what
+    /// decides what the goods panel will sell — `StationKind::sells`. `None`
+    /// is a page with no spawn, which never reaches a Buy anyway.
+    pub market: Option<worldgen::StationKind>,
+
     issues: Vec<Issue>,
     /// Where the outside can see in. Kept beside the issues and refreshed
     /// with them: the painter tints it every frame and working it out sixty
@@ -128,10 +133,18 @@ impl Editor {
             hover: None,
             drag: None,
             focus: None,
+            market: None,
             issues,
             exposed,
             hash,
         }
+    }
+
+    /// Whether the station this phase is docked at sells `resource`. A
+    /// phase with no market sells nothing, and the harness's bare page is
+    /// the only one of those.
+    pub fn sells(&self, resource: ResourceId) -> bool {
+        self.market.is_some_and(|kind| kind.sells(resource))
     }
 
     /// An editor whose design phase is already over: `design` laid out,
@@ -223,6 +236,7 @@ impl Editor {
     /// the same way.
     pub fn buy(&mut self, resource: u32, units: u32) -> u32 {
         match ResourceId::ALL.get(resource as usize).copied() {
+            Some(resource) if !self.sells(resource) => EditError::NotSoldHere.code(),
             Some(resource) => self.edit(Edit::Buy { resource, units }),
             None => EditError::BadCode.code(),
         }
@@ -369,8 +383,9 @@ impl Editor {
     /// The shape depends on the tool, which is the whole of the drag
     /// vocabulary: a rectangle for the things you fill an area with — frame,
     /// deck, conduit — and for taking things off, a straight line for the
-    /// things you draw a run of, which is both kinds of wall, and one tile
-    /// for everything else. A cold store is placed, not painted.
+    /// things you draw a run of, which is both kinds of wall, a diagonal
+    /// staircase for the two corner pieces, and one tile for everything
+    /// else. A cold store is placed, not painted.
     pub fn drag_tiles(&self) -> Vec<(u32, u32)> {
         let Some(drag) = self.drag else {
             return Vec::new();
@@ -384,6 +399,8 @@ impl Editor {
             rectangle(drag.from, drag.to)
         } else if run {
             straight_line(drag.from, drag.to)
+        } else if is_diagonal(self.tool) {
+            diagonal_line(drag.from, drag.to)
         } else {
             vec![drag.to]
         };
@@ -471,6 +488,18 @@ fn straight_line(a: (i32, i32), b: (i32, i32)) -> Vec<(i32, i32)> {
         }
     }
     out
+}
+
+/// A forty-five degree run from `a` towards `b`: one tile a step, each a
+/// tile across and a tile along, as far as the shorter of the two distances
+/// reaches. What a corner piece is dragged along, so a chamfer is one drag
+/// rather than a tile at a time — every tile of it gets the ghost's turn,
+/// which is the right one for the whole run since a chamfer faces one way.
+fn diagonal_line(a: (i32, i32), b: (i32, i32)) -> Vec<(i32, i32)> {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let steps = dx.abs().min(dy.abs());
+    let (sx, sy) = (dx.signum(), dy.signum());
+    (0..=steps).map(|i| (a.0 + i * sx, a.1 + i * sy)).collect()
 }
 
 /// The edit a tool makes. Deck plating is the one tool that is not a plain

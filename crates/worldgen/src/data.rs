@@ -202,6 +202,27 @@ impl StationKind {
         StationKind::Derelict,
         StationKind::Relay,
     ];
+
+    /// Whether a station of this kind has this to sell.
+    ///
+    /// The whole of the rule, and the only place it is written down. A
+    /// derelict sells nothing — there is nobody aboard to sell it. Galvum
+    /// is the mining outposts' alone, which is what makes one somewhere
+    /// worth flying to. An emitter is never sold: it is made at a
+    /// workbench out of galvum, and a station that sold finished emitters
+    /// would make the galvum pointless. Every station **buys** anything;
+    /// this is only about what is on the shelf.
+    pub fn sells(self, resource: physics::ResourceId) -> bool {
+        use physics::ResourceId;
+        match (self, resource) {
+            (StationKind::Derelict, _) => false,
+            // Made at the armoury and the workbench; nobody stocks them.
+            (_, ResourceId::Emitter | ResourceId::Handgun | ResourceId::Vest) => false,
+            (StationKind::MiningOutpost, ResourceId::Galvum) => true,
+            (_, ResourceId::Galvum) => false,
+            _ => true,
+        }
+    }
 }
 
 /// What a body is.
@@ -254,6 +275,44 @@ pub fn parent_suits(kind: StationKind, parent: Option<BodyKind>) -> bool {
         (StationKind::Derelict, _) => true,
         _ => false,
     }
+}
+
+/// What one walk outside brings back from a belt.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct BeltYield {
+    /// Units of ore a suited Bim gathers in one walk.
+    pub ore: u32,
+    /// Whether the belt has galvum in it: one unit a walk, on top.
+    pub galvum: bool,
+}
+
+/// How much ore a walk gathers, least and most, and what share of belts
+/// carry galvum. Placeholders: a walk is an hour and a half outside, and
+/// eight to twelve ore is four to six metal, a wall and a half.
+pub const BELT_ORE: (u32, u32) = (8, 12);
+pub const GALVUM_SHARE: f64 = 0.35;
+
+/// What a belt yields. Off a stream of its own — [`Purpose::BeltYield`] —
+/// seeded by the galaxy, the star and the body, so it is the same for two
+/// players and it moved nothing else when it arrived. A body that is not a
+/// belt yields nothing.
+pub fn belt_yield(galaxy_seed: u64, star_id: u32, body_id: u32, kind: BodyKind) -> BeltYield {
+    if kind != BodyKind::AsteroidBelt {
+        return BeltYield {
+            ore: 0,
+            galvum: false,
+        };
+    }
+    let seed = crate::rng::seed_for(
+        galaxy_seed,
+        star_id,
+        crate::GENERATOR_VERSION,
+        crate::rng::Purpose::BeltYield,
+    );
+    let mut rng = crate::rng::Rng::new(seed ^ crate::rng::mix(body_id as u64));
+    let ore = BELT_ORE.0 + rng.below(BELT_ORE.1 - BELT_ORE.0 + 1);
+    let galvum = rng.chance(GALVUM_SHARE);
+    BeltYield { ore, galvum }
 }
 
 /// What is left to be pulled out of the wreck.
@@ -367,6 +426,59 @@ mod tests {
         }
         // A uniform draw would put half of them above a half.
         assert!(high < 4_000, "{high} systems in ten thousand were desolate");
+    }
+
+    /// A belt yields something and nothing else does; the same belt yields
+    /// the same thing every time, and about a third of them have galvum.
+    #[test]
+    fn a_belt_yields_the_same_thing_every_time_and_only_a_belt_yields() {
+        let a = belt_yield(7, 3, 2, BodyKind::AsteroidBelt);
+        assert_eq!(a, belt_yield(7, 3, 2, BodyKind::AsteroidBelt));
+        assert!(a.ore >= BELT_ORE.0 && a.ore <= BELT_ORE.1, "{a:?}");
+        for kind in [
+            BodyKind::RockyPlanet,
+            BodyKind::GasGiant,
+            BodyKind::IceWorld,
+        ] {
+            assert_eq!(belt_yield(7, 3, 2, kind).ore, 0);
+            assert!(!belt_yield(7, 3, 2, kind).galvum);
+        }
+        let mut rich = 0;
+        for body in 0..1000u32 {
+            if belt_yield(7, body, 1, BodyKind::AsteroidBelt).galvum {
+                rich += 1;
+            }
+        }
+        assert!(
+            (250..=450).contains(&rich),
+            "{rich} rich belts in a thousand"
+        );
+    }
+
+    /// What is on the shelf where: galvum only at an outpost, an emitter
+    /// nowhere, nothing at a derelict, and everything else everywhere
+    /// somebody lives.
+    #[test]
+    fn what_each_kind_of_station_sells() {
+        use physics::ResourceId;
+        for kind in StationKind::ALL {
+            for resource in ResourceId::ALL {
+                let want = match (kind, resource) {
+                    (StationKind::Derelict, _) => false,
+                    (_, ResourceId::Emitter | ResourceId::Handgun | ResourceId::Vest) => false,
+                    (StationKind::MiningOutpost, ResourceId::Galvum) => true,
+                    (_, ResourceId::Galvum) => false,
+                    _ => true,
+                };
+                assert_eq!(kind.sells(resource), want, "{kind:?} {resource:?}");
+            }
+        }
+        assert!(StationKind::MiningOutpost.sells(ResourceId::Galvum));
+        assert!(!StationKind::Orbital.sells(ResourceId::Galvum));
+        assert!(!StationKind::MiningOutpost.sells(ResourceId::Emitter));
+        assert!(StationKind::Relay.sells(ResourceId::Fuel));
+        assert!(StationKind::Orbital.sells(ResourceId::Medkit));
+        assert!(!StationKind::Orbital.sells(ResourceId::Handgun));
     }
 
     /// The matching rule, both ways round: what each kind accepts, and what

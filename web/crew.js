@@ -1,0 +1,1873 @@
+// The crew's panels: everything on a page that is about the Bims rather than
+// about the deck they are standing on. Shared by the room (`bims.js`) and the
+// ship (`ship.js`), which load this first and call `crewHost()`.
+//
+// One copy on purpose. The room aboard the ship *is* the room — the same
+// `Game`, stepped by the world — and its `bims_*` exports are in `ship.wasm`
+// as well as in `bims.wasm`, so the panels that read them are the same code
+// on both pages: the selected crew member's needs and health and diary, the
+// agendas, the tray with the timetable, the work list and the management
+// row, the fixture menus, and the tooltips everything hangs off. What is
+// *not* here is the canvas and the pointer, because those are each page's
+// own — the room fits the deck to a window and the ship turns it with the
+// hull — and the page hands the room its coordinates.
+//
+// The names live here and only here. No strings cross the wasm boundary, so
+// the simulation knows crew member 0 and crew member 1 and nothing else about
+// them; James and Kate are the host's business, the same as "Cold store" and
+// "Making food" are.
+
+/** Fixture codes returned by bims_hit_at and bims_drag_end; must match
+/** Fixture codes returned by bims_hit_at and bims_drag_end; must match
+ * src/room.rs. */
+const HIT_FRIDGE = 1;
+const HIT_STOVE = 2;
+const HIT_BED = 3;
+const HIT_TOILET = 4;
+const HIT_DOOR = 5;
+const HIT_DISHWASHER = 6;
+const HIT_HYDRO = 7;
+const HIT_LOCKER = 8;
+/** One of a ship's powered doors; which one is `bims_hit_door()`. */
+const HIT_SHIP_DOOR = 9;
+/** The shower, where the room has one. */
+const HIT_SHOWER = 10;
+
+/** What `bims_order_door` takes: hold open, close, lock, unlock. Must
+ * match `door::Order::from_code` in crates/game/src/door.rs. */
+const DOOR_OPEN = 0;
+const DOOR_CLOSE = 1;
+const DOOR_LOCK = 2;
+const DOOR_UNLOCK = 3;
+
+/** What bims_order_move() made of a right-click. Only the refusals are worth
+ * saying out loud; the rest the Bim shows you by walking. */
+const ORDER_REFUSED = {
+  3: "Can't get there — the bathroom door is locked.",
+  4: "Can't get there at all.",
+};
+
+/** How long a refusal stays on the status line. */
+const REFUSAL_SECONDS = 4;
+
+/** How long the pointer has to rest on something before it explains itself.
+ * Long enough that crossing a panel on the way somewhere else sets nothing
+ * off, short enough that asking feels like no wait at all. */
+const TIP_DELAY = 300;
+
+/** What each bar is, for the tooltip on its row. Keyed by the name above, so
+ * a need cannot end up with the wrong explanation. */
+const NEED_TIPS = {
+  Rest: "Runs down all day. The timetable is what sends the Bim to bed on an ordinary night — the level only decides whether a scheduled night is worth taking. The trigger under the timetable is the floor beneath that: past it the Bim turns in whatever the hour, unless a meal or the heads comes first.",
+  Food: "Past its trigger — a tenth, until you move it — the Bim goes and cooks itself a meal. Empty for eight hours and malnutrition sets in; a day of it is fatal.",
+  Restroom:
+    "Under 10% the Bim takes itself to the toilet. If it cannot — shut in, under orders — it fidgets, then risks wetting itself, and an hour after the bar empties it has an accident. A meal cooked in a dirty galley — every tile within two of the hob with a mess on it, a wetting or worse, is a one-in-five chance — is food poisoning: for two days this runs three times as fast and empties straight into an accident.",
+  Cleanliness:
+    "Not a clock like the others: it follows the mess within three tiles of the Bim and whatever the Bim has on itself. At nothing it treads carefully, then keeps away from the mess, then is sick in it every half hour.",
+  Washing:
+    "A day's grime, on the clock like food: it runs down over the waking day and the Bim wants a shower about once a day. Past its trigger it goes and takes one, where the ship has a shower — a room without one is a Bim that goes on wanting a wash and nothing worse. Separate from Cleanliness, which is the deck around it.",
+  Socializing:
+    "The one need that wants another Bim rather than a fixture. Past its trigger the Bim goes and finds the other one, and they stand and talk about whatever they have been doing. This bar is the comfortable end of it; what matters is the count of days underneath, because going without runs on a far longer clock — three days alone and a Bim is low and slow, five and it sits down on the deck, seven and it starts hurting itself.",
+};
+
+const HEALTH_TIP =
+  "Only the worst stage of malnutrition actually costs health, and eating properly walks it back. The lines underneath name whatever is wrong.";
+
+const AUTONOMY_TIP =
+  "Off, the Bim starts nothing by itself — no meals, no sleep, no trips to the toilet — but still does everything it is told. The levels carry on moving either way.";
+
+/** The three targets, by `manager::Stock` code: the ids of their inputs in
+ * the stock table, and the one explanation on the column's heading. What the
+ * place keeps in the cold store; the bay plants to the first two and the
+ * galley cooks to the third. */
+const KEEP_KEYS = ["veg", "tofu", "stew"];
+const TARGET_TIP =
+  "A target is a standing order: keep at least this many in the cold store. Whenever the count falls below it, the work goes on the crew's list by itself and whoever is free does it — for vegetables and tofu, planting a tray in the hydroponic bay (greens, or soy for tofu) and carrying the harvest to the store; for stew, cooking a pot on the hob out of one vegetable and one block of tofu and putting it on the shelf. Once the count is back at the target the job comes off the list, and above it nothing is grown or cooked. 0 means never. How soon it gets done is the Planting and Cooking priorities on the Work tab.";
+
+/** Who is aboard, in the order wasm indexes them.
+ *
+ * The names live here and only here. No strings cross the wasm boundary, so
+ * the simulation knows crew member 0 and crew member 1 and nothing else about
+ * them; James and Kate are the host's business, the same as "Cold store" and
+ * "Making food" are. */
+const CREW_NAMES = ["James", "Kate", "Priya", "Tomas"];
+
+/** Months of the ship's calendar. Twelve of them and no leap years — see
+ * `src/clock.rs`, which does the arithmetic; these are only the words. */
+const MONTH_NAMES = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
+
+/** How a Bim says each thing it remembers, by the code from `src/memory.rs`.
+ *
+ * First person, because it is its diary. `d` is the one detail that came with
+ * the entry — a stage, which of the crew — and each of these is free to
+ * ignore it.
+ *
+ * Only things that actually went wrong are in here, because only those are
+ * written down any more: the ordinary run of a day left a wall of "Went to the
+ * heads." to scroll past. An entry with no line here is dropped from the page
+ * rather than padded out — see `paintDiary`. */
+const MEMORY_LINES = {
+  20: (d) =>
+    d === 1
+      ? "Could not hold it. I would rather not talk about it."
+      : "Did not quite make it to the heads.",
+  21: () => "Was sick on the deck.",
+  22: () => "Dropped off where I was standing.",
+  23: (d) =>
+    [
+      "",
+      "Getting hungry. Properly hungry.",
+      "I have not eaten in a long time.",
+      "I am starving. I can feel it in my hands.",
+    ][d] ?? "Going hungry.",
+  24: (d) =>
+    [
+      "",
+      "Tired. I should sleep.",
+      "I have not slept in far too long.",
+      "I cannot keep my eyes open.",
+    ][d] ?? "Going without sleep.",
+  25: (d) => `Saw ${CREW_NAMES[d] ?? "one of the crew"} have an accident.`,
+  26: (d) => `Saw ${CREW_NAMES[d] ?? "one of the crew"} being sick.`,
+  27: (d) =>
+    d >= 7
+      ? "Nobody has spoken to me in a week."
+      : d >= 5
+        ? "The quiet is starting to get to me."
+        : "Feeling low. It has been a few days since anyone said anything.",
+  28: () => "Sat down on the deck and could not get up for a while.",
+  29: (d) => `Hurt myself. ${d} points of it.`,
+  30: (d) => `${CREW_NAMES[d] ?? "One of the crew"} died today.`,
+  31: () => "Something I ate. Cooked in that galley — I have never been so ill.",
+};
+
+/** What a Bim says it is talking about, by the code that came back from
+ * `bims_chat_topic`. Third person and short: this goes in a bubble over its
+ * head, not in its diary, so it has to fit.
+ *
+ * **Two code spaces, and they do not overlap.** Small talk — what the Bim has
+ * actually been doing — comes back as a `JOB_` code, which runs from 1. The
+ * things that happened *to* it come out of its diary as a `memory::What` code,
+ * which starts at 20. Keeping the table flat over both is what lets a
+ * conversation move between "the sweeping" and "an accident" without the
+ * simulation having to say which sort of thing it is handing over.
+ *
+ * The wording is deliberately not derived from `MEMORY_LINES`: "Was sick on
+ * the deck." is a diary entry, and "being sick" is what you say about it. */
+const CHAT_TOPICS = {
+  1: "cooking",
+  2: "the cooker",
+  3: "that nap",
+  4: "the night",
+  5: "the heads",
+  6: "the fridge",
+  7: "that door",
+  8: "the lock",
+  9: "the dishwasher",
+  10: "cooking",
+  11: "the bay",
+  12: "leftovers",
+  13: "the sweeping",
+  20: "an accident",
+  21: "being sick",
+  22: "dropping off",
+  23: "being hungry",
+  24: "being tired",
+  25: "what happened",
+  26: "what happened",
+  27: "how it has been",
+  28: "a bad day",
+  29: "a bad day",
+  30: "the one who died",
+  31: "a bad meal",
+};
+
+/** What a Bim with nobody to talk to has in the bubble. Nothing to report is
+ * still a conversation. */
+const CHAT_NOTHING = "nothing much";
+
+/** The needs, in the order wasm indexes them. */
+const NEED_NAMES = ["Rest", "Food", "Restroom", "Cleanliness", "Socializing", "Washing"];
+
+/** Which of those get a trigger in the schedule tab. Restroom and cleanliness
+ * are left alone: the first is not something a player should be able to talk
+ * the Bim out of, and the second has no errand behind it to start. Washing
+ * gets one: a shower is put off the way a meal is. */
+const TRIGGER_NEEDS = [0, 1, 5];
+
+const TRIGGER_TIP =
+  "How low a need may get before the Bim breaks off and does something about it: past the mark on a row it takes itself to bed, or goes and cooks, on its own account. The timetable above says when it may sleep; the Rest threshold is the floor under that — past it the Bim turns in whatever the hour, unless a meal or the heads comes first. Untick one and that need still runs down and still tells on the Bim; only the errand stops.";
+
+/** What `bims_spot_at` says is under the pointer. Must match the `SPOT_`
+ * codes in src/room.rs. */
+const SPOT_NAMES = [
+  "Outside the hull",
+  "Deck plating",
+  "Bulkhead",
+  "Worktop",
+  "Chopping board",
+  "Cold store",
+  "Hob",
+  "Dishwasher",
+  "Table",
+  "Chair",
+  "Bunk",
+  "Hydroponic bay",
+  "Toilet",
+  "Washbasin",
+  "Bathroom door",
+  "Deck plating",
+  "Broom locker",
+  "Door",
+  "Helm",
+  "Workbench",
+  "Suit locker",
+  "Shower",
+];
+
+/** The few of those the panels point at by name. Indices into SPOT_NAMES, so
+ * they are the same codes `bims_set_highlight` takes. */
+const SPOT_NOTHING = 0;
+const SPOT_FRIDGE = 5;
+const SPOT_HOB = 6;
+const SPOT_BAY = 11;
+
+/** Which fixture answers each of the three targets: the bay grows the first
+ * two, the hob makes the third. Indexed by `manager::Stock`. */
+const KEEP_SPOTS = [SPOT_BAY, SPOT_BAY, SPOT_HOB];
+const SPOT_LOCKER = 16;
+/** The helm: the work list's row rings it, and nothing reads it back. */
+const SPOT_HELM = 18;
+/** A workstation, the same way: the craft row rings the first bench. */
+const SPOT_BENCH = 19;
+/** The suit locker, the same way again: the mining row rings it. */
+const SPOT_SUIT_LOCKER = 20;
+const SPOT_SHOWER = 21;
+
+/** Which of those are deck: the only ones a mess can be lying on. The filth
+ * grid covers the whole room, so asking about the tile under the fridge would
+ * report whatever was spilt on the floor the fridge is standing on. */
+const DECK_SPOTS = new Set([1, 15]);
+
+/** The spots that are only a word for *where* the pointer is — outside, deck,
+ * a bulkhead — rather than a thing the room has a picture of. Aboard the
+ * ship every part the room does not draw reads as one of these, so the ship
+ * page names those off the design instead and lets the room speak for the
+ * fixtures it knows. */
+const PLAIN_SPOTS = new Set([0, 1, 2, 15]);
+
+/** What is on the deck there, by the code from `bims_spot_mess`. Ordered
+ * least bad first, the same as `filth::Mess`, and indexed by the code — so a
+ * new kind of mess goes in at its own rank rather than on the end. */
+const MESS_NAMES = ["", "Grime", "Wet", "Soiled", "Vomit"];
+
+/** The three stages of going without sleep, by the number wasm reports. */
+const DROWSINESS = [
+  "",
+  "Sleepy — fumbling, errands a quarter longer",
+  "Sleep deprived — errands half as long again",
+  "Past it — errands twice as long, and dropping off on its feet",
+];
+
+/** The three stages of going without, by the number wasm reports. */
+const CONDITIONS = [
+  "",
+  "Mild malnutrition — moving slowly",
+  "Malnutrition — slower, and tiring twice as fast",
+  "Extreme malnutrition — losing health",
+];
+
+/** How badly the Bim needs the toilet, by the number wasm reports. */
+const URGES = [
+  "",
+  "Needs the toilet — fidgeting",
+  "Needs the toilet badly — may not make it",
+  "Bursting — an accident within the hour",
+];
+
+/** How far gone it is for want of a clean place to stand. */
+const DISCOMFORTS = [
+  "",
+  "Uneasy about the mess — treading carefully",
+  "Sickened by the mess — keeping away from it",
+  "Sickened by the mess — being sick in it every half hour",
+];
+
+/** And for want of anybody to talk to. Days, not hours: this one is slow, and
+ * saying so is the only warning a player gets before it turns serious. */
+const LONELINESS = [
+  "",
+  "Desocialized — low, and a tenth slower at everything",
+  "Badly desocialized — sits down on the deck every few hours",
+  "Isolated — hurting itself, and past ten days it may stop altogether",
+];
+
+/** The errand codes shared by bims_activity() and bims_agenda_job(). */
+const JOB_NAMES = {
+  1: "Making food",
+  2: "Working the cooker",
+  3: "Nap",
+  4: "Sleep",
+  5: "Using the toilet",
+  6: "Fridge door",
+  7: "Bathroom door",
+  8: "Door lock",
+  9: "Starting the wash",
+  11: "Tending the bay",
+  12: "Eating leftovers",
+  13: "Sweeping up",
+  14: "Talking",
+  15: "Cooking stew for the store",
+  16: "Warming up a stew",
+  17: "Taking a shower",
+  18: "Making something",
+  19: "Walking outside",
+};
+
+/** The same errands as the status line says them. A lie-down is left out: the
+ * countdown from bims_rest_left() is more use than the name. */
+const ACTIVITY = {
+  1: "Making food…",
+  2: "Off to the cooker…",
+  5: "Using the toilet — a wash to follow",
+  11: "In the hydroponics…",
+  12: "Helping itself to the pot…",
+  13: "Sweeping the deck…",
+  14: "Having a word with the other one…",
+  15: "Cooking a stew for the store…",
+  16: "Warming a stew through…",
+  17: "In the shower…",
+  18: "At the bench…",
+  19: "Outside, gathering ore…",
+};
+
+/** Minutes in a game day, for wrapping a wake-up time round midnight. */
+const MINUTES_PER_DAY = 24 * 60;
+
+/** Below this the pointer moved so little that it counts as a click, not a sweep. */
+const CLICK_SLOP = 4;
+
+/** The name over a Bim's head: how big, and how far above the body it sits.
+ * The lift is in room units and scaled with the view, so the name stays over
+ * the head at any window size; the size is in CSS pixels, because type that
+ * scaled with the room would go illegible on a small window. */
+const NAME_SIZE = 12;
+const NAME_LIFT = 46;
+/** The player's own, in the colour everything steerable uses, and the rest of
+ * the crew in plain ink. */
+const NAME_YOURS = "#7fd1a8";
+const NAME_THEIRS = "#e7efe9";
+
+
+/** A clock reading, wrapped into one day. Time itself is kept in wasm; the
+ * only thing that happens here is the formatting. */
+function clockText(minutes) {
+  const m = ((minutes % MINUTES_PER_DAY) + MINUTES_PER_DAY) % MINUTES_PER_DAY;
+  const hh = String(Math.floor(m / 60)).padStart(2, "0");
+  const mm = String(Math.floor(m % 60)).padStart(2, "0");
+  return `${hh}:${mm}`;
+}
+
+/** A length of time, said the way a person would say it. */
+function spanText(minutes) {
+  const total = Math.round(minutes);
+  if (total < 60) return `${total} min`;
+  const hours = Math.floor(total / 60);
+  const rest = total % 60;
+  if (rest === 0) return `${hours} hour${hours === 1 ? "" : "s"}`;
+  return `${hours}h ${rest}m`;
+}
+
+
+/** The crew's panels, built onto the page and wired to `wasm`.
+ *
+ * `wasm` is whichever module has the room in it — `bims.wasm` on the room's
+ * page, `ship.wasm` on the ship's, where the same `bims_*` exports act on the
+ * room aboard. `player` is the one the mouse steers and `crewCount` how many
+ * there are, both read out of wasm by the caller rather than assumed.
+ *
+ * Every element is found by id, and the two pages use the same ids for the
+ * same things — `#side`, `#agendas`, `#tray` and what is in it, `#menu`,
+ * `#tip`, `#recruited` — so the stylesheet is shared as well (`crew.css`).
+ * What comes back is what the page's own code needs: `paint()` for every
+ * frame, the menu for the pointer, the tooltip and highlight helpers for the
+ * page's own controls, and the names. */
+function crewHost({ wasm, player, crewCount, name }) {
+  const menu = document.getElementById("menu");
+  const tip = document.getElementById("tip");
+  const autonomy = document.getElementById("autonomy");
+  const agendas = document.getElementById("agendas");
+  const side = document.getElementById("side");
+  const recruited = document.getElementById("recruited");
+
+  // --- tooltips ---------------------------------------------------------
+  //
+  // Everything explanatory is kept off the page and shown on hover instead:
+  // the panels stay small, and the deck keeps the room it needs. The delay is
+  // what makes that bearable — sweeping the pointer across a panel on the way
+  // somewhere else sets nothing off, and only resting on a thing asks it what
+  // it is.
+  //
+  // Listeners go on each element rather than one delegated handler, because
+  // `pointerenter` does not bubble and this way nothing has to be matched
+  // against a selector on every move of the mouse.
+
+  let tipTimer = null;
+  let tipFor = null;
+
+  function hideTip() {
+    if (tipTimer !== null) {
+      clearTimeout(tipTimer);
+      tipTimer = null;
+    }
+    tipFor = null;
+    tip.hidden = true;
+  }
+
+  function showTip(el, text) {
+    tipFor = el;
+    tip.textContent = text;
+    tip.hidden = false;
+    // Under the thing it explains, nudged back inside the window if that
+    // would hang it off an edge. Measured after it is shown, or it has no
+    // size to measure.
+    const box = el.getBoundingClientRect();
+    const own = tip.getBoundingClientRect();
+    const margin = 8;
+    let left = box.left;
+    let top = box.bottom + 6;
+    if (left + own.width > window.innerWidth - margin) {
+      left = window.innerWidth - margin - own.width;
+    }
+    if (top + own.height > window.innerHeight - margin) {
+      top = box.top - 6 - own.height;
+    }
+    tip.style.left = `${Math.max(margin, left)}px`;
+    tip.style.top = `${Math.max(margin, top)}px`;
+  }
+
+  /** Give `el` something to say, after TIP_DELAY of resting on it.
+   *
+   * Only ever attached to something that *looks* like it has something to say
+   * — an underlined word or a "?" — so a tooltip is always answered a question
+   * the player asked rather than appearing out of a panel they were only
+   * crossing. The two wrappers under this are the whole vocabulary. */
+  function explain(el, text) {
+    if (!el || !text) return;
+    el.setAttribute("data-tip", "");
+    const open = () => {
+      if (tipTimer !== null) clearTimeout(tipTimer);
+      tipTimer = setTimeout(() => {
+        tipTimer = null;
+        showTip(el, text);
+      }, TIP_DELAY);
+    };
+    const shut = () => {
+      if (tipFor === el || tipTimer !== null) hideTip();
+    };
+    el.addEventListener("pointerenter", open);
+    el.addEventListener("pointerleave", shut);
+    // Keyboard and touch: a focused control says its piece too, and a tap
+    // anywhere dismisses whatever is showing rather than leaving it stuck.
+    el.addEventListener("focus", open);
+    el.addEventListener("blur", shut);
+    el.addEventListener("pointerdown", shut);
+  }
+
+  /** Underline a word that already names the thing, and hang its explanation
+   * off that. The word is the affordance: dotted underline, help cursor. */
+  function explainWord(el, text) {
+    if (!el) return;
+    el.className = `${el.className} asks`.trim();
+    explain(el, text);
+  }
+
+  /** A "?" to put beside something that has no word of its own to underline.
+   * `label` is what a screen reader reads instead of the bare mark. */
+  function questionMark(text, label) {
+    const mark = document.createElement("button");
+    mark.type = "button";
+    mark.className = "what";
+    mark.textContent = "?";
+    mark.setAttribute("aria-label", label);
+    explain(mark, text);
+    return mark;
+  }
+
+  window.addEventListener("blur", hideTip);
+  window.addEventListener("resize", hideTip);
+
+  // --- fixture menus ----------------------------------------------------
+
+  function closeMenu() {
+    menu.hidden = true;
+    menu.replaceChildren();
+  }
+
+  // Clicking away from an open menu dismisses it.
+  window.addEventListener("pointerdown", (e) => {
+    if (!menu.hidden && !menu.contains(e.target)) closeMenu();
+  });
+
+  /** Who has the run of a shared part of the ship, or null for nobody.
+   *
+   * wasm counts from 1 so that 0 can mean "free"; this turns that back into a
+   * name, and into null when it is the player's own Bim — being told you
+   * cannot cook because you are already cooking is no help. */
+  function heldBy(code) {
+    if (code === 0 || code - 1 === player) return null;
+    return crewName(code - 1);
+  }
+
+  /** Build a dropdown for the fixture that was clicked, at the cursor. */
+  function openMenu(fixture, event) {
+    if (wasm.bims_is_alive(player) === 0) return;
+    const busy = wasm.bims_is_busy(player) !== 0;
+    const items = [];
+    // Nothing here is remote: every item walks the Bim over to do it by hand.
+    // Nor does anything wait for the Bim to be free — a new errand takes over,
+    // and what it displaced goes on the agenda to be finished afterwards.
+    //
+    // Every menu acts on the player's Bim. The other crew take no orders at
+    // all, which is why there is no "whose" here to choose.
+    const takesOver = busy ? "takes over — the rest waits its turn" : null;
+    // One pot, one board, one pan: while somebody else's hands are in them the
+    // errand will not start, so say whose rather than leaving an item that
+    // quietly does nothing.
+    const galley = heldBy(wasm.bims_galley_held_by());
+    const heads = heldBy(wasm.bims_heads_held_by());
+    const shower = heldBy(wasm.bims_shower_held_by());
+
+    if (fixture === HIT_FRIDGE) {
+      // Two counts, not one: a stew is two vegetables and a bowl is a block of
+      // tofu with a salad, so either can be the thing that runs out.
+      const veg = wasm.bims_store_veg();
+      const tofu = wasm.bims_store_tofu();
+      const noStew = veg < 2;
+      const noBowl = tofu < 1 || veg < 1;
+      items.push({
+        label: "Cold store",
+        hint: `${veg} veg, ${tofu} tofu, ${wasm.bims_store_stew()} stew ready — keeping ${wasm.bims_target(0)}, ${wasm.bims_target(1)} and ${wasm.bims_target(2)}`,
+        disabled: true,
+        run: () => {},
+      });
+      items.push({
+        label: "Make a stew",
+        hint: galley
+          ? `${galley} is in the galley`
+          : noStew
+            ? "needs two vegetables"
+            : (takesOver ?? "two vegetables, chopped and cooked"),
+        disabled: noStew || galley !== null,
+        run: () => wasm.bims_make_stew(),
+      });
+      items.push({
+        label: "Make a bowl",
+        hint: galley
+          ? `${galley} is in the galley`
+          : noBowl
+            ? "needs a block of tofu and a salad"
+            : (takesOver ?? "tofu chopped in with the salad, no cooking"),
+        disabled: noBowl || galley !== null,
+        run: () => wasm.bims_make_bowl(),
+      });
+      items.push({
+        label: wasm.bims_fridge_is_open() ? "Close door" : "Open door",
+        hint: galley
+          ? `${galley} is in the galley`
+          : (takesOver ?? "the Bim walks over to it"),
+        disabled: galley !== null,
+        run: () => wasm.bims_toggle_fridge(),
+      });
+    } else if (fixture === HIT_STOVE) {
+      // The pot lives on the hob, so what is left in it belongs on this menu.
+      const left = wasm.bims_pot_servings();
+      if (left > 0) {
+        items.push({
+          label: "Eat from the pot",
+          hint: galley
+            ? `${galley} is in the galley`
+            : (takesOver ??
+              `${left} of ${wasm.bims_pot_capacity()} helpings left — no cooking`),
+          disabled: galley !== null,
+          run: () => wasm.bims_eat_leftovers(),
+        });
+      }
+      // A stew for the shelf: one vegetable and one block of tofu, cooked
+      // and put away rather than eaten. The same errand the stew target
+      // starts by itself.
+      const noStock = wasm.bims_store_veg() < 1 || wasm.bims_store_tofu() < 1;
+      items.push({
+        label: "Cook a stew for the store",
+        hint: galley
+          ? `${galley} is in the galley`
+          : noStock
+            ? "needs a vegetable and a block of tofu"
+            : (takesOver ?? `${wasm.bims_store_stew()} ready — keeping ${wasm.bims_target(2)}`),
+        disabled: noStock || galley !== null,
+        run: () => wasm.bims_stock_stew(),
+      });
+      // A hob left lit shuts itself off; say so rather than letting it look
+      // like the game changed its mind.
+      const idleLeft = wasm.bims_stove_idle_left();
+      items.push({
+        label: wasm.bims_stove_is_on() ? "Turn off" : "Turn on",
+        hint: galley
+          ? `${galley} is in the galley`
+          : (takesOver ??
+            (idleLeft > 0
+              ? `left on — cuts out in ${spanText(idleLeft)}`
+              : "the Bim walks over to it")),
+        disabled: galley !== null,
+        run: () => wasm.bims_toggle_stove(),
+      });
+    } else if (fixture === HIT_DISHWASHER) {
+      const loaded = wasm.bims_dishwasher_loaded();
+      const capacity = wasm.bims_dishwasher_capacity();
+      const left = wasm.bims_dishwasher_cycle_left();
+      const now = wasm.bims_clock_minutes();
+      if (left > 0) {
+        items.push({
+          label: "Running",
+          hint: `${spanText(left)} left — done at ${clockText(now + left)}`,
+          disabled: true,
+          run: () => {},
+        });
+      }
+      items.push({
+        label: "Run now",
+        hint: galley
+          ? `${galley} is in the galley`
+          : left > 0
+            ? "already running"
+            : loaded === 0
+              ? "nothing in it"
+              : (takesOver ??
+                `${loaded} of ${capacity} stowed — the Bim goes and presses it`),
+        disabled: left > 0 || loaded === 0 || galley !== null,
+        run: () => wasm.bims_run_dishwasher(),
+      });
+    } else if (fixture === HIT_SHOWER) {
+      const canShower = wasm.bims_can_shower() !== 0;
+      items.push({
+        label: "Take a shower",
+        hint: shower
+          ? `${shower} is in it`
+          : canShower
+            ? (takesOver ?? "and come out clean")
+            : "can't get to it",
+        disabled: !canShower || shower !== null,
+        run: () => wasm.bims_take_shower(),
+      });
+    } else if (fixture === HIT_TOILET) {
+      // A locked door only stops a Bim on the wrong side of it, so ask whether
+      // this one can actually get there rather than whether the door is shut.
+      const canUse = wasm.bims_can_use_toilet() !== 0;
+      items.push({
+        label: "Use",
+        hint: heads
+          ? `${heads} is in there`
+          : canUse
+            ? (takesOver ?? "and wash at the basin after")
+            : "can't get to it — the door is locked",
+        disabled: !canUse || heads !== null,
+        run: () => wasm.bims_use_toilet(),
+      });
+    } else if (fixture === HIT_DOOR) {
+      const open = wasm.bims_door_is_open() !== 0;
+      const locked = wasm.bims_door_is_locked() !== 0;
+      items.push({
+        label: open ? "Close door" : "Open door",
+        hint: heads
+          ? `${heads} is in there`
+          : locked
+            ? "unlock it first"
+            : (takesOver ?? "the Bim walks over to it"),
+        disabled: locked || heads !== null,
+        run: () => wasm.bims_toggle_door(),
+      });
+      items.push({
+        label: locked ? "Unlock" : "Lock",
+        hint: heads
+          ? `${heads} is in there`
+          : (takesOver ?? (locked ? "at the panel" : "shuts it as well")),
+        disabled: heads !== null,
+        run: () => wasm.bims_toggle_door_lock(),
+      });
+    } else if (fixture === HIT_SHIP_DOOR) {
+      // A powered door in a bulkhead. It opens by itself for whoever walks
+      // up and shuts behind them; these are the four things the player can
+      // do to one, each an errand that walks the Bim to the panel — the
+      // bathroom door's arrangement. "Open" holds it open, "Close" hands it
+      // back to itself, and a locked door is a wall until it is unlocked.
+      const door = wasm.bims_hit_door();
+      const held = wasm.bims_ship_door_is_held(door) !== 0;
+      const locked = wasm.bims_ship_door_is_locked(door) !== 0;
+      items.push({
+        label: held ? "Close door" : "Hold door open",
+        hint: locked
+          ? "unlock it first"
+          : (takesOver ?? (held ? "and let it shut behind people again" : "so it stops shutting itself")),
+        disabled: locked,
+        run: () => wasm.bims_order_door(door, held ? DOOR_CLOSE : DOOR_OPEN),
+      });
+      items.push({
+        label: locked ? "Unlock" : "Lock",
+        hint: takesOver ?? (locked ? "at the panel" : "shuts it, and nobody gets through"),
+        disabled: false,
+        run: () => wasm.bims_order_door(door, locked ? DOOR_UNLOCK : DOOR_LOCK),
+      });
+    } else if (fixture === HIT_LOCKER) {
+      // The one errand that undoes a mess. The Bim gets round to it by itself
+      // when it has nothing else on; this is for when you would rather it did
+      // so now.
+      const dirty = wasm.bims_dirty_tiles();
+      const broom = heldBy(wasm.bims_broom_held_by());
+      items.push({
+        label: "Sweep up",
+        hint: broom
+          ? `${broom} has the broom`
+          : dirty === 0
+            ? "the deck is clean"
+            : (takesOver ??
+              `${dirty} patch${dirty === 1 ? "" : "es"} of deck want it`),
+        disabled: dirty === 0 || broom !== null,
+        run: () => wasm.bims_sweep_up(),
+      });
+    } else if (fixture === HIT_HYDRO) {
+      // The bay's two controls: follow the manager's target, or a standing
+      // order that ignores it. Both are settings rather than errands — the
+      // Bim still does every bit of the planting and lifting on foot.
+      const spots = wasm.bims_hydro_spots();
+      const automated = wasm.bims_hydro_automated() !== 0;
+      const asleep = wasm.bims_hydro_hibernating() !== 0;
+      const forced = wasm.bims_hydro_forced();
+      const ripe = wasm.bims_hydro_ripe();
+      let growing = 0;
+      let furthest = 0;
+      for (let i = 0; i < spots; i++) {
+        if (wasm.bims_hydro_crop(i) === 0) continue;
+        growing++;
+        furthest = Math.max(furthest, wasm.bims_hydro_growth(i));
+      }
+      const along =
+        ripe || !growing ? "" : `, furthest ${Math.round(furthest * 100)}% grown`;
+
+      items.push({
+        label: "Trays",
+        hint: `${growing} of ${spots} planted${ripe ? `, ${ripe} ready to lift` : along}`,
+        disabled: true,
+        run: () => {},
+      });
+      items.push({
+        label: "Store",
+        hint: `${wasm.bims_store_veg()} veg, ${wasm.bims_store_tofu()} tofu — keeping ${wasm.bims_target(0)} and ${wasm.bims_target(1)}`,
+        disabled: true,
+        run: () => {},
+      });
+      items.push({
+        label: automated ? "Stop automating" : "Automate",
+        hint: automated
+          ? asleep
+            ? "at target — holding what is planted"
+            : "following the manager's target"
+          : "grow whatever the store is short of",
+        run: () => wasm.bims_set_hydro_automated(automated ? 0 : 1),
+      });
+      for (const [code, name, what] of [
+        [1, "Plant greens in every tray", "two of these in a stew"],
+        [2, "Plant soy in every tray", "a day and a half, and it presses into tofu"],
+      ]) {
+        const on = forced === code;
+        items.push({
+          label: on ? `${name} ✓` : name,
+          hint: on ? "standing order — click to lift it" : `no matter the target · ${what}`,
+          run: () => wasm.bims_set_hydro_forced(on ? 0 : code),
+        });
+      }
+    } else if (fixture === HIT_BED) {
+      // Both lengths come from wasm, so the menu cannot promise half an hour
+      // and have the Bim sleep for something else.
+      const now = wasm.bims_clock_minutes();
+      for (const rest of [
+        { minutes: wasm.bims_nap_minutes(), label: "Nap", run: wasm.bims_nap },
+        {
+          minutes: wasm.bims_sleep_minutes(),
+          label: "Sleep",
+          run: wasm.bims_sleep,
+        },
+      ]) {
+        items.push({
+          label: `${rest.label} — ${spanText(rest.minutes)}`,
+          hint: takesOver ?? `up around ${clockText(now + rest.minutes)}`,
+          run: rest.run,
+        });
+      }
+    }
+    if (!items.length) return;
+
+    menu.replaceChildren(
+      ...items.map((item) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.disabled = !!item.disabled;
+        const label = document.createElement("span");
+        label.textContent = item.label;
+        button.appendChild(label);
+        if (item.hint) {
+          const hint = document.createElement("small");
+          hint.textContent = item.hint;
+          button.appendChild(hint);
+        }
+        button.addEventListener("click", () => {
+          item.run();
+          closeMenu();
+        });
+        return button;
+      }),
+    );
+
+    // Place at the cursor, then pull back inside the window if it would spill.
+    menu.hidden = false;
+    const pad = 8;
+    const box = menu.getBoundingClientRect();
+    const x = Math.min(event.clientX, window.innerWidth - box.width - pad);
+    const y = Math.min(event.clientY, window.innerHeight - box.height - pad);
+    menu.style.left = `${Math.max(pad, x)}px`;
+    menu.style.top = `${Math.max(pad, y)}px`;
+    menu.querySelector("button:not([disabled])")?.focus();
+  }
+
+  // --- what the crew want -------------------------------------------------
+  //
+  // One panel per crew member, always on show: these are what set everything
+  // else going, so watching a bar run down is watching the next errand arrive.
+  // The rows never change, only their widths.
+  //
+  // Kate gets a panel even though the player cannot order her about. That is
+  // the point of showing it: the first you should hear of her going hungry is
+  // her bar, not her lying on the deck.
+
+  const crew = [];
+
+  /** The name of crew member `who`. Nothing but the host knows these — no
+   * strings cross the wasm boundary, so wasm has crew 0 and crew 1. */
+  /** Who Bim `who` is. The page may say — the ship's page has a station's
+   * residents in the room while docked, after the crew, and names them its
+   * own way — else the crew's names by slot. */
+  function crewName(who) {
+    return name?.(who) ?? CREW_NAMES[who] ?? `Crew ${who + 1}`;
+  }
+
+  /** The header that says whose panel this is. */
+  function whoHeader(who) {
+    const head = document.createElement("div");
+    head.className = who === player ? "who yours" : "who";
+    const tag = document.createElement("span");
+    tag.className = "tag";
+    tag.textContent = crewName(who);
+    const note = document.createElement("span");
+    note.className = "aside";
+    note.textContent = who === player ? "yours" : "her own";
+    head.append(tag, note);
+    return head;
+  }
+
+  function buildCrew() {
+    const count = wasm.bims_need_count();
+    for (let who = 0; who < crewCount; who++) {
+      const column = document.createElement("section");
+      column.className = "crew";
+
+      const needs = document.createElement("ul");
+      needs.className = "needs";
+      needs.setAttribute("aria-label", `What ${crewName(who)} wants`);
+
+      const rows = [];
+      for (let i = 0; i < count; i++) {
+        const li = document.createElement("li");
+
+        const name = document.createElement("span");
+        name.className = "name";
+        name.textContent = NEED_NAMES[i] ?? `Need ${i + 1}`;
+
+        const bar = document.createElement("span");
+        bar.className = "bar";
+        const fill = document.createElement("i");
+        bar.appendChild(fill);
+
+        const pct = document.createElement("span");
+        pct.className = "pct";
+
+        li.append(name, bar, pct);
+        // Only the first panel's words are affordances. The explanation is
+        // the same for both and two sets of underlines down one edge of the
+        // screen is noise, not help.
+        if (who === 0) explainWord(name, NEED_TIPS[name.textContent]);
+        rows.push({ li, fill, pct, urgent: false });
+        needs.appendChild(li);
+      }
+
+      const health = document.createElement("div");
+      health.className = "health";
+      health.setAttribute("aria-label", `How ${crewName(who)} is bearing up`);
+      const row = document.createElement("div");
+      row.className = "row";
+      const hname = document.createElement("span");
+      hname.className = "name";
+      hname.textContent = "Health";
+      const hbar = document.createElement("span");
+      hbar.className = "bar";
+      const hfill = document.createElement("i");
+      hbar.appendChild(hfill);
+      const hpct = document.createElement("span");
+      hpct.className = "pct";
+      row.append(hname, hbar, hpct);
+      if (who === 0) explainWord(hname, HEALTH_TIP);
+
+      const lines = {};
+      for (const kind of [
+        "condition",
+        "drowsiness",
+        "urge",
+        "discomfort",
+        "poisoning",
+        "loneliness",
+      ]) {
+        const p = document.createElement("p");
+        p.className = kind;
+        lines[kind] = { el: p, kind, shown: null };
+      }
+      health.append(row, ...Object.values(lines).map((l) => l.el));
+
+      const sheet = buildSheet(who);
+
+      column.className = who === player ? "crew" : "crew theirs";
+      column.hidden = true;
+      column.append(whoHeader(who), needs, health, sheet.el);
+      side.appendChild(column);
+      crew.push({ who, column, rows, health, hfill, hpct, lines, sheet });
+    }
+  }
+
+  // --- who they are, and what they remember -------------------------------
+  //
+  // The character sheet: a tabbed panel under the bars, laid out the way the
+  // tray at the bottom left is, because it is the same kind of thing — a few
+  // pages of detail you open when you want them rather than a readout that
+  // has to be watched.
+
+  function buildSheet(who) {
+    const el = document.createElement("section");
+    el.className = "sheet";
+    el.setAttribute("aria-label", `About ${crewName(who)}`);
+
+    const tabs = document.createElement("div");
+    tabs.className = "sheet-tabs";
+    const body = document.createElement("div");
+    body.className = "sheet-body";
+
+    const pages = {};
+    for (const [key, label] of [
+      ["about", "About"],
+      ["memory", "Memory"],
+    ]) {
+      const tab = document.createElement("button");
+      tab.type = "button";
+      tab.className = key === "about" ? "tab on" : "tab";
+      tab.dataset.sheetTab = key;
+      tab.textContent = label;
+      tabs.appendChild(tab);
+
+      const page = document.createElement("div");
+      page.className = key === "about" ? "about" : "diary";
+      page.dataset.sheet = key;
+      page.hidden = key !== "about";
+      body.appendChild(page);
+      pages[key] = page;
+
+      tab.addEventListener("click", () => {
+        for (const other of tabs.children) {
+          other.className = other === tab ? "tab on" : "tab";
+        }
+        for (const p of body.children) {
+          p.hidden = p.dataset.sheet !== key;
+        }
+      });
+    }
+
+    // The About page never changes after the first paint — a name, a birthday
+    // and an age, and only the last of those can move, once a year.
+    const about = {};
+    for (const [key, label] of [
+      ["name", "Name"],
+      ["age", "Age"],
+      ["born", "Born"],
+    ]) {
+      const row = document.createElement("div");
+      row.className = "row";
+      const l = document.createElement("span");
+      l.className = "label";
+      l.textContent = label;
+      const v = document.createElement("span");
+      v.className = "value";
+      row.append(l, v);
+      pages.about.appendChild(row);
+      about[key] = { el: v, shown: null };
+    }
+
+    el.append(tabs, body);
+    return { el, pages, about, diaryShown: "" };
+  }
+
+  /** A date the way a person would write it. */
+  function dateText(date, month, year) {
+    return `${date} ${MONTH_NAMES[month - 1] ?? "?"} ${year}`;
+  }
+
+  function paintSheet(panel) {
+    const { who, sheet } = panel;
+    set(sheet.about.name, crewName(who));
+    set(sheet.about.age, `${wasm.bims_age(who)}`);
+    set(
+      sheet.about.born,
+      dateText(
+        wasm.bims_born_date(who),
+        wasm.bims_born_month(who),
+        wasm.bims_born_year(who),
+      ),
+    );
+
+    // The diary is rebuilt only when it has actually grown. It is a list of
+    // paragraphs, and rebuilding it every frame would fight the scrollbar the
+    // player is holding.
+    const count = wasm.bims_memory_len(who);
+    const shape = `${count}`;
+    if (shape === sheet.diaryShown) return;
+    sheet.diaryShown = shape;
+    paintDiary(sheet.pages.memory, who, count);
+  }
+
+  function set(field, text) {
+    if (text === field.shown) return;
+    field.shown = text;
+    field.el.textContent = text;
+  }
+
+  /** The Bim's own account of its days: newest day first, and within a day in
+   * the order it happened. */
+  function paintDiary(page, who, count) {
+    // An empty page is the *good* outcome now, not an early-game one: the
+    // diary keeps only what went wrong, so a crew getting on with their work
+    // writes nothing at all. Worded so that reads as reassurance rather than
+    // as the panel not having loaded.
+    if (count === 0) {
+      const p = document.createElement("p");
+      p.className = "nothing";
+      p.textContent = "Nothing has gone wrong.";
+      page.replaceChildren(p);
+      return;
+    }
+
+    // Gather into days first, then emit newest day at the top. wasm hands
+    // them over oldest first, which is the order they read in within a day.
+    const days = new Map();
+    for (let i = 0; i < count; i++) {
+      const day = wasm.bims_memory_day(who, i);
+      if (!days.has(day)) days.set(day, []);
+      days.get(day).push({
+        at: wasm.bims_memory_at(who, i),
+        what: wasm.bims_memory_what(who, i),
+        detail: wasm.bims_memory_detail(who, i),
+      });
+    }
+
+    const out = [];
+    for (const day of [...days.keys()].sort((a, b) => b - a)) {
+      // Built into a holding list first, because a day whose every entry
+      // turned out to be unsayable must not leave its heading behind with
+      // nothing under it.
+      const said = [];
+      for (const moment of days.get(day)) {
+        // A code with no words for it is left out altogether rather than
+        // padded with a placeholder. A diary line that says nothing is not a
+        // line, and "Something happened." reads as the Bim having had a
+        // mysterious experience rather than as the table being short an
+        // entry. It shows up instead as a missing row, which is what
+        // `scratchpad/smoke.mjs` counts.
+        const words = MEMORY_LINES[moment.what]?.(moment.detail);
+        if (!words) continue;
+        const line = document.createElement("p");
+        line.className = "line";
+        const when = document.createElement("span");
+        when.className = "when";
+        when.textContent = clockText(moment.at);
+        const text = document.createElement("span");
+        text.textContent = words;
+        line.append(when, text);
+        said.push(line);
+      }
+      if (!said.length) continue;
+      const head = document.createElement("p");
+      head.className = "day";
+      head.textContent = `Day ${day}`;
+      out.push(head, ...said);
+    }
+    page.replaceChildren(...out);
+  }
+
+  function paintCrew() {
+    const most = wasm.bims_max_health();
+    for (const panel of crew) {
+      const { who } = panel;
+      // One crew sheet at a time, and only when somebody is picked. Kate's
+      // bars are hers until you click on her: the right-hand side answers
+      // "who am I looking at", not "what is everybody up to".
+      const showing = wasm.bims_is_selected(who) !== 0;
+      if (showing === panel.column.hidden) panel.column.hidden = !showing;
+      if (!showing) continue;
+
+      const alive = wasm.bims_is_alive(who) !== 0;
+
+      for (let i = 0; i < panel.rows.length; i++) {
+        const row = panel.rows[i];
+        const level = wasm.bims_need_level(who, i);
+        const done = Math.round(level * 100);
+        row.fill.style.width = `${done}%`;
+        row.pct.textContent = `${done}%`;
+        // The trigger comes from wasm, per need, so the bar cannot disagree
+        // with the behaviour it is meant to be predicting — including when
+        // the player has moved it or switched it off in the schedule tab.
+        const urgent =
+          wasm.bims_need_trigger_on(i) !== 0 && level < wasm.bims_need_trigger(i);
+        if (urgent !== row.urgent) {
+          row.urgent = urgent;
+          row.li.className = urgent ? "urgent" : "";
+        }
+      }
+
+      const points = wasm.bims_health(who);
+      panel.hfill.style.width = `${Math.round((points / most) * 100)}%`;
+      panel.hpct.textContent = `${Math.round(points)}`;
+
+      const stage = wasm.bims_malnutrition(who);
+      const tired = wasm.bims_drowsiness(who);
+      say(
+        panel.lines.condition,
+        alive ? CONDITIONS[stage] ?? "" : `${crewName(who)} has died.`,
+        !alive ? "gone" : stage > 0 ? "warn" : "",
+      );
+      panel.health.className = stage >= 3 || !alive ? "health hurt" : "health";
+
+      say(
+        panel.lines.drowsiness,
+        alive ? DROWSINESS[tired] ?? "" : "",
+        tired > 0 ? "warn" : "",
+      );
+
+      // Both of these are stages reached by a clock rather than levels, so
+      // the bars above cannot show them: a Bim at nothing per cent on the
+      // restroom bar is either fidgeting or about to have an accident, and
+      // which it is only the line says.
+      const urgeStage = alive ? wasm.bims_urge(who) : 0;
+      say(panel.lines.urge, URGES[urgeStage] ?? "", urgeStage >= 2 ? "warn" : "");
+
+      // The mess is the deck's and shared; how long *this* one has been
+      // standing in it is its own, so this reads per Bim. One that has just
+      // come in from the heads is not as far gone as the one that has been
+      // beside it for two hours.
+      const mess = alive ? wasm.bims_discomfort(who) : 0;
+      say(panel.lines.discomfort, DISCOMFORTS[mess] ?? "", mess >= 2 ? "warn" : "");
+
+      // A bad meal, on its own clock: the restroom bar runs three times as
+      // fast and empties straight into an accident, for two days. The hours
+      // are spelt out because the bar alone cannot say why it is racing.
+      const ill = alive ? wasm.bims_poisoning(who) : 0;
+      say(
+        panel.lines.poisoning,
+        ill > 0 ? `Food poisoning · ${Math.ceil(ill)} hours to go` : "",
+        ill > 0 ? "warn" : "",
+      );
+
+      // The same shape again on a far longer clock. The days are spelt out as
+      // well as the stage, because four days alone and nine days alone look
+      // identical on the bar — it is at nothing either way — and the
+      // difference between them is the difference between low and in danger.
+      const alone = alive ? wasm.bims_loneliness(who) : 0;
+      const days = Math.floor(wasm.bims_days_alone(who));
+      say(
+        panel.lines.loneliness,
+        alone ? `${LONELINESS[alone] ?? ""} · ${days} days` : "",
+        alone >= 2 ? "warn" : "",
+      );
+
+      paintSheet(panel);
+    }
+  }
+
+  /** Put `text` in a line, only when it has actually changed.
+   *
+   * The line keeps the class that says *which* line it is — the stylesheet
+   * hangs the "empty lines collapse" rule off that — and `cls` is the state
+   * on top of it. Writing only `cls` would take the identity away with it. */
+  function say(line, text, cls) {
+    if (text === line.shown) return;
+    line.shown = text;
+    line.el.textContent = text;
+    line.el.className = `${line.kind} ${cls}`.trim();
+  }
+
+  let recruitedShown = null;
+
+  // Being under orders outlasts everything else on the status line, so it gets
+  // a badge of its own in the header rather than competing for that one line.
+  function paintRecruited() {
+    const on = wasm.bims_is_recruited() !== 0;
+    if (on === recruitedShown) return;
+    recruitedShown = on;
+    recruited.hidden = !on;
+  }
+
+  buildCrew();
+  // Somebody has to be picked to begin with, or the game opens with a blank
+  // right-hand side and no hint that clicking a Bim is what fills it.
+  wasm.bims_select_group(1);
+  // These hang off the word that names them, underlined so they are plainly
+  // something you can ask about.
+  explainWord(document.querySelector("#auto-control span"), AUTONOMY_TIP);
+
+  // --- the agenda -------------------------------------------------------
+  //
+  // One row per chain: the one running, then the ones waiting behind it.
+  // Rows only change when the Bim takes something else on, so they are rebuilt
+  // on that and nothing else; the bars move every frame.
+
+  // One per crew member. Each carries the name of whose it is, because two
+  // lists of errands side by side with nothing to tell them apart is worse
+  // than one list.
+  const agendaFor = [];
+
+  function buildAgendas() {
+    for (let who = 0; who < crewCount; who++) {
+      const head = whoHeader(who);
+      const list = document.createElement("ul");
+      list.className = "agenda";
+      list.setAttribute("aria-label", `What ${crewName(who)} is doing`);
+      const box = document.createElement("div");
+      box.hidden = true;
+      box.append(head, list);
+      agendas.appendChild(box);
+      agendaFor.push({ who, box, list, shape: "", rows: [] });
+    }
+  }
+
+  function buildAgendaRows(panel, jobs) {
+    panel.rows = jobs.map((job, i) => {
+      const li = document.createElement("li");
+      if (wasm.bims_agenda_active(panel.who, i)) li.className = "active";
+
+      const bar = document.createElement("span");
+      bar.className = "bar";
+      const fill = document.createElement("i");
+      bar.appendChild(fill);
+
+      const box = document.createElement("span");
+      box.className = "box";
+
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = JOB_NAMES[job] ?? "Busy";
+
+      const pct = document.createElement("span");
+      pct.className = "pct";
+
+      li.append(bar, box, name, pct);
+      return { li, fill, pct };
+    });
+    panel.list.replaceChildren(...panel.rows.map((r) => r.li));
+  }
+
+  function paintAgendas() {
+    for (const panel of agendaFor) {
+      const count = wasm.bims_agenda_len(panel.who);
+      if (count === 0) {
+        panel.box.hidden = true;
+        panel.shape = "";
+        panel.rows = [];
+        continue;
+      }
+
+      const jobs = [];
+      for (let i = 0; i < count; i++) {
+        jobs.push(wasm.bims_agenda_job(panel.who, i));
+      }
+      const shape = `${jobs.join(",")}|${wasm.bims_agenda_active(panel.who, 0)}`;
+      if (shape !== panel.shape) {
+        panel.shape = shape;
+        buildAgendaRows(panel, jobs);
+        panel.box.hidden = false;
+      }
+
+      for (let i = 0; i < panel.rows.length; i++) {
+        const done = Math.round(wasm.bims_agenda_progress(panel.who, i) * 100);
+        panel.rows[i].fill.style.width = `${done}%`;
+        panel.rows[i].pct.textContent = `${done}%`;
+      }
+    }
+  }
+
+  buildAgendas();
+
+  // --- the tray ---------------------------------------------------------
+  //
+  // Bottom-left, two tabs, and it folds away. The schedule tab paints a slot
+  // per hour; the management tab holds the controls that used to sit in the
+  // page header.
+
+  const tray = document.getElementById("tray");
+  const trayToggle = document.getElementById("tray-toggle");
+  const hours = document.getElementById("hours");
+
+  trayToggle.addEventListener("click", () => {
+    // Folding the tray away takes the row the pointer was on with it, and no
+    // `pointerleave` follows.
+    ringSpot(SPOT_NOTHING);
+    const open = tray.className !== "open";
+    tray.className = open ? "open" : "";
+    trayToggle.textContent = open ? "▾" : "▴";
+    trayToggle.setAttribute("aria-expanded", String(open));
+    trayToggle.title = open ? "Hide the panel" : "Show the panel";
+  });
+
+  for (const tab of document.querySelectorAll("#tray .tab")) {
+    tab.addEventListener("click", () => {
+      // Same again: the panel the pointer was over is about to be hidden.
+      ringSpot(SPOT_NOTHING);
+      for (const other of document.querySelectorAll("#tray .tab")) {
+        other.className = other === tab ? "tab on" : "tab";
+      }
+      for (const panel of document.querySelectorAll("#tray [data-panel]")) {
+        panel.hidden = panel.dataset.panel !== tab.dataset.tab;
+      }
+      // Folding it shut and picking a tab should both leave it open.
+      tray.className = "open";
+    });
+  }
+
+  // --- painting the day -------------------------------------------------
+
+  let brush = 1;
+  for (const button of document.querySelectorAll("#brushes .brush")) {
+    button.addEventListener("click", () => {
+      brush = Number(button.dataset.slot);
+      for (const other of document.querySelectorAll("#brushes .brush")) {
+        other.className = other === button ? "brush on" : "brush";
+      }
+    });
+  }
+
+  const slots = [];
+  let painting = false;
+
+  // Not `paint`: that is the frame-by-frame repaint at the bottom of this
+  // scope, and a second declaration of it would quietly win.
+  function setHour(hour) {
+    wasm.bims_set_schedule_slot(hour, brush);
+    paintHours();
+  }
+
+  function buildHours() {
+    const count = wasm.bims_schedule_hours();
+    for (let hour = 0; hour < count; hour++) {
+      const cell = document.createElement("li");
+      cell.textContent = String(hour);
+      cell.title = `${String(hour).padStart(2, "0")}:00`;
+      cell.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        painting = true;
+        setHour(hour);
+      });
+      // Dragging across the strip paints the whole run in one gesture.
+      cell.addEventListener("pointerenter", () => {
+        if (painting) setHour(hour);
+      });
+      slots.push({ cell, shown: null, now: false });
+    }
+    hours.replaceChildren(...slots.map((s) => s.cell));
+    // How the strip works, asked for rather than sitting under it in a
+    // paragraph: a "?" at the end of the brush row, beside Sleep and
+    // Everything. The percentage comes from wasm, so the explanation cannot
+    // drift from the rule it is explaining.
+    const above = Math.round(wasm.bims_schedule_ignore_above() * 100);
+    const brushes = document.getElementById("brushes");
+    if (brushes && !brushes.querySelector(".what")) {
+      brushes.appendChild(
+        questionMark(
+          `Paint the hours the Bim should be asleep. It goes to bed when one comes round — unless it is already more than ${above}% rested, in which case it ignores that one — and gets up as soon as it is fully rested.`,
+          "What the schedule does",
+        ),
+      );
+    }
+  }
+
+  window.addEventListener("pointerup", () => {
+    painting = false;
+  });
+
+  function paintHours() {
+    const now = Math.floor(wasm.bims_clock_minutes() / 60) % slots.length;
+    for (let hour = 0; hour < slots.length; hour++) {
+      const slot = slots[hour];
+      const asleep = wasm.bims_schedule_slot(hour) === 1;
+      const here = hour === now;
+      if (asleep === slot.shown && here === slot.now) continue;
+      slot.shown = asleep;
+      slot.now = here;
+      slot.cell.className = `${asleep ? "sleep" : ""}${here ? " now" : ""}`.trim();
+    }
+  }
+
+  buildHours();
+
+  // --- when the Bim sees to itself --------------------------------------
+  //
+  // One row per need that has an errand behind it: a tick box for whether the
+  // Bim watches that need at all, and a slider for the level it acts on. Both
+  // are read back out of wasm rather than echoed, because wasm clamps.
+  //
+  // These sit under the timetable because they are the other half of the same
+  // question. The strip says when the Bim *may* sleep; the Rest row says when
+  // it has gone long enough without that it should go anyway.
+
+  const thresholds = document.getElementById("thresholds");
+  const triggerRows = [];
+
+  function buildTriggers() {
+    const head = document.createElement("div");
+    head.className = "head";
+    const label = document.createElement("span");
+    label.textContent = "Action threshold";
+    head.append(label, questionMark(TRIGGER_TIP, "What an action threshold is"));
+
+    for (const i of TRIGGER_NEEDS) {
+      const row = document.createElement("div");
+      row.className = "trigger";
+
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.id = `trigger-on-${i}`;
+
+      // A label rather than a bare span, so clicking the word works the tick
+      // box — and so the word is not itself an affordance, which would put a
+      // tooltip somewhere the player was only crossing. The "?" above speaks
+      // for the whole block.
+      const name = document.createElement("label");
+      name.className = "name";
+      name.htmlFor = box.id;
+      name.textContent = NEED_NAMES[i] ?? `Need ${i + 1}`;
+
+      const slider = document.createElement("input");
+      slider.type = "range";
+      slider.min = "0";
+      slider.max = "100";
+      slider.step = "1";
+      slider.id = `trigger-at-${i}`;
+      slider.setAttribute("aria-label", `${name.textContent} trigger level`);
+
+      const out = document.createElement("output");
+      out.htmlFor = slider.id;
+
+      box.addEventListener("change", () => {
+        wasm.bims_set_need_trigger_on(i, box.checked ? 1 : 0);
+        showTriggers();
+      });
+      slider.addEventListener("input", () => {
+        wasm.bims_set_need_trigger(i, Number(slider.value) / 100);
+        showTriggers();
+      });
+
+      row.append(box, name, slider, out);
+      triggerRows.push({ need: i, row, box, slider, out, on: null });
+    }
+
+    thresholds.replaceChildren(head, ...triggerRows.map((t) => t.row));
+    showTriggers();
+  }
+
+  function showTriggers() {
+    for (const t of triggerRows) {
+      const on = wasm.bims_need_trigger_on(t.need) !== 0;
+      const at = Math.round(wasm.bims_need_trigger(t.need) * 100);
+      t.box.checked = on;
+      t.slider.value = String(at);
+      t.out.textContent = `${at}%`;
+      if (on !== t.on) {
+        t.on = on;
+        t.row.className = on ? "trigger" : "trigger off";
+      }
+    }
+  }
+
+  buildTriggers();
+
+  // --- letting the Bim get on with it -----------------------------------
+
+  autonomy.checked = wasm.bims_is_autonomous() !== 0;
+  autonomy.addEventListener("change", () => {
+    wasm.bims_set_autonomous(autonomy.checked ? 1 : 0);
+  });
+
+  // --- pointing at the thing itself ---------------------------------------
+  //
+  // A panel that names a place should be able to show you the place. Resting
+  // on a management row rings the actual fixture on the deck, so "Cold store"
+  // and "Pot on the hob" do not have to be matched against the furniture by
+  // eye — which is a real problem in a room where several grey rectangles
+  // stand against the same wall.
+  //
+  // This is not a tooltip and does not go through `explain`: nothing pops up,
+  // nothing is said, and a pointer crossing the panel on its way somewhere
+  // else lights a fixture for a moment and leaves nothing behind. So it hangs
+  // off the whole row rather than needing an affordance of its own — every
+  // row is about exactly one place.
+
+  let pointingAt = SPOT_NOTHING;
+
+  function ringSpot(spot) {
+    if (spot === pointingAt) return;
+    pointingAt = spot;
+    wasm.bims_set_highlight(spot);
+  }
+
+  /** Ring `spot` on the deck while the pointer is on `el`, and `back` once
+   * it has left — nothing, unless `el` sits inside something that points at
+   * a place of its own: enter and leave do not bubble, so a cell leaving to
+   * its row has to put the row's ring back itself. */
+  function points(el, spot, back = SPOT_NOTHING) {
+    if (!el || !spot) return;
+    el.className = `${el.className} points`.trim();
+    el.addEventListener("pointerenter", () => ringSpot(spot));
+    el.addEventListener("pointerleave", () => ringSpot(back));
+    // Keyboard and focus reach it too, and a pointer that leaves the window
+    // mid-row would otherwise leave a fixture lit for ever.
+    el.addEventListener("focus", () => ringSpot(spot));
+    el.addEventListener("blur", () => ringSpot(back));
+  }
+
+  // The tray folding away, a tab changing under the pointer, the window losing
+  // focus: none of these fire `pointerleave` reliably, and a ring left burning
+  // on the fridge reads as a state the game is in rather than a thing the
+  // pointer is doing.
+  window.addEventListener("blur", () => ringSpot(SPOT_NOTHING));
+
+  // --- what is aboard, and what to keep in stock ---------------------------
+  //
+  // One row per thing: what it is, how many there are, where they are, and
+  // — for the three the manager keeps stocked — the target, by
+  // `manager::Stock` code, as an input in the row. Each is read back off
+  // wasm rather than echoed: wasm clamps, and what it holds is what the bay
+  // and the galley are working to.
+  //
+  // Everything automated will want a row here eventually, so the table is
+  // built from a list rather than written out in the markup — adding a thing
+  // is adding a line to `stockRows`.
+
+  const stockBody = document.querySelector("#stock tbody");
+  const stockRows = [
+    ["Vegetables", () => wasm.bims_store_veg(), "Cold store", SPOT_FRIDGE, 0],
+    ["Tofu", () => wasm.bims_store_tofu(), "Cold store", SPOT_FRIDGE, 1],
+    // Pots on the shelf. What is on the hob is a meal in the making, not
+    // stock, and the agenda says so; it has no row here.
+    ["Stew", () => wasm.bims_store_stew(), "Cold store", SPOT_FRIDGE, 2],
+  ];
+
+  /** The input for one target, wired both ways. */
+  function targetInput(which) {
+    const input = document.createElement("input");
+    input.id = `${KEEP_KEYS[which]}-target`;
+    input.type = "number";
+    input.min = "0";
+    input.max = String(wasm.bims_target_max());
+    input.step = "1";
+    input.setAttribute("aria-label", `${stockRows.find((r) => r[4] === which)[0]} to keep`);
+    const show = () => {
+      input.value = String(wasm.bims_target(which));
+    };
+    input.addEventListener("input", () => {
+      const asked = Number.parseInt(input.value, 10);
+      if (Number.isNaN(asked)) return;
+      wasm.bims_set_target(which, Math.max(0, asked));
+    });
+    // A field left mid-edit ("", "0012") is tidied to whatever wasm holds.
+    input.addEventListener("change", show);
+    show();
+    return input;
+  }
+
+  const stockCells = stockRows.map(([name, , where, spot, which]) => {
+    const tr = document.createElement("tr");
+    const item = document.createElement("td");
+    item.textContent = name;
+    const qty = document.createElement("td");
+    qty.className = "qty";
+    const place = document.createElement("td");
+    place.className = "where";
+    place.textContent = where;
+    const target = document.createElement("td");
+    target.className = "target";
+    tr.append(item, qty, place, target);
+    points(tr, spot);
+    if (which !== null) {
+      // The vegetable and tofu targets are the bay's orders and the stew
+      // target the hob's, so resting on the cell rings the place that
+      // answers it — and leaving it puts the row's own ring back.
+      target.id = `${KEEP_KEYS[which]}-control`;
+      target.appendChild(targetInput(which));
+      points(target, KEEP_SPOTS[which], spot);
+    }
+    stockBody.appendChild(tr);
+    return qty;
+  });
+  // The column has no word of its own to underline, so the explanation is a
+  // mark on its heading.
+  const stockHeads = document.querySelectorAll("#stock thead th");
+  stockHeads[stockHeads.length - 1].appendChild(questionMark(TARGET_TIP, "What a target is"));
+
+  function paintStock() {
+    for (let i = 0; i < stockRows.length; i++) {
+      const held = String(stockRows[i][1]());
+      if (stockCells[i].textContent !== held) stockCells[i].textContent = held;
+    }
+  }
+
+  // --- the order the work gets done in ------------------------------------
+  //
+  // One row per job, built from the count wasm reports rather than from the
+  // length of the table below: a job added on that side and not this one then
+  // shows up as a blank row rather than silently going missing.
+  //
+  // The names live here and nowhere else. No strings cross the boundary, so
+  // the ship knows job 0 and this is the only place that knows it is called
+  // "Cleaning" — the same arrangement as `SPOT_NAMES` and `MEMORY_LINES`.
+
+  const WORK_NAMES = [
+    "Cleaning",
+    "Planting",
+    "Plant cutting",
+    "Hauling",
+    "Cooking",
+    "Controlling the ship",
+    "Making things",
+    "Mining outside",
+  ];
+
+  /** Which fixture each job is about, so resting on a row rings the place it
+   * happens. Hauling is the crop carry, and where a haul *ends* is the thing
+   * worth pointing at. The helm rings the helm aboard, and in the classic
+   * room — which has none — nothing. */
+  const WORK_SPOTS = [
+    SPOT_LOCKER,
+    SPOT_BAY,
+    SPOT_BAY,
+    SPOT_FRIDGE,
+    SPOT_HOB,
+    SPOT_HELM,
+    SPOT_BENCH,
+    SPOT_SUIT_LOCKER,
+  ];
+
+  const workBody = document.querySelector("#work tbody");
+  const workRows = [];
+
+  /** The number in the box and the colour that says what it means. */
+  function paintPriority(box, level) {
+    box.textContent = String(level);
+    box.className = `pri p${level}`;
+    // Which way round the scale runs is read off wasm rather than written out
+    // here, so the panel cannot come to disagree with the sorting. It is worth
+    // saying out loud: "1 is most important" is not obvious from a column of
+    // numbers, and it is the one thing a player has to know to use this.
+    box.title = `Priority ${level} — ${wasm.bims_work_highest()} is done first, ${wasm.bims_work_lowest()} last. Click to change.`;
+  }
+
+  /** Sorting is pressed rather than left on, so nothing moves under the
+   * pointer on the click that changed it. The mark on the button is cleared
+   * whenever a box is clicked, because the list may no longer be in that
+   * order and a mark that lies is worse than no mark. */
+  function forgetSort() {
+    for (const button of document.querySelectorAll("#work-sort .sort")) {
+      button.className = "sort";
+    }
+  }
+
+  function buildWork() {
+    const count = wasm.bims_work_count();
+    for (let job = 0; job < count; job++) {
+      const name = WORK_NAMES[job] ?? "";
+      const row = document.createElement("tr");
+      const what = document.createElement("td");
+      what.textContent = name;
+      const held = document.createElement("td");
+      const box = document.createElement("button");
+      box.type = "button";
+      box.dataset.job = String(job);
+      // The cycling is wasm's, and what comes back is what actually landed —
+      // the range lives on that side, so the box cannot come to disagree with
+      // it by counting to five itself.
+      box.addEventListener("click", () => {
+        paintPriority(box, wasm.bims_cycle_work_priority(job));
+        forgetSort();
+      });
+      paintPriority(box, wasm.bims_work_priority(job));
+      held.appendChild(box);
+      row.append(what, held);
+      points(row, WORK_SPOTS[job] ?? SPOT_NOTHING);
+      workBody.appendChild(row);
+      workRows.push({ job, row, box, name });
+    }
+  }
+
+  const byPriority = (row) => wasm.bims_work_priority(row.job);
+  const byName = (a, b) =>
+    a.name.toLowerCase() < b.name.toLowerCase()
+      ? -1
+      : a.name.toLowerCase() > b.name.toLowerCase()
+        ? 1
+        : 0;
+  // Equal priorities keep the order the jobs are declared in, so the list
+  // never reshuffles for no reason.
+  const WORK_SORTS = {
+    up: (a, b) => byPriority(a) - byPriority(b) || a.job - b.job,
+    down: (a, b) => byPriority(b) - byPriority(a) || a.job - b.job,
+    name: byName,
+  };
+
+  function sortWork(how) {
+    const order = [...workRows].sort(WORK_SORTS[how] ?? WORK_SORTS.up);
+    workBody.replaceChildren(...order.map((r) => r.row));
+  }
+
+  for (const button of document.querySelectorAll("#work-sort .sort")) {
+    button.addEventListener("click", () => {
+      forgetSort();
+      button.className = "sort on";
+      sortWork(button.dataset.sort);
+    });
+  }
+
+  buildWork();
+
+  // --- what the pointer is over -------------------------------------------
+
+  /** The state worth naming beside a fixture, or "" for the things that have
+   * none. Read out of wasm, so the readout cannot disagree with the deck. */
+  function spotState(spot, x, y) {
+    switch (spot) {
+      case 17: {
+        const door = wasm.bims_ship_door_at(x, y);
+        if (door === 0) return "";
+        if (wasm.bims_ship_door_is_locked(door - 1)) return "locked";
+        if (wasm.bims_ship_door_is_held(door - 1)) return "held open";
+        return wasm.bims_ship_door_is_open(door - 1) ? "open" : "shut";
+      }
+      case SPOT_FRIDGE:
+        return wasm.bims_fridge_is_open() ? "open" : "";
+      case SPOT_HOB:
+        return wasm.bims_stove_is_on() ? "lit" : "";
+      case 7:
+        if (wasm.bims_dishwasher_cycle_left() > 0) return "running";
+        return wasm.bims_dishwasher_loaded() > 0
+          ? `${wasm.bims_dishwasher_loaded()} plates in it`
+          : "";
+      case SPOT_BAY: {
+        const ripe = wasm.bims_hydro_ripe();
+        return ripe > 0 ? `${ripe} ready to lift` : "";
+      }
+      case 14:
+        if (wasm.bims_door_is_locked()) return "locked";
+        return wasm.bims_door_is_open() ? "open" : "shut";
+      default:
+        return "";
+    }
+  }
+
+  /** What the room makes of a point on the deck, in room coordinates: the
+   * thing there and its state — "Hob · lit" — and whatever is lying on the
+   * deck at that spot, or "" when it is clean or not deck at all. Asked every
+   * frame rather than only when the pointer moves, because the hob gets lit
+   * and someone is sick on the tile under a pointer that is standing still.
+   *
+   * `spot` is the `SPOT_` code, for a page that wants to know whether the
+   * room had a name for the place or only a word for "deck". */
+  function spotReadout(x, y) {
+    const spot = wasm.bims_spot_at(x, y);
+    let thing = SPOT_NAMES[spot] ?? "Something";
+    const state = spotState(spot, x, y);
+    if (state) thing = `${thing} · ${state}`;
+    // Only the deck can have anything on it. Everywhere else the tile
+    // underneath is furniture's business, not the player's.
+    let onIt = "";
+    if (DECK_SPOTS.has(spot)) {
+      const name = MESS_NAMES[wasm.bims_spot_mess(x, y)] ?? "";
+      if (name) {
+        const deep = Math.round(wasm.bims_spot_mess_depth(x, y) * 100);
+        onIt = `${name} — ${deep}% fouled`;
+      }
+    }
+    return { spot, thing, onIt };
+  }
+
+  /** The room's crew has changed size — a ship docking brings a station's
+   * residents into its room, and leaving takes them out again — so the
+   * per-Bim panels, the sheets and the agendas, are built again for the
+   * crew there are now. Everything else on the page is the ship's and
+   * stays. */
+  function rebuildCrew(count) {
+    if (count === crewCount) return;
+    for (const c of crew) c.column.remove();
+    for (const a of agendaFor) a.box.remove();
+    crew.length = 0;
+    agendaFor.length = 0;
+    crewCount = count;
+    buildCrew();
+    buildAgendas();
+  }
+
+  /** Everything that moves every frame. The rows are built once, above, and
+   * only their widths and words change here. */
+  function paint() {
+    paintRecruited();
+    paintHours();
+    paintCrew();
+    paintAgendas();
+    paintStock();
+  }
+
+  return {
+    paint,
+    paintRecruited,
+    openMenu,
+    closeMenu,
+    menuOpen: () => !menu.hidden,
+    explainWord,
+    questionMark,
+    points,
+    ringSpot,
+    crewName,
+    spotReadout,
+    rebuildCrew,
+  };
+}

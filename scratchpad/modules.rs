@@ -11,6 +11,8 @@ mod bim;
 mod character;
 #[path = "../crates/game/src/clock.rs"]
 mod clock;
+#[path = "../crates/game/src/door.rs"]
+mod door;
 #[path = "../crates/game/src/dish.rs"]
 mod dish;
 #[path = "../crates/game/src/draw.rs"]

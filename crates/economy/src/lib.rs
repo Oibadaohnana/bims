@@ -14,7 +14,9 @@
 //! differ by where you are is a trading game, and a trading game wants a
 //! market, a reason to fly and somewhere to sell — none of which exists. One
 //! price list is the honest placeholder, and the shape of the call is what a
-//! per-station one would need anyway.
+//! per-station one would need anyway. *Whether* a station sells a thing is
+//! a different question and is the station's — `worldgen::StationKind::sells`
+//! — since this crate knows no stations; every station buys anything.
 //!
 //! Supply is unlimited. What bounds a purchase is **the ship**: goods are
 //! stowed, and [`storage`] says in what — food in a cold store, fuel in a
@@ -120,12 +122,20 @@ pub enum Storage {
     FuelTank = 1,
     /// Food, which goes off.
     ColdStore = 2,
+    /// Things worn or carried: suits, and later weapons and medkits. A
+    /// suit locker provides it.
+    Locker = 3,
 }
 
 impl Storage {
     /// Every class, in discriminant order. The host builds one capacity
     /// readout per entry.
-    pub const ALL: [Storage; 3] = [Storage::Shelf, Storage::FuelTank, Storage::ColdStore];
+    pub const ALL: [Storage; 4] = [
+        Storage::Shelf,
+        Storage::FuelTank,
+        Storage::ColdStore,
+        Storage::Locker,
+    ];
 
     pub fn code(self) -> u32 {
         self as u32
@@ -149,6 +159,15 @@ pub fn trade_price(resource: ResourceId) -> Money {
         ResourceId::Components => 150,
         ResourceId::Vegetable => 8,
         ResourceId::Tofu => 12,
+        ResourceId::Galvum => 400,
+        // Nobody sells one — `worldgen::StationKind::sells` — but a station
+        // will buy one, and a price is what it pays.
+        ResourceId::Emitter => 900,
+        ResourceId::Suit => 2_500,
+        // Made, never sold, like the emitter; a station buys them.
+        ResourceId::Handgun => 1_500,
+        ResourceId::Vest => 800,
+        ResourceId::Medkit => 120,
     }
 }
 
@@ -164,9 +183,16 @@ pub fn trade_value(resource: ResourceId, units: u32) -> Result<Money, EconomyErr
 /// Where a resource is stowed. Same reason for the `match` as above.
 pub fn storage(resource: ResourceId) -> Storage {
     match resource {
-        ResourceId::Ore | ResourceId::Metal | ResourceId::Components => Storage::Shelf,
+        ResourceId::Ore
+        | ResourceId::Metal
+        | ResourceId::Components
+        | ResourceId::Galvum
+        | ResourceId::Emitter => Storage::Shelf,
         ResourceId::Fuel => Storage::FuelTank,
         ResourceId::Vegetable | ResourceId::Tofu => Storage::ColdStore,
+        ResourceId::Suit | ResourceId::Handgun | ResourceId::Vest | ResourceId::Medkit => {
+            Storage::Locker
+        }
     }
 }
 
@@ -236,6 +262,12 @@ mod tests {
         assert_eq!(trade_price(ResourceId::Components), 150);
         assert_eq!(trade_price(ResourceId::Vegetable), 8);
         assert_eq!(trade_price(ResourceId::Tofu), 12);
+        assert_eq!(trade_price(ResourceId::Galvum), 400);
+        assert_eq!(trade_price(ResourceId::Emitter), 900);
+        assert_eq!(trade_price(ResourceId::Suit), 2_500);
+        assert_eq!(trade_price(ResourceId::Handgun), 1_500);
+        assert_eq!(trade_price(ResourceId::Vest), 800);
+        assert_eq!(trade_price(ResourceId::Medkit), 120);
 
         assert_eq!(storage(ResourceId::Ore), Storage::Shelf);
         assert_eq!(storage(ResourceId::Metal), Storage::Shelf);
@@ -243,6 +275,12 @@ mod tests {
         assert_eq!(storage(ResourceId::Fuel), Storage::FuelTank);
         assert_eq!(storage(ResourceId::Vegetable), Storage::ColdStore);
         assert_eq!(storage(ResourceId::Tofu), Storage::ColdStore);
+        assert_eq!(storage(ResourceId::Galvum), Storage::Shelf);
+        assert_eq!(storage(ResourceId::Emitter), Storage::Shelf);
+        assert_eq!(storage(ResourceId::Suit), Storage::Locker);
+        assert_eq!(storage(ResourceId::Handgun), Storage::Locker);
+        assert_eq!(storage(ResourceId::Vest), Storage::Locker);
+        assert_eq!(storage(ResourceId::Medkit), Storage::Locker);
     }
 
     #[test]
@@ -257,8 +295,9 @@ mod tests {
             trade_value(ResourceId::Components, u32::MAX),
             Ok(150 * u32::MAX as Money),
         );
-        assert!(Storage::from_code(3).is_none());
+        assert!(Storage::from_code(4).is_none());
         assert_eq!(Storage::from_code(2), Some(Storage::ColdStore));
+        assert_eq!(Storage::from_code(3), Some(Storage::Locker));
     }
 
     #[test]

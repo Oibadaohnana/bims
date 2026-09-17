@@ -25,7 +25,7 @@ use crate::parts::{Layer, PartKind, Rotation, covered, footprint};
 /// `physics::ResourceId::ALL.len()`, written out because it sizes an array
 /// and an array length has to be a constant. `cargo_is_the_right_length`
 /// pins the two together.
-pub const CARGO_SLOTS: usize = 6;
+pub const CARGO_SLOTS: usize = 12;
 
 /// One part, placed. `origin` is the top-left tile of the **turned**
 /// footprint, so a part's origin is where you clicked whichever way round it
@@ -325,6 +325,13 @@ pub enum EditError {
     /// code lives here with the others so a player is given one table of
     /// reasons rather than two.
     MaterialsShort = 16,
+    /// The station this design phase is docked at does not sell that.
+    ///
+    /// Never returned by [`apply`] — this crate knows no stations; which
+    /// kind sells what is `worldgen::StationKind::sells`, and the wasm
+    /// layer asks it before it asks `apply`. Here with the others for the
+    /// one-table reason.
+    NotSoldHere = 17,
 }
 
 impl EditError {

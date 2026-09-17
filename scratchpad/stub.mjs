@@ -85,6 +85,14 @@ class El {
   append(...kids) {
     for (const k of kids) this.appendChild(k);
   }
+  /** Detach from the parent, as the real DOM does. The crew panels are
+   * removed this way when a docking changes who is in the room. */
+  remove() {
+    if (this.parentNode) {
+      this.parentNode.children = this.parentNode.children.filter((c) => c !== this);
+      this.parentNode = null;
+    }
+  }
   replaceChildren(...kids) {
     for (const c of this.children) c.parentNode = null;
     this.children = [];
@@ -526,7 +534,8 @@ function startPage({ html, host, wasm = null, search = "" }) {
   // so this is the only part of the rendering it can see at all.
   const drawn = [];
   const ctx2d = makeCtx(drawn);
-  const { byId, doc, root } = makeDom(readFileSync(html, "utf8"), ctx2d);
+  const markup = readFileSync(html, "utf8");
+  const { byId, doc, root } = makeDom(markup, ctx2d);
 
   const clock = makeClock();
   const win = makeWindow();
@@ -546,6 +555,14 @@ function startPage({ html, host, wasm = null, search = "" }) {
   }
 
   const ctx = vm.createContext(sandbox);
+  // A page that loads crew.js — the crew's panels, shared by the room and the
+  // ship — runs it before its own script, in the order the page's own loader
+  // does. Read off the markup rather than assumed per page, so a page that
+  // starts or stops using it changes nothing here.
+  const shared = "web/crew.js";
+  if (markup.includes("crew.js")) {
+    vm.runInContext(readFileSync(shared, "utf8"), ctx, { filename: shared });
+  }
   vm.runInContext(readFileSync(host, "utf8"), ctx, { filename: host });
 
   /** Wait until the page's own `boot()` has asked for its first frame.

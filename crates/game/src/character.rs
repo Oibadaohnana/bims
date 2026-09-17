@@ -4,7 +4,9 @@
 use crate::draw::{Color, DrawList};
 use crate::math::{PI, Rect, TAU, Vec2, angle_lerp, approach, clamp, lerp, vec2, wrap_angle};
 use crate::rng::Rng;
-use crate::room::{BROOM_HEAD, BROOM_POLE, Dish, GRIP, STEEL, draw_knife, draw_plate, draw_spoon};
+use crate::room::{
+    BROOM_HEAD, BROOM_POLE, Dish, GRIP, STEEL, draw_knife, draw_plate, draw_spoon, draw_stew_tub,
+};
 
 // --- behaviour tuning ---------------------------------------------------
 
@@ -53,13 +55,22 @@ pub const BITE_PERIOD: f32 = 0.95;
 
 // --- look ---------------------------------------------------------------
 
+/// The ship's coverall: what every one of the crew wears.
 const SHIRT: Color = Color::rgb(0.33, 0.58, 0.85);
 const SLEEVE: Color = Color::rgb(0.27, 0.49, 0.74);
-/// The second of the crew, in the ship's other coverall. Far enough from the
-/// first that the two never have to be told apart by where they happen to be
-/// standing.
-const SHIRT_B: Color = Color::rgb(0.74, 0.42, 0.62);
-const SLEEVE_B: Color = Color::rgb(0.60, 0.33, 0.51);
+/// The station's, worn by everybody who lives there. Far enough from the
+/// ship's that who is crew and who is not never has to be told from where
+/// they happen to be standing — see [`Uniform`].
+const SHIRT_STATION: Color = Color::rgb(0.84, 0.52, 0.24);
+const SLEEVE_STATION: Color = Color::rgb(0.70, 0.41, 0.18);
+/// The pressure suit, and the visor over the head while it is worn.
+const SHIRT_SUIT: Color = Color::rgb(0.86, 0.88, 0.92);
+const SLEEVE_SUIT: Color = Color::rgb(0.70, 0.73, 0.79);
+const VISOR: Color = Color::rgb(0.55, 0.78, 0.95);
+/// The yoke across the shoulders, in the wearer's own colour: the one thing
+/// that tells two people in the same coverall apart from directly above.
+const TRIM: Color = Color::rgb(0.86, 0.93, 0.96);
+const TRIM_B: Color = Color::rgb(0.74, 0.42, 0.62);
 const HAIR_B: Color = Color::rgb(0.42, 0.26, 0.13);
 const SKIN: Color = Color::rgb(0.91, 0.73, 0.55);
 const NOSE: Color = Color::rgb(0.82, 0.62, 0.45);
@@ -88,18 +99,54 @@ pub const ACCENT: Color = Color::rgb(0.50, 0.82, 0.66);
 /// glance and does not have to be told apart from being merely selected.
 const COMMAND: Color = Color::rgb(1.0, 0.82, 0.35);
 
-/// Which of the crew this is, as far as the drawing is concerned: a coverall,
-/// a hair colour, and whether it is worn long.
+/// Whose coverall a Bim is wearing: the ship's or the station's.
+///
+/// The crew wear one and the people living on a station wear the other, so
+/// that with the two rooms joined at the airlock — see `world::docking` — a
+/// glance at the deck says who belongs to the ship and who is going ashore
+/// when it casts off. Nothing but `draw` reads it; a resident is simulated
+/// exactly as a crew member is.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Uniform {
+    Crew,
+    Station,
+    /// A pressure suit, worn for a walk outside and drawn with a visor over
+    /// the head. Put on by [`Character::go_outside`] over whichever of the
+    /// other two the body wears, and taken off again by
+    /// [`Character::come_inside`].
+    Suit,
+}
+
+impl Uniform {
+    fn shirt(self) -> Color {
+        match self {
+            Uniform::Crew => SHIRT,
+            Uniform::Station => SHIRT_STATION,
+            Uniform::Suit => SHIRT_SUIT,
+        }
+    }
+
+    fn sleeve(self) -> Color {
+        match self {
+            Uniform::Crew => SLEEVE,
+            Uniform::Station => SLEEVE_STATION,
+            Uniform::Suit => SLEEVE_SUIT,
+        }
+    }
+}
+
+/// Which of the crew this is, as far as the drawing is concerned: the colour
+/// of the yoke on the coverall, a hair colour, and whether it is worn long.
 ///
 /// Nothing but `draw` reads it. Two Bims behave identically — that is the
 /// point of the second one — so the only thing that distinguishes them in the
 /// simulation is the index, and the only thing that distinguishes them on the
-/// deck is this.
+/// deck is this. The coverall itself is the [`Uniform`]'s.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Look {
-    /// Blue coverall, cropped hair.
+    /// Pale yoke, cropped hair.
     First,
-    /// Mauve coverall, hair down past the collar.
+    /// Mauve yoke, hair down past the collar.
     Second,
 }
 
@@ -114,17 +161,10 @@ impl Look {
         }
     }
 
-    fn shirt(self) -> Color {
+    fn trim(self) -> Color {
         match self {
-            Look::First => SHIRT,
-            Look::Second => SHIRT_B,
-        }
-    }
-
-    fn sleeve(self) -> Color {
-        match self {
-            Look::First => SLEEVE,
-            Look::Second => SLEEVE_B,
+            Look::First => TRIM,
+            Look::Second => TRIM_B,
         }
     }
 
@@ -169,6 +209,8 @@ pub enum Held {
     Broom,
     /// A plate or a bowl, carrying how full it is and which it is.
     Plate(f32, Dish),
+    /// A pot of stew in a tub, on its way to the cold store or back from it.
+    Stew,
 }
 
 /// What the hands are busy doing. Each one drives its own arm animation.
@@ -264,6 +306,20 @@ pub struct Character {
     /// Under direct orders: it stands where it is put rather than pottering
     /// about, and nothing starts of its own accord.
     recruited: bool,
+    /// Where it has been told to stand and stay — the helm, the far side of
+    /// an airlock. It holds still there rather than pottering about, goes
+    /// off on its errands as usual, and walks back afterwards; only a fresh
+    /// order or the room letting it go takes the post away. See
+    /// `Game::send_to`.
+    post: Option<Vec2>,
+    /// Whose coverall it wears. Drawing only.
+    uniform: Uniform,
+    /// Outside the hull, in a suit. Mechanically this is sitting — put
+    /// somewhere by a chain and held there — at a spot beyond the skin,
+    /// and `worn` is the coverall to go back into. Read by the world to
+    /// dose the body; see `Game::is_outside`.
+    outside: bool,
+    worn: Uniform,
     /// How filthy the Bim itself is, 0 clean to 1 covered. Kept here rather
     /// than with the deck's own mess because this is the share that walks
     /// away with it.
@@ -301,6 +357,10 @@ impl Character {
             dead: false,
             napping: false,
             recruited: false,
+            post: None,
+            uniform: Uniform::Crew,
+            outside: false,
+            worn: Uniform::Crew,
             filth: 0.0,
             antic: 0.0,
         };
@@ -320,6 +380,16 @@ impl Character {
     /// True once an ordered walk has finished, so a task can move on.
     pub fn arrived(&self) -> bool {
         self.path.is_empty()
+    }
+
+    /// Move the route the Bim is on, waypoint by waypoint, for a body
+    /// carried into another room whose origin is `shift` away — see
+    /// `Game::adopt`. A route left in the old room's coordinates is a walk
+    /// to somewhere that is not there.
+    pub fn shift_route(&mut self, shift: Vec2) {
+        for p in &mut self.path {
+            *p += shift;
+        }
     }
 
     /// Where the route the Bim is on ends, or `None` if it is not on one.
@@ -400,6 +470,36 @@ impl Character {
         self.seated = false;
     }
 
+    /// Out through the airlock: held at `at`, beyond the hull, in the suit.
+    /// Sitting, mechanically, so nothing shoves the body back onto the deck
+    /// and nothing walking the deck is slowed by it.
+    pub fn go_outside(&mut self, at: Vec2, facing: f32) {
+        if !self.outside {
+            self.worn = self.uniform;
+        }
+        self.outside = true;
+        self.uniform = Uniform::Suit;
+        self.sit(at, facing);
+        self.set_action(Action::Reach);
+    }
+
+    /// Back in, standing at `at` — the deck inside the port — in the
+    /// coverall that was under the suit. Safe to call on a body that is
+    /// not outside; it then does nothing.
+    pub fn come_inside(&mut self, at: Vec2) {
+        if !self.outside {
+            return;
+        }
+        self.outside = false;
+        self.uniform = self.worn;
+        self.stand_at(at);
+        self.set_action(Action::None);
+    }
+
+    pub fn is_outside(&self) -> bool {
+        self.outside
+    }
+
     /// Get up and end up standing at `at`, which is how you leave a bed: the
     /// Bim was lying in the middle of it, and the floor beside it is the only
     /// place it can actually stand.
@@ -460,6 +560,22 @@ impl Character {
 
     pub fn is_recruited(&self) -> bool {
         self.recruited
+    }
+
+    pub fn set_post(&mut self, post: Option<Vec2>) {
+        self.post = post;
+    }
+
+    pub fn post(&self) -> Option<Vec2> {
+        self.post
+    }
+
+    pub fn set_uniform(&mut self, uniform: Uniform) {
+        self.uniform = uniform;
+    }
+
+    pub fn uniform(&self) -> Uniform {
+        self.uniform
     }
 
     /// It stops where it stands, and stays there.
@@ -692,10 +808,10 @@ impl Character {
             self.hold_still()
         } else if self.activity == Activity::Marching {
             self.follow_order()
-        } else if self.scripted || self.recruited {
-            // Recruited, it waits to be told. The wander is the one thing it
-            // does unprompted, so that is the one thing being under orders
-            // takes away.
+        } else if self.scripted || self.recruited || self.post.is_some() {
+            // Recruited, or posted somewhere, it waits to be told. The wander
+            // is the one thing it does unprompted, so that is the one thing
+            // being under orders takes away.
             self.hold_still()
         } else {
             self.wander(dt, interior, solids, rng)
@@ -961,7 +1077,16 @@ impl Character {
             Vec2::ZERO,
             vec2(22.0, 30.0) * breath,
             0.0,
-            self.look.shirt(),
+            self.uniform.shirt(),
+        );
+        // The yoke across the shoulders, in the wearer's own colour — the
+        // coverall is the ship's or the station's and says nothing about
+        // who is in it.
+        b.ellipse(
+            vec2(-6.5, 0.0),
+            vec2(7.0, 24.0) * breath,
+            0.0,
+            self.look.trim(),
         );
 
         // What it has got on itself. Down the front and around the legs, where
@@ -996,7 +1121,7 @@ impl Character {
         for (side, forward) in [(-1.0f32, pose.left), (1.0f32, pose.right)] {
             let at = vec2(forward - 1.0, 13.5 * side);
             b.ellipse(at, vec2(11.5, 11.5), 0.0, OUTLINE);
-            b.ellipse(at, vec2(9.5, 9.5), 0.0, self.look.sleeve());
+            b.ellipse(at, vec2(9.5, 9.5), 0.0, self.uniform.sleeve());
         }
 
         // Head assembly, pivoting about the neck. Seen from above it is mostly
@@ -1025,6 +1150,12 @@ impl Character {
             self.look.hair(),
         );
         b.ellipse(at(vec2(5.6, 0.0)), vec2(4.0, 3.2), look, NOSE);
+        // The visor over all of that, in the suit: a helmet from above is
+        // a bigger circle than the head, and the face shows through it.
+        if self.uniform == Uniform::Suit {
+            b.ellipse(at(Vec2::ZERO), vec2(18.0, 18.0), 0.0, OUTLINE);
+            b.ellipse(at(Vec2::ZERO), vec2(16.5, 16.5), 0.0, VISOR.alpha(0.55));
+        }
 
         self.draw_held(list, pose);
 
@@ -1113,6 +1244,11 @@ impl Character {
             }
             Held::Knife => draw_knife(list, to_world(vec2(20.0, -6.0)), self.heading),
             Held::Spoon => draw_spoon(list, to_world(vec2(20.0, -6.0)), self.heading),
+            Held::Stew => draw_stew_tub(
+                list,
+                to_world(vec2(20.0 + pose.reach * 8.0, 0.0)),
+                self.heading,
+            ),
             Held::Broom => {
                 // Held out in front and across, the way anyone carries one:
                 // the pole running away from the body and the head on the

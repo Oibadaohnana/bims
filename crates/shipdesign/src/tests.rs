@@ -19,7 +19,7 @@ use crate::materials::{bound_mass, bound_materials, build_from_cargo, deconstruc
 use crate::parts::{
     Layer, PartKind, Rotation, TILE, covered, defs_are_sound, footprint, part_mass, use_spots,
 };
-use crate::validate::{IssueCode, REQUIRED, Severity, exposure, has_errors, validate};
+use crate::validate::{IssueCode, REQUIRED, Severity, exposure, has_errors, validate, walkable};
 
 /// A budget with plenty in it, for the tests that are not about money.
 fn rich() -> Budget {
@@ -119,16 +119,42 @@ fn the_table_is_in_discriminant_order() {
 }
 
 #[test]
-fn only_the_engine_pushes_and_everything_has_weight() {
+fn only_the_engines_push_and_everything_has_weight() {
     for &kind in PartKind::ALL.iter() {
         let def = kind.def();
         assert!(part_mass(kind) > 0.0, "{kind:?} weighs nothing");
-        if kind == PartKind::Engine {
-            assert!(def.thrust > 0.0, "the engine does not push");
+        if matches!(kind, PartKind::Engine | PartKind::HeavyEngine) {
+            assert!(def.pushes(), "{kind:?} does not push");
         } else {
-            assert_eq!(def.thrust, 0.0, "{kind:?} pushes the ship");
+            assert!(!def.pushes(), "{kind:?} pushes the ship");
         }
+        assert_eq!(def.turns(), kind == PartKind::Thruster, "{kind:?}");
     }
+}
+
+/// What the second engine is *for*, said as numbers: more push for the
+/// weight than the small one, so a heavy hull is better off with it, and
+/// more weight and money than a light hull would want to carry. A heavy
+/// engine that was merely bigger — the same push per tonne — would be a
+/// choice with nothing in it.
+#[test]
+fn the_heavy_engine_is_the_better_engine_per_tonne_and_the_worse_one_to_carry() {
+    let (small, big) = (PartKind::Engine.def(), PartKind::HeavyEngine.def());
+    assert!(
+        big.thrust > 4.0 * small.thrust,
+        "not much of a heavy engine"
+    );
+    assert!(part_mass(PartKind::HeavyEngine) > 3.0 * part_mass(PartKind::Engine));
+    assert!(
+        big.thrust / part_mass(PartKind::HeavyEngine) > small.thrust / part_mass(PartKind::Engine),
+        "the heavy engine should push more per tonne of itself"
+    );
+    assert!(big.price > 3 * small.price);
+    let (w, h) = footprint(PartKind::HeavyEngine, Rotation::R0);
+    assert!(w * h > 2 * 3, "it should take more deck than the small one");
+    // Hull like the small one: shields, and used from beside it.
+    assert!(big.shields);
+    assert_eq!(big.use_spots, small.use_spots);
 }
 
 #[test]
@@ -157,6 +183,8 @@ fn every_part_needs_what_it_is_meant_to_need() {
         PartKind::SensorArray,
         PartKind::Thruster,
         PartKind::PowerConduit,
+        PartKind::DiagonalWall,
+        PartKind::DiagonalOutsideWall,
     ] {
         assert_eq!(
             kind.def().requires,
@@ -175,6 +203,8 @@ fn every_part_needs_what_it_is_meant_to_need() {
                 | PartKind::SensorArray
                 | PartKind::Thruster
                 | PartKind::PowerConduit
+                | PartKind::DiagonalWall
+                | PartKind::DiagonalOutsideWall
         );
         if !on_frame {
             assert_eq!(kind.def().requires, Some(Layer::Floor), "{kind:?}");
@@ -202,6 +232,8 @@ fn shielding_and_storage_are_where_they_are_meant_to_be() {
             PartKind::Airlock,
             PartKind::SensorArray,
             PartKind::Thruster,
+            PartKind::HeavyEngine,
+            PartKind::DiagonalOutsideWall,
         ],
     );
 
@@ -216,6 +248,8 @@ fn shielding_and_storage_are_where_they_are_meant_to_be() {
             (PartKind::ColdStore, (Storage::ColdStore, 100)),
             (PartKind::FuelTank, (Storage::FuelTank, 200)),
             (PartKind::Shelf, (Storage::Shelf, 100)),
+            (PartKind::SuitLocker, (Storage::Locker, 2)),
+            (PartKind::Armoury, (Storage::Locker, 4)),
         ],
     );
 }
@@ -227,9 +261,47 @@ fn what_a_body_can_walk_through() {
     for kind in [PartKind::Door, PartKind::Chair, PartKind::Airlock] {
         assert!(!kind.def().blocks_movement, "{kind:?} should be walkable");
     }
-    for kind in [PartKind::Wall, PartKind::OutsideWall, PartKind::Engine] {
+    for kind in [
+        PartKind::Wall,
+        PartKind::OutsideWall,
+        PartKind::Engine,
+        PartKind::DiagonalWall,
+        PartKind::DiagonalOutsideWall,
+    ] {
         assert!(kind.def().blocks_movement, "{kind:?} should block");
     }
+}
+
+/// The two corner pieces are walls in every rule and a triangle only in the
+/// picture: the same layer, the same footing, the same footprint, and the
+/// hull one shields exactly as the straight hull does. Which corner is solid
+/// goes round clockwise with `R`, starting south-west.
+#[test]
+fn a_diagonal_wall_is_a_wall_in_every_rule_and_a_triangle_in_the_picture() {
+    use crate::parts::{is_diagonal, solid_corner};
+    for (diagonal, straight) in [
+        (PartKind::DiagonalWall, PartKind::Wall),
+        (PartKind::DiagonalOutsideWall, PartKind::OutsideWall),
+    ] {
+        let (d, s) = (diagonal.def(), straight.def());
+        assert!(is_diagonal(diagonal));
+        assert!(!is_diagonal(straight));
+        assert_eq!(d.footprint, (1, 1));
+        assert_eq!(d.layer, s.layer);
+        assert_eq!(d.requires, s.requires);
+        assert_eq!(d.blocks_movement, s.blocks_movement);
+        assert_eq!(d.shields, s.shields);
+        assert_eq!(d.price, s.price);
+        assert_eq!(d.recipe, s.recipe);
+        assert!(d.use_spots.is_empty());
+    }
+    let mut r = Rotation::R0;
+    let mut corners = Vec::new();
+    for _ in 0..4 {
+        corners.push(solid_corner(r));
+        r = r.next();
+    }
+    assert_eq!(corners, vec![(-1, 1), (-1, -1), (1, -1), (1, 1)]);
 }
 
 /// The cargo array is as long as there are resources. It is a fixed-size
@@ -242,9 +314,11 @@ fn cargo_is_the_right_length() {
 
 // --- rotation -------------------------------------------------------------
 
-/// The engine is 2 x 3 with one use spot beside its middle-left, which makes
-/// it the part where a rotation bug cannot hide. Every tile below is worked
-/// out by hand, not by running the code and writing down what came out.
+/// The engine is 2 x 3, which makes it the part where a rotation bug in the
+/// footprint cannot hide, and the bay is 2 x 2 with one use spot below its
+/// left-hand column, which makes it the part where a rotation bug in the
+/// use spots cannot hide. Every tile below is worked out by hand, not by
+/// running the code and writing down what came out.
 #[test]
 fn all_four_turns_of_an_asymmetric_part_land_where_they_should() {
     let at = (10u32, 10u32);
@@ -257,39 +331,62 @@ fn all_four_turns_of_an_asymmetric_part_land_where_they_should() {
         out
     };
     let spots = |rotation| {
-        use_spots(PartKind::Engine, rotation)
+        use_spots(PartKind::FuelTank, rotation)
             .into_iter()
             .map(|(dx, dy)| (at.0 as i32 + dx, at.1 as i32 + dy))
             .collect::<Vec<_>>()
     };
 
-    // Upright: two across, three down. You stand to the west, level with the
-    // middle row.
+    // Upright: two across, three down.
     assert_eq!(footprint(PartKind::Engine, Rotation::R0), (2, 3));
     assert_eq!(
         tiles(Rotation::R0),
         vec![(10, 10), (10, 11), (10, 12), (11, 10), (11, 11), (11, 12)]
     );
-    assert_eq!(spots(Rotation::R0), vec![(9, 11)]);
+    // The tank: you stand below its left-hand column.
+    assert_eq!(spots(Rotation::R0), vec![(10, 12)]);
 
-    // A quarter turn clockwise: three across, two down, and west has become
-    // north — over the middle column.
+    // A quarter turn clockwise: three across, two down; and south has become
+    // west, level with the top row.
     assert_eq!(footprint(PartKind::Engine, Rotation::R90), (3, 2));
     assert_eq!(
         tiles(Rotation::R90),
         vec![(10, 10), (10, 11), (11, 10), (11, 11), (12, 10), (12, 11)]
     );
-    assert_eq!(spots(Rotation::R90), vec![(11, 9)]);
+    assert_eq!(spots(Rotation::R90), vec![(9, 10)]);
 
-    // Half turn: the same six tiles, the use spot swung round to the east.
+    // Half turn: the same six tiles; the use spot swung round to the north,
+    // over the right-hand column.
     assert_eq!(footprint(PartKind::Engine, Rotation::R180), (2, 3));
     assert_eq!(tiles(Rotation::R180), tiles(Rotation::R0));
-    assert_eq!(spots(Rotation::R180), vec![(12, 11)]);
+    assert_eq!(spots(Rotation::R180), vec![(11, 9)]);
 
-    // Three quarters: the same box as R90, the use spot to the south.
+    // Three quarters: the same box as R90, the use spot to the east, level
+    // with the bottom row.
     assert_eq!(footprint(PartKind::Engine, Rotation::R270), (3, 2));
     assert_eq!(tiles(Rotation::R270), tiles(Rotation::R90));
-    assert_eq!(spots(Rotation::R270), vec![(11, 12)]);
+    assert_eq!(spots(Rotation::R270), vec![(12, 11)]);
+}
+
+/// An engine is worked on from any side: its use spots are the ring round
+/// it, corners left out, and they turn with it. Ten of them for a 2 x 3.
+#[test]
+fn an_engine_is_used_from_the_ring_round_it() {
+    let ring = use_spots(PartKind::Engine, Rotation::R0);
+    assert_eq!(ring.len(), 10);
+    for spot in [(-1, 0), (-1, 2), (2, 1), (0, -1), (1, 3)] {
+        assert!(ring.contains(&spot), "{spot:?} is not on the ring");
+    }
+    for corner in [(-1, -1), (2, -1), (-1, 3), (2, 3)] {
+        assert!(!ring.contains(&corner), "{corner:?} is a corner");
+    }
+    // Turned a quarter, the ring is the ring of the turned box.
+    let turned = use_spots(PartKind::Engine, Rotation::R90);
+    assert_eq!(turned.len(), 10);
+    assert!(turned.contains(&(3, 0)) && turned.contains(&(1, -1)) && turned.contains(&(1, 2)));
+    assert!(crate::parts::any_side_will_do(PartKind::Engine));
+    assert!(crate::parts::any_side_will_do(PartKind::HeavyEngine));
+    assert!(!crate::parts::any_side_will_do(PartKind::HydroBay));
 }
 
 #[test]
@@ -1069,7 +1166,12 @@ fn a_hole_in_the_hull_exposes_what_is_behind_it() {
     // The hull parts seal it again. An engine is a block of machinery, an
     // airlock is a door with a hull rating, a sensor array is bolted through
     // the skin — all three keep it out.
-    for sealing in [PartKind::Engine, PartKind::Airlock, PartKind::SensorArray] {
+    for sealing in [
+        PartKind::Engine,
+        PartKind::HeavyEngine,
+        PartKind::Airlock,
+        PartKind::SensorArray,
+    ] {
         let design = hull(Some(sealing));
         assert!(
             exposure(&design).is_empty(),
@@ -1116,6 +1218,52 @@ fn a_diagonal_join_does_not_leak() {
     for open in [(2, 2), (4, 4), (2, 4), (4, 2), (7, 7)] {
         assert!(map.contains(open), "the fill never reached {open:?}");
     }
+}
+
+/// A hull with its corners cut off at forty-five degrees is sealed: the
+/// staircase of diagonal outside walls across each corner keeps the fill
+/// out exactly as the straight run it replaces did, and the plain diagonal
+/// wall does not — it is a bulkhead, not hull.
+#[test]
+fn a_chamfered_corner_is_sealed_by_diagonal_hull_and_not_by_diagonal_wall() {
+    use crate::parts::solid_corner;
+    let chamfered = |kind: PartKind| {
+        // The sealed box with its top-left corner cut: (2,2), (3,2) and
+        // (2,3) come off the ring, and the cut runs (2,4), (3,3), (4,2) with
+        // the solid half of each facing the room — south-east, R270.
+        let mut design = hull(None);
+        for at in [(2, 2), (3, 2), (2, 3)] {
+            let wall = design.grid().get(Layer::Object, at);
+            design = apply(&design, &rich(), Edit::Remove { part_id: wall }).unwrap();
+            let frame = design.grid().get(Layer::Structure, at);
+            design = apply(&design, &rich(), Edit::Remove { part_id: frame }).unwrap();
+        }
+        for at in [(2u32, 4u32), (3, 3), (4, 2)] {
+            let wall = design.grid().get(Layer::Object, (at.0 as i32, at.1 as i32));
+            if wall != 0 {
+                design = apply(&design, &rich(), Edit::Remove { part_id: wall }).unwrap();
+            }
+            design = place(&design, &rich(), kind, at, Rotation::R270).unwrap();
+        }
+        design
+    };
+    assert_eq!(solid_corner(Rotation::R270), (1, 1));
+
+    let sealed = chamfered(PartKind::DiagonalOutsideWall);
+    assert!(
+        exposure(&sealed).is_empty(),
+        "the radiation came in through the chamfer: {:?}",
+        exposure(&sealed).tiles()
+    );
+    // And the deck inside the cut is still deck a body can stand on.
+    assert!(walkable(&sealed, &sealed.grid(), (3, 4)));
+
+    let leaky = chamfered(PartKind::DiagonalWall);
+    let map = exposure(&leaky);
+    assert!(
+        map.contains((3, 4)),
+        "a plain diagonal wall kept the radiation out"
+    );
 }
 
 /// A part can be shielded and still be worked from a tile that is not. The
@@ -1236,15 +1384,16 @@ fn the_flyer_is_a_ship_a_trip_can_actually_be_planned_for() {
 #[test]
 fn a_flyer_is_still_sealed() {
     assert!(exposure(&flyer(4)).is_empty());
-    // And it is the same ship underneath: five tiles of plating came off,
-    // four thrusters, an array, an airlock and a tank went on.
+    // And it is the same ship underneath: seven tiles of plating came off;
+    // four thrusters, an array, two tiles of deck with the airlock standing
+    // on them, and a tank went on.
     assert_eq!(
         flyer(4).parts.len(),
-        reference(4).parts.len() - 5 + 7,
-        "the flyer should be the reference with its hull swapped and two parts added",
+        reference(4).parts.len() - 7 + 9,
+        "the flyer should be the reference with its hull swapped and three parts added",
     );
     assert_eq!(
-        flyer(4).count(PartKind::OutsideWall) + 5,
+        flyer(4).count(PartKind::OutsideWall) + 7,
         reference(4).count(PartKind::OutsideWall)
     );
 }
@@ -1336,13 +1485,21 @@ fn a_wall_where_a_bim_has_to_stand_is_an_error() {
 fn a_door_is_a_way_through_and_a_wall_is_not() {
     let split = |gap: PartKind| {
         let mut design = floored(10, (1, 1), (9, 9));
-        // A bulkhead across the middle with one tile left for the gap.
+        // A bulkhead across the middle with two tiles left for the gap: a
+        // door is two tiles along its bulkhead, and it is turned to run
+        // along this one.
         for x in 1..9 {
-            if x != 4 {
+            if x != 4 && x != 5 {
                 design = put(design, PartKind::Wall, (x, 5));
             }
         }
-        design = put(design, gap, (4, 5));
+        for x in [4, 5] {
+            // One door fills both tiles; walls go in one at a time.
+            if design.grid().get(Layer::Object, (x, 5)) == 0 {
+                design = place(&design, &rich(), gap, (x as u32, 5), Rotation::R90)
+                    .unwrap_or_else(|e| panic!("{gap:?} was refused: {e:?}"));
+            }
+        }
         // A cold store in the north half and a toilet in the south, each
         // facing into its own half.
         design = put(design, PartKind::ColdStore, (2, 2));
@@ -1573,7 +1730,8 @@ fn the_reference_hashes_to_the_number_it_is_pinned_to() {
         assert_eq!(
             design_hash(&reference(crew)),
             REFERENCE_HASH[i],
-            "the reference design for {crew} crew has moved",
+            "the reference design for {crew} crew has moved: it now hashes to {:#018x}",
+            design_hash(&reference(crew)),
         );
     }
     assert_ne!(REFERENCE_HASH[0], REFERENCE_HASH[1]);
@@ -1630,7 +1788,7 @@ fn an_axis_with_nothing_pushing_it_accelerates_at_nothing() {
     );
     let mass = ship_mass(&design, 1).unwrap().get();
     let forward = acceleration(&design, 1, Facing::Forward).unwrap();
-    assert!((forward - 500.0 / mass).abs() < 1e-12, "{forward}");
+    assert!((forward - 2_000.0 / mass).abs() < 1e-12, "{forward}");
     for axis in [Facing::Backward, Facing::Left, Facing::Right] {
         assert_eq!(acceleration(&design, 1, axis), Some(0.0));
     }
@@ -1646,17 +1804,18 @@ fn two_engines_on_one_axis_add_up() {
     design = put(design, PartKind::Engine, (5, 2));
     let mass = ship_mass(&design, 0).unwrap().get();
     let forward = acceleration(&design, 0, Facing::Forward).unwrap();
-    assert!((forward - 1000.0 / mass).abs() < 1e-12, "{forward}");
+    assert!((forward - 4_000.0 / mass).abs() < 1e-12, "{forward}");
 }
 
 // --- materials, and mass that is moved rather than made -------------------
 
 /// A yard to build one part in: frame, deck over all but the outermost ring
-/// of it, and two shelves with enough metal and components in them for the
-/// heaviest recipe there is.
+/// of it, and shelves holding **exactly** the heaviest recipe there is — the
+/// heavy engine's — which is what lets the "one unit short" case below build
+/// that and then be refused a wall.
 ///
 /// The bare ring of frame is what the deck plating and the hull parts want —
-/// structure with nothing on it. Two shelves rather than one on purpose:
+/// structure with nothing on it. More than one shelf on purpose:
 /// deconstructing a shelf has to find room for the metal *that shelf was
 /// made of*, and with one there would be nowhere to put it. That case has a
 /// test of its own below.
@@ -1667,10 +1826,13 @@ fn yard() -> ShipDesign {
             design = put(design, PartKind::Floor, (x, y));
         }
     }
-    design = put(design, PartKind::Shelf, (2, 2));
-    design = put(design, PartKind::Shelf, (3, 2));
-    design = bought(&design, &rich(), ResourceId::Metal, 40);
-    bought(&design, &rich(), ResourceId::Components, 40)
+    for x in 2..5 {
+        design = put(design, PartKind::Shelf, (x, 2));
+    }
+    for &(id, units) in PartKind::HeavyEngine.def().recipe {
+        design = bought(&design, &rich(), id, units);
+    }
+    design
 }
 
 /// Somewhere in [`yard`] that this kind can legally go.
@@ -1802,10 +1964,13 @@ fn building_without_the_materials_is_refused() {
         );
     }
 
-    // One unit short is still short: it is the whole recipe or nothing.
+    // One unit short is still short: it is the whole recipe or nothing. The
+    // yard holds exactly the heavy engine's recipe, so building one empties
+    // the shelves.
     let yard = yard();
-    let engine = build(&yard, PartKind::Engine).unwrap();
+    let engine = build(&yard, PartKind::HeavyEngine).unwrap();
     assert_eq!(engine.carrying(ResourceId::Metal), 0);
+    assert_eq!(engine.carrying(ResourceId::Components), 0);
     assert_eq!(
         build(&engine, PartKind::Wall),
         Err(EditError::MaterialsShort),
@@ -1956,7 +2121,10 @@ fn the_playtest_ship_is_a_whole_ship_for_one() {
         (PartKind::Engine, 1),
         (PartKind::Helm, 1),
         (PartKind::FuelTank, 1),
-        (PartKind::Shelf, 1),
+        (PartKind::Shelf, 2),
+        (PartKind::Smelter, 1),
+        (PartKind::Workbench, 1),
+        (PartKind::SuitLocker, 1),
         (PartKind::ColdStore, 1),
         (PartKind::Worktop, 1),
         (PartKind::Hob, 1),
@@ -1969,9 +2137,27 @@ fn the_playtest_ship_is_a_whole_ship_for_one() {
         (PartKind::Shower, 1),
         (PartKind::HydroBay, 1),
         (PartKind::BroomLocker, 1),
+        (PartKind::Reactor, 1),
+        (PartKind::LifeSupport, 1),
+        (PartKind::Battery, 1),
+        // Five corner pieces a side cut the bow back, and two bulkheads
+        // with a two-tile doorway each — one door apiece — make the three
+        // compartments.
+        (PartKind::DiagonalOutsideWall, 10),
+        (PartKind::Door, 2),
+        (PartKind::Wall, 24),
+        // The spine, bow to reactor, and the branches to every consumer.
+        (PartKind::PowerConduit, 53),
     ] {
         assert_eq!(design.count(kind), want, "{kind:?}");
     }
+    // The bow is pointed: nothing of the ship in the two corners of the
+    // grid the cut takes off, and the bridge is inside the cut.
+    let grid = design.grid();
+    for tile in [(2, 1), (3, 2), (17, 1), (16, 2), (2, 4), (17, 4)] {
+        assert!(!grid.occupied(tile), "{tile:?} should be off the ship");
+    }
+    assert!(grid.has_floor((9, 4)), "the pilot's spot is deck");
     for (resource, units) in PLAYTEST_CARGO {
         assert_eq!(design.carrying(resource), units, "{resource:?}");
     }
@@ -2073,4 +2259,482 @@ fn plating_lays_its_own_frame() {
         apply(&design, &broke, Edit::Plate { origin: (3, 3) }).err(),
         Some(EditError::Unaffordable)
     );
+}
+
+// --- the port ---------------------------------------------------------------
+
+/// The flyer's airlock stands in the starboard skin, two tiles tall, and opens
+/// to starboard: that is the port, and its face is half a tile outside the
+/// hull. The reference has no airlock and so no port.
+#[test]
+fn the_port_is_the_airlock_and_it_opens_onto_space() {
+    let design = flyer(2);
+    let port = crate::dock::port(&design).expect("the flyer has an airlock");
+    let airlock = design
+        .parts
+        .iter()
+        .find(|p| p.kind == PartKind::Airlock)
+        .unwrap();
+    assert_eq!(port.part_id, airlock.id);
+    assert_eq!(port.outward, (1, 0), "it opens to starboard");
+    let t = TILE as f64;
+    // Two tiles at (18, 11) and (18, 12): the centre is the seam between them.
+    assert_eq!(port.centre, (18.5 * t, 12.0 * t));
+    // The face is the end of the collar, half a tile past the skin.
+    assert_eq!(port.face(), (19.5 * t, 12.0 * t));
+
+    assert_eq!(crate::dock::port(&reference(2)), None);
+}
+
+/// An airlock with hull on every side of it is a door to nowhere, and a
+/// design whose only airlock is one has no port rather than a port that
+/// opens into its own deck.
+#[test]
+fn an_airlock_buried_in_the_hull_is_no_port() {
+    let mut design = floored(10, (1, 1), (9, 9));
+    design = put(design, PartKind::Airlock, (4, 4));
+    assert_eq!(crate::dock::port(&design), None);
+}
+
+// --- the exhaust --------------------------------------------------------------
+
+/// An engine fires aft, and what is aft of it has to be space. Inside the
+/// hull with deck behind it, it is an error; flush with the stern, its
+/// bell over the edge of the ship, it is not — and turned, "aft" turns
+/// with it.
+#[test]
+fn an_engine_has_to_fire_into_space() {
+    use crate::validate::{exhaust_blocked, exhaust_tiles};
+    // A decked square with an engine in the middle: three tiles of deck
+    // straight behind it.
+    let inside = put(floored(12, (1, 1), (11, 11)), PartKind::Engine, (4, 4));
+    let engine = inside
+        .parts
+        .iter()
+        .find(|p| p.kind == PartKind::Engine)
+        .unwrap();
+    assert_eq!(exhaust_tiles(engine), vec![(4, 7), (5, 7)]);
+    assert!(exhaust_blocked(engine, &inside.grid()));
+    let codes: Vec<u32> = validate(&inside, 1)
+        .into_iter()
+        .filter(|i| i.code == IssueCode::ExhaustBlocked.code())
+        .map(|i| i.severity as u32)
+        .collect();
+    assert_eq!(
+        codes,
+        vec![Severity::Error as u32],
+        "an engine in a room is an error"
+    );
+
+    // At the stern, its last row on the last row of frame: nothing behind.
+    let stern = put(floored(12, (1, 1), (11, 11)), PartKind::Engine, (4, 8));
+    let engine = stern
+        .parts
+        .iter()
+        .find(|p| p.kind == PartKind::Engine)
+        .unwrap();
+    assert_eq!(exhaust_tiles(engine), vec![(4, 11), (5, 11)]);
+    assert!(!exhaust_blocked(engine, &stern.grid()));
+    assert!(
+        !validate(&stern, 1)
+            .iter()
+            .any(|i| i.code == IssueCode::ExhaustBlocked.code())
+    );
+
+    // Turned a quarter, it fires to the west: the same engine at the west
+    // edge is fine and in the middle is not.
+    let west = place(
+        &floored(12, (1, 1), (11, 11)),
+        &rich(),
+        PartKind::Engine,
+        (1, 4),
+        Rotation::R90,
+    )
+    .unwrap();
+    let engine = west
+        .parts
+        .iter()
+        .find(|p| p.kind == PartKind::Engine)
+        .unwrap();
+    assert_eq!(exhaust_tiles(engine), vec![(0, 4), (0, 5)]);
+    assert!(!exhaust_blocked(engine, &west.grid()));
+    let middle = place(
+        &floored(12, (1, 1), (11, 11)),
+        &rich(),
+        PartKind::Engine,
+        (5, 4),
+        Rotation::R90,
+    )
+    .unwrap();
+    let engine = middle
+        .parts
+        .iter()
+        .find(|p| p.kind == PartKind::Engine)
+        .unwrap();
+    assert!(exhaust_blocked(engine, &middle.grid()));
+
+    // And a part that does not push has no exhaust to speak of.
+    let bunk = put(floored(12, (1, 1), (11, 11)), PartKind::Bunk, (4, 4));
+    let bunk = bunk
+        .parts
+        .iter()
+        .find(|p| p.kind == PartKind::Bunk)
+        .unwrap();
+    assert!(exhaust_tiles(bunk).is_empty());
+}
+
+/// An engine in a corner of the hull, with frame on three sides, still has
+/// a use spot: the ring only needs one tile of deck. With deck on no side
+/// at all it is a `UseSpotBlocked` like anything else.
+#[test]
+fn an_engine_needs_one_side_free_not_every_side() {
+    // Decked square, engine flush with the stern in the corner: the ring
+    // has deck to the west and the north, frame to the east, space to the
+    // south.
+    let corner = put(floored(12, (1, 1), (11, 11)), PartKind::Engine, (9, 8));
+    let issues = validate(&corner, 1);
+    assert!(
+        !issues
+            .iter()
+            .any(|i| i.code == IssueCode::UseSpotBlocked.code()),
+        "an engine with deck on one side is reachable"
+    );
+    assert!(
+        !issues
+            .iter()
+            .any(|i| i.code == IssueCode::ExhaustBlocked.code())
+    );
+
+    // Walled in on every side but the stern: nowhere to stand.
+    let mut walled = corner.clone();
+    for tile in [(8u32, 8u32), (8, 9), (8, 10), (9, 7), (10, 7)] {
+        walled = put(walled, PartKind::Wall, tile);
+    }
+    let issues = validate(&walled, 1);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.code == IssueCode::UseSpotBlocked.code()),
+        "an engine nobody can get at should say so"
+    );
+}
+
+// --- power ----------------------------------------------------------------
+
+/// The column, said out loud: who makes it, who holds it, who draws it —
+/// and that the essentials are among the drawers, or the brownout rule
+/// would be keeping alive something that was never on.
+#[test]
+fn power_is_made_held_and_drawn_where_it_is_meant_to_be() {
+    use crate::parts::{BATTERY_CHARGE, REACTOR_OUTPUT, essential};
+    let making: Vec<PartKind> = PartKind::ALL
+        .iter()
+        .copied()
+        .filter(|k| k.def().supplies())
+        .collect();
+    assert_eq!(making, vec![PartKind::Reactor]);
+    assert_eq!(PartKind::Reactor.def().power, REACTOR_OUTPUT);
+
+    let holding: Vec<PartKind> = PartKind::ALL
+        .iter()
+        .copied()
+        .filter(|k| k.def().stores())
+        .collect();
+    assert_eq!(holding, vec![PartKind::Battery]);
+    assert_eq!(PartKind::Battery.def().charge, BATTERY_CHARGE);
+
+    let drawing: Vec<(PartKind, f64)> = PartKind::ALL
+        .iter()
+        .copied()
+        .filter(|k| k.def().draws())
+        .map(|k| (k, -k.def().power))
+        .collect();
+    assert_eq!(
+        drawing,
+        vec![
+            (PartKind::Door, 1.0),
+            (PartKind::ColdStore, 5.0),
+            (PartKind::HydroBay, 15.0),
+            (PartKind::Helm, 5.0),
+            (PartKind::LifeSupport, 20.0),
+            (PartKind::SensorArray, 10.0),
+            (PartKind::Smelter, 40.0),
+            (PartKind::Workbench, 15.0),
+            (PartKind::Armoury, 10.0),
+        ],
+    );
+    for kind in PartKind::ALL {
+        if essential(kind) {
+            assert!(
+                kind.def().draws(),
+                "{kind:?} is essential and draws nothing"
+            );
+        }
+    }
+    assert!(essential(PartKind::LifeSupport));
+    assert!(essential(PartKind::Door));
+    assert!(!essential(PartKind::HydroBay));
+}
+
+/// A reactor with conduit under it, a run to a cold store, and a second
+/// cold store the run never reaches: the first is powered and the second
+/// is what the warning points at. Then the reactor comes off, and the run
+/// is a network nobody is on.
+#[test]
+fn a_consumer_is_powered_by_conduit_under_it_on_a_run_to_a_reactor() {
+    use crate::parts::REACTOR_OUTPUT;
+    use crate::power::{is_powered, networks, unpowered};
+    let mut design = floored(10, (1, 1), (9, 9));
+    design = put(design, PartKind::Reactor, (2, 2));
+    design = put(design, PartKind::ColdStore, (6, 2));
+    design = put(design, PartKind::ColdStore, (6, 6));
+    let reactor = design
+        .parts
+        .iter()
+        .find(|p| p.kind == PartKind::Reactor)
+        .unwrap()
+        .id;
+    let near = design
+        .parts
+        .iter()
+        .find(|p| p.kind == PartKind::ColdStore && p.origin == (6, 2))
+        .unwrap()
+        .id;
+    let far = design
+        .parts
+        .iter()
+        .find(|p| p.kind == PartKind::ColdStore && p.origin == (6, 6))
+        .unwrap()
+        .id;
+
+    // Nothing wired: both in the dark, and there is no network at all.
+    assert!(networks(&design).is_empty());
+    assert_eq!(unpowered(&design), vec![near, far]);
+    assert_eq!(
+        all_codes(&design, 0)
+            .iter()
+            .filter(|&&c| c == IssueCode::Unpowered.code())
+            .count(),
+        1
+    );
+
+    // Conduit along row 2 from beside the reactor to the near store. A
+    // run to the store with no reactor on it is not a live network, so the
+    // store is unpowered whether or not there is wire under it.
+    for x in 4..=6 {
+        design = put(design, PartKind::PowerConduit, (x, 2));
+    }
+    assert_eq!(networks(&design).len(), 1);
+    assert!(!networks(&design)[0].live());
+    assert_eq!(unpowered(&design), vec![near, far]);
+
+    // One more tile, under the reactor's own footprint, and it is live.
+    design = put(design, PartKind::PowerConduit, (3, 2));
+    let nets = networks(&design);
+    assert_eq!(nets.len(), 1);
+    assert!(nets[0].live());
+    assert_eq!(nets[0].parts, vec![reactor, near]);
+    assert_eq!(nets[0].supply, REACTOR_OUTPUT);
+    assert_eq!(nets[0].draw, 5.0);
+    assert_eq!(nets[0].storage, 0.0);
+    assert!(is_powered(&design, near));
+    assert!(!is_powered(&design, far));
+    assert_eq!(unpowered(&design), vec![far]);
+    let issue = validate(&design, 0)
+        .into_iter()
+        .find(|i| i.code == IssueCode::Unpowered.code())
+        .expect("the far store should be warned about");
+    assert_eq!(issue.severity, Severity::Warning);
+    assert_eq!(issue.parts, vec![far]);
+    assert_eq!(issue.tiles, vec![(6, 6)]);
+
+    // Take the reactor away and the run goes dark; the store is still on
+    // it, and still unpowered.
+    let dark = apply(&design, &rich(), Edit::Remove { part_id: reactor }).unwrap();
+    assert!(!networks(&dark)[0].live());
+    assert_eq!(unpowered(&dark), vec![near, far]);
+}
+
+/// Two runs of conduit, each under one tile of the reactor and never
+/// laid between: the reactor is the join, and it is one network making
+/// one reactor's worth — not two making two.
+#[test]
+fn a_part_joins_the_conduit_under_it_into_one_network() {
+    use crate::parts::REACTOR_OUTPUT;
+    use crate::power::networks;
+    let mut design = floored(10, (1, 1), (9, 9));
+    design = put(design, PartKind::Reactor, (4, 4));
+    // Left run: down column 4 from the reactor's top-left tile.
+    for y in 1..=4 {
+        design = put(design, PartKind::PowerConduit, (4, y));
+    }
+    // Right run: from the reactor's bottom-right tile to the edge.
+    for x in 5..=8 {
+        design = put(design, PartKind::PowerConduit, (x, 5));
+    }
+    let nets = networks(&design);
+    assert_eq!(nets.len(), 1, "{nets:?}");
+    assert_eq!(nets[0].supply, REACTOR_OUTPUT);
+    assert_eq!(nets[0].tiles.len(), 8);
+
+    // The same two runs under a fuel tank instead of a reactor are two
+    // networks: a tank is not a wire.
+    let mut design = floored(10, (1, 1), (9, 9));
+    design = put(design, PartKind::FuelTank, (4, 4));
+    for y in 1..=4 {
+        design = put(design, PartKind::PowerConduit, (4, y));
+    }
+    for x in 5..=8 {
+        design = put(design, PartKind::PowerConduit, (x, 5));
+    }
+    assert_eq!(networks(&design).len(), 2);
+}
+
+/// Six life supports on one reactor draw exactly what it makes and are
+/// not short; a seventh is, and the warning is on that run, with
+/// everything on it. A battery on the run holds the number and changes
+/// nothing about the warning.
+#[test]
+fn a_network_drawing_more_than_it_makes_is_warned_about_per_run() {
+    use crate::parts::REACTOR_OUTPUT;
+    use crate::power::{budget, networks};
+    let mut design = floored(20, (1, 1), (19, 19));
+    design = put(design, PartKind::Reactor, (2, 2));
+    for x in 2..=17 {
+        design = put(design, PartKind::PowerConduit, (x, 2));
+    }
+    for i in 0..6u32 {
+        design = put(design, PartKind::LifeSupport, (5 + 2 * i, 2));
+    }
+    assert!(!all_codes(&design, 0).contains(&IssueCode::PowerShort.code()));
+    assert!(!all_codes(&design, 0).contains(&IssueCode::Unpowered.code()));
+    assert_eq!(budget(&design).draw, 120.0);
+    assert_eq!(
+        budget(&design).draw,
+        REACTOR_OUTPUT,
+        "the test leans on this"
+    );
+
+    design = put(design, PartKind::LifeSupport, (17, 2));
+    let nets = networks(&design);
+    assert!(nets[0].short());
+    let issue = validate(&design, 0)
+        .into_iter()
+        .find(|i| i.code == IssueCode::PowerShort.code())
+        .expect("a short network should be warned about");
+    assert_eq!(issue.severity, Severity::Warning);
+    assert_eq!(issue.parts.len(), 8);
+    assert_eq!(issue.tiles, nets[0].tiles);
+    assert_eq!(budget(&design).draw, 140.0);
+    assert_eq!(budget(&design).supply, REACTOR_OUTPUT);
+
+    design = put(design, PartKind::Battery, (2, 5));
+    design = put(design, PartKind::PowerConduit, (2, 3));
+    design = put(design, PartKind::PowerConduit, (2, 4));
+    design = put(design, PartKind::PowerConduit, (2, 5));
+    assert!(all_codes(&design, 0).contains(&IssueCode::PowerShort.code()));
+    assert_eq!(budget(&design).storage, crate::parts::BATTERY_CHARGE);
+
+    // A second reactor on a run of its own with nothing on it counts for
+    // nothing: the budget is over live networks, but the short one is
+    // still short.
+    design = put(design, PartKind::Reactor, (10, 10));
+    design = put(design, PartKind::PowerConduit, (10, 10));
+    assert_eq!(budget(&design).supply, 2.0 * REACTOR_OUTPUT);
+    assert!(all_codes(&design, 0).contains(&IssueCode::PowerShort.code()));
+}
+
+/// Both fixtures are wired: nothing aboard either is in the dark, one
+/// network each, and the playtest ship's figures are the ones the
+/// reactor's output was chosen against.
+#[test]
+fn the_fixtures_are_wired() {
+    use crate::fixture::playtest_ship;
+    use crate::power::{budget, networks, unpowered};
+    for &crew in CREWS.iter() {
+        for design in [reference(crew), flyer(crew)] {
+            assert!(unpowered(&design).is_empty(), "{:?}", unpowered(&design));
+            assert_eq!(networks(&design).len(), 1);
+            assert!(!networks(&design)[0].short());
+        }
+    }
+    let design = playtest_ship();
+    assert!(unpowered(&design).is_empty(), "{:?}", unpowered(&design));
+    let nets = networks(&design);
+    assert_eq!(nets.len(), 1, "{nets:?}");
+    let power = budget(&design);
+    assert_eq!(power.supply, 120.0);
+    // Life support, the helm, the array, the cold store, the bay, two
+    // doors, the smelter and the workbench.
+    assert_eq!(power.draw, 112.0);
+    assert_eq!(power.storage, crate::parts::BATTERY_CHARGE);
+    let codes = all_codes(&design, 1);
+    assert!(!codes.contains(&IssueCode::Unpowered.code()));
+    assert!(!codes.contains(&IssueCode::PowerShort.code()));
+}
+
+// --- recipes --------------------------------------------------------------
+
+/// The table, said out loud: what each makes, at what, and the mass rule —
+/// conserved at the workbench, lost only at the smelter, gained nowhere.
+#[test]
+fn every_recipe_holds_together() {
+    use crate::recipes::{RECIPES, at, recipes_are_sound};
+    assert!(recipes_are_sound());
+    assert_eq!(RECIPES.len(), 6);
+
+    let smelt = &RECIPES[0];
+    assert_eq!(smelt.station, PartKind::Smelter);
+    assert_eq!(smelt.inputs, &[(ResourceId::Ore, 2)]);
+    assert_eq!(smelt.output, (ResourceId::Metal, 1));
+    assert!(smelt.vents);
+    assert!(
+        smelt.output_mass() < smelt.input_mass(),
+        "the slag is vented"
+    );
+
+    let components = &RECIPES[1];
+    assert_eq!(components.station, PartKind::Workbench);
+    assert_eq!(components.output, (ResourceId::Components, 4));
+    assert!(!components.vents);
+    assert_eq!(components.output_mass(), components.input_mass());
+
+    let emitter = &RECIPES[2];
+    assert_eq!(emitter.station, PartKind::Workbench);
+    assert_eq!(emitter.output, (ResourceId::Emitter, 1));
+    assert!(
+        emitter
+            .inputs
+            .iter()
+            .any(|&(id, _)| id == ResourceId::Galvum)
+    );
+    assert_eq!(emitter.output_mass(), emitter.input_mass());
+
+    assert_eq!(at(PartKind::Smelter).count(), 1);
+    assert_eq!(at(PartKind::Workbench).count(), 2);
+    assert_eq!(at(PartKind::Armoury).count(), 3);
+    assert_eq!(at(PartKind::Hob).count(), 0);
+    // The three the armoury makes, and what they are made of: the handgun
+    // is the one thing that wants an emitter, so it is the one thing that
+    // wants galvum.
+    let handgun = &RECIPES[3];
+    assert_eq!(handgun.output, (ResourceId::Handgun, 1));
+    assert!(
+        handgun
+            .inputs
+            .iter()
+            .any(|&(id, _)| id == ResourceId::Emitter)
+    );
+    assert_eq!(handgun.output_mass(), handgun.input_mass());
+    assert_eq!(RECIPES[4].output, (ResourceId::Vest, 1));
+    assert_eq!(RECIPES[5].output, (ResourceId::Medkit, 1));
+    for r in &RECIPES[3..] {
+        assert_eq!(r.station, PartKind::Armoury);
+        assert!(!r.vents);
+        assert_eq!(r.output_mass(), r.input_mass(), "{:?}", r.output);
+    }
+    // Every station draws, so every one of them stops in a brownout.
+    for r in RECIPES.iter() {
+        assert!(r.station.def().draws(), "{:?}", r.station);
+    }
 }

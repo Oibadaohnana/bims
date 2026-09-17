@@ -70,6 +70,15 @@ const FRESHEN: f32 = 1.0 / (4.0 * 60.0);
 /// "nothing has happened here" rather than grading dirt.
 const WORTH_SWEEPING: f32 = 1.0;
 
+/// How far down a tile has to be before it spoils the food made beside it:
+/// as far as a wetting takes one, which is also where a second spatter on
+/// the same stain lands. Deliberately **not** [`WORTH_SWEEPING`]: a meal
+/// flicks a stain or two onto the deck on its way — see `JOB_MESSES` — and
+/// judged by those, the cook's own chopping would poison the cook, every
+/// meal, on a deck nobody had done anything to. A wetting, an accident, a
+/// bout of sickness, or a galley left to go grubby is what counts.
+const SPOILS_FOOD: f32 = BASELINE - WET_COST;
+
 /// What a dirty job flicks onto a tile beside it, and how often a finished
 /// step of one does it at all.
 ///
@@ -256,15 +265,18 @@ impl Ordeal {
         cleanliness: f32,
         urge_extreme: bool,
         urge_medium: bool,
+        purging: bool,
         rng: &mut Rng,
     ) -> Mishap {
         let mut out = Mishap::default();
 
         // The heads, or the deck. Holding on is a matter of how long it has
         // been at nothing rather than of the level, which cannot go lower.
+        // Food poisoning is the exception: there is no holding on, and the
+        // need reaching nothing is the accident, at once.
         if urge_extreme {
             self.bursting_for += minutes;
-            if self.bursting_for >= HOLDS_FOR {
+            if purging || self.bursting_for >= HOLDS_FOR {
                 self.bursting_for = 0.0;
                 out.fouled = true;
             }
@@ -443,6 +455,25 @@ impl Filth {
             .iter()
             .filter(|&&t| t < BASELINE - WORTH_SWEEPING)
             .count() as u32
+    }
+
+    /// How many tiles within `reach` tiles of `at` — a square, the tile under
+    /// it included — are messy enough to spoil food, at [`SPOILS_FOOD`].
+    /// What the galley is judged by: a mess beside the hob is a mess in the
+    /// food.
+    pub fn dirty_tiles_within(&self, at: Vec2, reach: i32) -> u32 {
+        let (c, r) = self.cell(at);
+        let mut n = 0;
+        for dr in -reach..=reach {
+            for dc in -reach..=reach {
+                if let Some(i) = self.index(c + dc, r + dr)
+                    && self.tiles[i] <= SPOILS_FOOD
+                {
+                    n += 1;
+                }
+            }
+        }
+        n
     }
 
     /// Take `cost` off the tile under `at`, never past the worst there is, and

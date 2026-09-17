@@ -97,7 +97,10 @@ check("for the lobby's crew", ship.wasm.ship_players() === 1, String(ship.wasm.s
 // The designer opens on the playtest ship, given: a ship the player can
 // accept as it stands, or change first. Here it is accepted as it stands,
 // which is the shortest path a player has to the world.
-check("the designer opens on a ship already laid out", ship.wasm.ship_part_total() > 600, String(ship.wasm.ship_part_total()));
+const PLAYTEST_PARTS = Number(
+  /PLAYTEST_PARTS: u32 = (\d+);/.exec(readFileSync("crates/shipdesign/src/fixture.rs", "utf8"))[1],
+);
+check("the designer opens on a ship already laid out", ship.wasm.ship_part_total() === PLAYTEST_PARTS, String(ship.wasm.ship_part_total()));
 check("that is whole and flyable", ship.wasm.ship_has_errors() === 0 && ship.wasm.ship_issue_count() === 0, `${ship.wasm.ship_issue_count()} issues`);
 const pool = ship.wasm.ship_pool_hi() * 2 ** 32 + ship.wasm.ship_pool_lo();
 const left = ship.wasm.ship_remaining_hi() * 2 ** 32 + ship.wasm.ship_remaining_lo();

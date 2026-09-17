@@ -16,6 +16,13 @@ pub const STRIDE: usize = 12;
 
 pub const KIND_RECT: f32 = 0.0;
 pub const KIND_ELLIPSE: f32 = 1.0;
+/// A right-angled triangle: the half of the `w` x `h` box **below its
+/// falling diagonal** — the right angle at the box's bottom-left corner,
+/// the hypotenuse from top-left to bottom-right — spun about the box's
+/// centre by `rot`. The one shape the diagonal walls needed and the only
+/// thing added to the format since it was rectangles and ellipses; `radius`
+/// is ignored and `line` strokes as for a rectangle.
+pub const KIND_TRIANGLE: f32 = 2.0;
 
 /// A `line` width of zero means fill; anything greater strokes the outline.
 const FILLED: f32 = 0.0;
@@ -92,6 +99,25 @@ impl DrawList {
         }
     }
 
+    /// [`DrawList::append_turned`] and then moved: every centre lands `at`
+    /// away from where the turn put it. What draws a picture made in
+    /// somebody else's frame — a station's, whose grid is not the ship's —
+    /// where that somebody is on the screen.
+    pub fn append_turned_at(
+        &mut self,
+        shapes: &[f32],
+        centre: (f32, f32),
+        angle: f32,
+        at: (f32, f32),
+    ) {
+        let from = self.data.len();
+        self.append_turned(shapes, centre, angle);
+        for shape in self.data[from..].chunks_exact_mut(STRIDE) {
+            shape[1] += at.0;
+            shape[2] += at.1;
+        }
+    }
+
     /// Turn every shape pushed since the buffer was `from` floats long about
     /// the origin, by `angle` in the screen's sense: each centre goes through
     /// the rotation and each `rot` has it added. What the game view does to
@@ -154,6 +180,12 @@ impl DrawList {
 
     pub fn ellipse(&mut self, x: f32, y: f32, w: f32, h: f32, c: Color) {
         self.push(KIND_ELLIPSE, x, y, w, h, 0.0, 0.0, FILLED, c);
+    }
+
+    /// The bottom-left half of a box, turned about its centre — see
+    /// [`KIND_TRIANGLE`] for which half at `rot` nought.
+    pub fn triangle(&mut self, x: f32, y: f32, w: f32, h: f32, rot: f32, c: Color) {
+        self.push(KIND_TRIANGLE, x, y, w, h, rot, 0.0, FILLED, c);
     }
 
     /// A rectangle given by its corners rather than its centre, which is how

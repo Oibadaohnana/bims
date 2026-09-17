@@ -50,18 +50,46 @@ pub enum ResourceId {
     Components = 3,
     Vegetable = 4,
     Tofu = 5,
+    /// The rare one. Sold only at mining outposts, mined only from rich
+    /// belts, and wanted only by the emitter — so a crew that never fights
+    /// never needs any, and a crew that does has a reason to visit a belt.
+    Galvum = 6,
+    /// The rare tier of component: metal, components and galvum at a
+    /// workbench, and what a turret, a shield, a mining laser and a sensor
+    /// array are made of. Made, never sold.
+    Emitter = 7,
+    /// A pressure suit. Worn for a walk outside — mining ore off a belt —
+    /// and kept in a suit locker, which is the locker class of storage. A
+    /// resource rather than a thing with a state of its own, until a suit
+    /// wears out.
+    Suit = 8,
+    /// A laser handgun: two components and an emitter at the armoury.
+    /// What a Bim will carry into a fight. Made, never sold.
+    Handgun = 9,
+    /// A vest: metal and components at the armoury. Worn into a fight.
+    /// Made, never sold.
+    Vest = 10,
+    /// A medkit: vegetables and a component at the armoury. What treating a
+    /// wound will use up.
+    Medkit = 11,
 }
 
 impl ResourceId {
     /// Every resource, in discriminant order. `ALL[id as usize].id == id`,
     /// which [`ResourceId::def`] relies on and [`defs_are_sound`] checks.
-    pub const ALL: [ResourceId; 6] = [
+    pub const ALL: [ResourceId; 12] = [
         ResourceId::Ore,
         ResourceId::Metal,
         ResourceId::Fuel,
         ResourceId::Components,
         ResourceId::Vegetable,
         ResourceId::Tofu,
+        ResourceId::Galvum,
+        ResourceId::Emitter,
+        ResourceId::Suit,
+        ResourceId::Handgun,
+        ResourceId::Vest,
+        ResourceId::Medkit,
     ];
 
     pub fn def(self) -> &'static ResourceDef {
@@ -89,7 +117,13 @@ pub struct ResourceDef {
 /// lighter than either and components are light and fiddly. A crate of
 /// vegetables and a block of tofu are lighter again — a week's meals for two
 /// weighs less than one girder, which is the relation that matters.
-pub static RESOURCES: [ResourceDef; 6] = [
+///
+/// The two made things are pinned to their recipes rather than to taste:
+/// crafting conserves mass, so an emitter weighs exactly the metal, the two
+/// components and the galvum that went into it, and four components weigh
+/// one metal. `shipdesign::recipes` is where those recipes live and
+/// `every_recipe_conserves_mass` there is what holds this column to them.
+pub static RESOURCES: [ResourceDef; 12] = [
     ResourceDef {
         id: ResourceId::Ore,
         mass_per_unit: 10.0,
@@ -113,6 +147,31 @@ pub static RESOURCES: [ResourceDef; 6] = [
     ResourceDef {
         id: ResourceId::Tofu,
         mass_per_unit: 0.5,
+    },
+    ResourceDef {
+        id: ResourceId::Galvum,
+        mass_per_unit: 4.0,
+    },
+    ResourceDef {
+        id: ResourceId::Emitter,
+        mass_per_unit: 16.0,
+    },
+    ResourceDef {
+        id: ResourceId::Suit,
+        mass_per_unit: 6.0,
+    },
+    // The three the armoury makes weigh their recipes, like the emitter.
+    ResourceDef {
+        id: ResourceId::Handgun,
+        mass_per_unit: 20.0,
+    },
+    ResourceDef {
+        id: ResourceId::Vest,
+        mass_per_unit: 36.0,
+    },
+    ResourceDef {
+        id: ResourceId::Medkit,
+        mass_per_unit: 3.0,
     },
 ];
 

@@ -12,7 +12,7 @@
 use crate::clock::{HOUR, MINUTES_PER_SECOND};
 use crate::draw::{Color, DrawList};
 use crate::math::{Rect, TAU, Vec2, clamp, lerp, vec2};
-use crate::room::{GLOW, PANEL_EDGE, PANEL_LIT, STEEL, WARN};
+use crate::room::{GLOW, PANEL, PANEL_EDGE, PANEL_LIT, STEEL, WARN};
 
 /// How many plates it stows before it has to be run.
 pub const CAPACITY: u32 = 10;
@@ -30,6 +30,11 @@ const RACK: Color = Color::rgb(0.42, 0.48, 0.54);
 pub struct Dishwasher {
     /// The door, as a face on the front of the counter run.
     pub face: Rect,
+    /// The whole appliance, where it stands on its own: a ship's dishwasher
+    /// is one tile, and the room draws that tile, so the body is drawn here
+    /// with the door on its front. `None` in the classic room, where it is
+    /// set into the counter run and the counter is the body.
+    pub body: Option<Rect>,
 
     /// Dirty plates waiting for a cycle.
     pub loaded: u32,
@@ -57,6 +62,7 @@ impl Dishwasher {
     pub fn at(face: Rect) -> Dishwasher {
         Dishwasher {
             face,
+            body: None,
             loaded: 0,
             washing: 0,
             cycle_left: 0.0,
@@ -125,6 +131,12 @@ impl Dishwasher {
     pub fn draw(&self, list: &mut DrawList) {
         let f = self.face;
         let drop = self.open * DOOR_TRAVEL;
+
+        // The appliance itself, the whole tile, where it stands alone.
+        if let Some(b) = self.body {
+            list.rect(b.center(), b.size(), 0.0, 3.0, PANEL);
+            list.stroke_rect(b.center(), b.size(), 0.0, 3.0, 1.0, PANEL_EDGE.alpha(0.6));
+        }
 
         // The cavity behind the door, with a rack and whatever is stacked in
         // it, revealed as the door comes down.

@@ -100,30 +100,44 @@
 //!
 //! # What is deliberately absent
 //!
-//! Power, oxygen and airtightness, engine exhaust clearance, construction
-//! labour, hauling, construction sites, scrap, undo, and the final art. A part
-//! has a recipe, a price, a footprint, somewhere to stand and — since the
-//! flight step — a thrust or a turning force, and nothing else, because every
-//! field that exists is a field something has to keep true.
+//! Oxygen and airtightness, construction labour, hauling, construction
+//! sites, scrap, undo, and the final art. A part has a recipe, a price, a
+//! footprint, somewhere to stand, a thrust or a turning force since the
+//! flight step, and a power figure since [`power`] — and nothing else,
+//! because every field that exists is a field something has to keep true.
 
 pub mod budget;
 pub mod design;
+pub mod dock;
 pub mod fixture;
 pub mod mass;
 pub mod materials;
 pub mod parts;
+pub mod power;
+pub mod recipes;
 pub mod validate;
 
 pub use budget::Budget;
 pub use design::{CARGO_SLOTS, Edit, EditError, Grid, PlacedPart, ShipDesign, apply, design_hash};
+pub use dock::{Port, port};
 // Money and what a station sells are the design phase's units, so they are
 // re-exported here rather than leaving every caller to depend on `economy`
 // for the sake of a type and two lookups.
 pub use economy::{Money, Storage, starting_pool, storage, trade_price, trade_value};
 pub use mass::{acceleration, hull_mass, ship_mass};
 pub use materials::{bound_materials, build_from_cargo, deconstruct_to_cargo};
-pub use parts::{Layer, PartDef, PartKind, Rotation, TILE, part_mass};
-pub use validate::{ExposureMap, Issue, IssueCode, Severity, exposure, has_errors, validate};
+pub use parts::{
+    BATTERY_CHARGE, Layer, PartDef, PartKind, REACTOR_OUTPUT, Rotation, TILE, essential,
+    is_diagonal, part_mass, solid_corner,
+};
+pub use power::{
+    Budget as PowerBudget, Network, budget as power_budget, is_powered, networks, unpowered,
+};
+pub use recipes::{RECIPES, Recipe, recipes_are_sound};
+pub use validate::{
+    ExposureMap, Issue, IssueCode, Severity, exhaust_blocked, exhaust_tiles, exposure, has_errors,
+    validate,
+};
 
 #[cfg(test)]
 mod tests;

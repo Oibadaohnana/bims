@@ -95,6 +95,9 @@ pub struct Bim {
     /// can be noticed once rather than every frame it lasts.
     pub worst_hunger: u32,
     pub worst_weariness: u32,
+    /// Game minutes of food poisoning left, nothing when well. Its own clock,
+    /// like the ordeal's: it is this body that is ill. See `Game::poison`.
+    pub poisoned_for: f32,
 }
 
 /// The years the crew were born in. Everyone aboard is somewhere between
@@ -125,7 +128,12 @@ impl Bim {
             memory: Memory::new(),
             worst_hunger: 0,
             worst_weariness: 0,
+            poisoned_for: 0.0,
         }
+    }
+
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned_for > 0.0
     }
 
     /// How old it is on the given date, in whole years. A birthday that has

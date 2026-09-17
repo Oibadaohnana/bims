@@ -58,6 +58,58 @@ pub const LOCAL_RADIUS_BODY: f64 = 60_000.0;
 /// How much further out than the entry radius the exit is. A quarter again.
 pub const LOCAL_HYSTERESIS: f64 = 1.25;
 
+/// How near the ship has to come to a station's hull for the people living
+/// there to be simulated: fifty tiles. Nearer than the local frame by a long
+/// way, because a room is a whole simulation and a station seen from the far
+/// side of its frame is a shape, not a place. Measured from the ship's
+/// position to the station's hull, not its centre, so a big station is not
+/// further away than a small one at the same door. The way out is
+/// [`LOCAL_HYSTERESIS`] further.
+pub const RESIDENTS_RANGE: f64 = 50.0 * shipdesign::TILE as f64;
+
+/// How far out a station is drawn as a hull in the ship view rather than
+/// left to the map. Twice the local frame: far enough that a station comes
+/// into the picture as a speck and grows, rather than appearing.
+pub const STATION_VISIBLE: f64 = 2.0 * LOCAL_RADIUS_STATION;
+
+/// How long the ship takes to push off its berth once everybody is where
+/// they belong, and how long it takes to come alongside once a trip has
+/// ended, in game minutes. Both are read off the clock in closed form —
+/// see `World::cast_off` and `World::come_alongside` — so a browser at 24x
+/// and a server catching up put the ship in the same place.
+pub const UNDOCK_MINUTES: f64 = 3.0;
+pub const DOCK_MINUTES: f64 = 5.0;
+
+/// How long the ship waits at the berth for the station's people to go
+/// ashore and its own to come back aboard before it leaves without them.
+/// Whoever is still on the wrong side of the airlock then is put where the
+/// room puts a body with no floor under it — see `crew::Aboard::unjoined`.
+pub const CASTING_OFF_LIMIT: f64 = 30.0;
+
+/// How far a crew member may stand from the helm's seat and still be at the
+/// helm: a tile, which is where a route to the seat can be relied on to
+/// leave a body, and no further.
+pub const HELM_REACH: f64 = shipdesign::TILE as f64;
+
+/// How far inside a door the people going through it are sent, in tiles:
+/// the corridor just inside a station's port, and the deck just inside the
+/// ship's.
+pub const ASHORE_TILES: f64 = 2.5;
+
+/// How long one walk outside is, in game minutes: an hour and a half out
+/// there gathering ore, on top of the suit and the airlock either end.
+pub const EVA_MINUTES: f64 = 90.0;
+
+/// What the suit lets through, as a multiplier on the open-air dose rate
+/// in `crates/health`: a quarter, so a walk is about twenty-two minutes'
+/// worth of dose, and the dose comes off at half a unit a minute inside.
+pub const SUIT_INTENSITY: f64 = 0.25;
+
+/// The dose above which a Bim is not sent out again: half the critical
+/// line. Two walks back to back are fine; a third waits for the dose to
+/// come off. This is what bounds a walk outside — there is no air gauge.
+pub const EVA_DOSE_LIMIT: f64 = health::CRITICAL / 2.0;
+
 /// The galaxy the **simulation** opens in, and the one a page with no lobby
 /// behind it falls back to.
 ///

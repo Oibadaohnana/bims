@@ -607,7 +607,7 @@ fn four_thrusters_flip_the_reference_inside_two_hours() {
 
 /// One full tank, and the longest hop the world generator will ever put
 /// between two things in a system. This is what
-/// [`data::FUEL_PER_ENGINE_MINUTE`] is set by: a ship that cannot cross its
+/// [`data::FUEL_PER_THRUST_MINUTE`] is set by: a ship that cannot cross its
 /// own system is a ship with nowhere to go.
 #[test]
 fn one_full_tank_crosses_the_longest_reference_hop() {
@@ -644,6 +644,55 @@ fn one_full_tank_crosses_the_longest_reference_hop() {
     // trip nobody would sit through is a trip nobody takes.
     let days = time::days(plan.duration());
     assert!(days < 400.0, "the longest hop took {days} days");
+}
+
+/// The second engine, and the trade it is: the flyer with its engine swapped
+/// for a heavy one crosses the longest hop **faster** and burns **more**
+/// doing it. Fuel goes as thrust, so the heavy engine's minute costs exactly
+/// five times the small one's whatever the ship weighs — which is what keeps
+/// it from being the only engine worth having.
+#[test]
+fn the_heavy_engine_is_faster_and_dearer_over_the_same_hop() {
+    let light = flyer(4);
+    let mut heavy = light.clone();
+    // Swapped in place rather than placed: the kind is what is under test,
+    // and the picture of where a three-by-four fits is the fixture's business.
+    for part in heavy.parts.iter_mut() {
+        if part.kind == shipdesign::PartKind::Engine {
+            part.kind = shipdesign::PartKind::HeavyEngine;
+        }
+    }
+    let (dl, dh) = (dynamics(&light, 4).unwrap(), dynamics(&heavy, 4).unwrap());
+    assert!(
+        dh.mass.get() > dl.mass.get(),
+        "the heavy engine weighs more"
+    );
+    assert!(
+        dh.a_forward > dl.a_forward,
+        "and still pushes the ship harder"
+    );
+    assert!(close(
+        dh.fuel_per_minute(dh.a_forward),
+        5.0 * dl.fuel_per_minute(dl.a_forward)
+    ));
+
+    let hop = worldgen::data::reference_distance(worldgen::data::TRAVEL_BAND.max_days).unwrap();
+    let there = dvec2(0.0, hop);
+    let trip =
+        |d: &Dynamics| plan_trip(d, DVec2::ZERO, 0.0, Target::Station(0), there, f64::MAX).unwrap();
+    let (pl, ph) = (trip(&dl), trip(&dh));
+    assert!(
+        ph.duration() < pl.duration(),
+        "heavy {} min, light {} min",
+        ph.duration(),
+        pl.duration()
+    );
+    assert!(
+        ph.fuel_required > pl.fuel_required,
+        "heavy {} units, light {} units",
+        ph.fuel_required,
+        pl.fuel_required
+    );
 }
 
 /// One more time with the real fixture, because everything above that used a

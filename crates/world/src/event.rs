@@ -47,6 +47,32 @@ pub enum WorldEvent {
     },
     /// A command was not carried out. The reason is in the code.
     Refused { slot: u32, why: Refusal },
+    /// A trip was confirmed at a station: the station's people are going
+    /// ashore and the crew coming back aboard, and the ship will cast off
+    /// once they have.
+    CastingOff { slot: u32 },
+    /// Everybody is where they belong and the ship is pushing off the
+    /// berth. The trip itself is planned once it is clear.
+    Undocking { slot: u32 },
+    /// A trip has ended at a station's door and the ship is coming
+    /// alongside. `Arrived` follows once it is tied up.
+    Docking { station: u32 },
+    /// A Bim finished a recipe at a bench and the cargo moved:
+    /// `shipdesign::recipes::RECIPES[recipe]`'s inputs out, its output in.
+    Crafted { recipe: u32 },
+    /// A Bim finished a recipe and nothing was made: the inputs had gone
+    /// from the hold, or there was no longer room for the output. The
+    /// labour is lost, and this says so.
+    CraftLost { recipe: u32 },
+    /// A walk outside came back with `ore` units of ore, and `galvum` of
+    /// galvum, in the hold. Nought of both means the shelves were full.
+    Mined { ore: u32, galvum: u32 },
+    /// A crew member's body crossed a line — see `health::HealthEvent`.
+    /// One code per health event, `who` as the value.
+    Health {
+        who: u32,
+        event: health::HealthEvent,
+    },
 }
 
 /// Why a command did nothing.
@@ -68,14 +94,21 @@ pub enum Refusal {
     /// Selling more than is aboard, or more than is not spoken for: fuel held
     /// against a trip under way is not fuel anybody may sell.
     NotAboard = 4,
-    /// That player may not give this order. Always false in this step — see
-    /// [`crate::World::can_command`].
+    /// That player's crew member is not standing at the helm, and the ship
+    /// is flown from the helm — see [`crate::World::can_command`].
     NotAtTheHelm = 5,
     /// An abort with nothing to abort.
     NotTravelling = 6,
     /// The sum would not fit in a `Money`. A refusal rather than a wrap, the
     /// same as everywhere else money is added up — see `crates/economy`.
     SumTooBig = 7,
+    /// A Confirm while the ship is coming alongside. It is neither at rest
+    /// nor on a trip that can be stopped: wait until it is tied up.
+    ComingAlongside = 8,
+    /// The station the ship is docked at does not sell that —
+    /// `worldgen::StationKind::sells`. Galvum is the outposts' alone, an
+    /// emitter is nobody's, and a derelict has nobody to sell anything.
+    NotSoldHere = 9,
 }
 
 impl Refusal {
@@ -101,6 +134,14 @@ impl WorldEvent {
             WorldEvent::Traded { units, .. } if units >= 0 => 8,
             WorldEvent::Traded { .. } => 9,
             WorldEvent::Refused { .. } => 10,
+            WorldEvent::CastingOff { .. } => 11,
+            WorldEvent::Undocking { .. } => 12,
+            WorldEvent::Docking { .. } => 13,
+            WorldEvent::Crafted { .. } => 14,
+            WorldEvent::CraftLost { .. } => 15,
+            WorldEvent::Mined { .. } => 16,
+            // 17 to 26: `HealthEvent` runs 1 to 10.
+            WorldEvent::Health { event, .. } => 16 + event.code(),
         }
     }
 
@@ -109,7 +150,14 @@ impl WorldEvent {
     /// those it is from the code, exactly as `MEMORY_LINES` does.
     pub fn value(self) -> i64 {
         match self {
-            WorldEvent::Departed { slot } | WorldEvent::Aborted { slot } => slot as i64,
+            WorldEvent::Departed { slot }
+            | WorldEvent::Aborted { slot }
+            | WorldEvent::CastingOff { slot }
+            | WorldEvent::Undocking { slot } => slot as i64,
+            WorldEvent::Docking { station } => station as i64,
+            WorldEvent::Crafted { recipe } | WorldEvent::CraftLost { recipe } => recipe as i64,
+            WorldEvent::Mined { ore, galvum } => (ore + 100 * galvum) as i64,
+            WorldEvent::Health { who, .. } => who as i64,
             WorldEvent::Arrived { station } => station.map(i64::from).unwrap_or(-1),
             WorldEvent::PlanFailed { error, .. } => error.code() as i64,
             WorldEvent::Discovered { node } => match node {

@@ -3,3 +3,4 @@
 /result
 /web/ship.wasm
 /web/lobby.wasm
+.direnv/

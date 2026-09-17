@@ -32,6 +32,10 @@ impl Vec2 {
         self.y.atan2(self.x)
     }
 
+    pub fn dot(self, other: Vec2) -> f32 {
+        self.x * other.x + self.y * other.y
+    }
+
     /// Turned a quarter turn: the same length, at right angles to itself.
     pub fn perp(self) -> Vec2 {
         vec2(-self.y, self.x)

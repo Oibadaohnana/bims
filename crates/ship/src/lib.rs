@@ -28,6 +28,7 @@
 pub mod camera;
 pub mod draw;
 pub mod editor;
+pub mod fittings;
 pub mod game;
 pub mod hull;
 pub mod paint;
@@ -40,7 +41,7 @@ use flight::Target;
 use game::{Game, ViewMode};
 use physics::{Facing, ResourceId};
 use shipdesign::ShipDesign;
-use shipdesign::parts::{PartKind, footprint};
+use shipdesign::parts::{Layer, PartKind, footprint};
 use shipdesign::validate::Severity;
 use shipdesign::{Money, Storage, TILE, storage, trade_price};
 use world::world::Command;
@@ -60,6 +61,8 @@ static mut LIST: Option<draw::DrawList> = None;
 static mut SEED: u64 = world::data::DEFAULT_SEED;
 static mut GALAXY: u32 = 0;
 static mut SPAWN: Option<(u32, u32)> = None;
+/// What `ship_pick_dock` last answered, for `ship_picked_station`.
+static mut PICKED: Option<(u32, u32)> = None;
 
 /// "The lobby did not say." What `star` and `station` arrive as when the
 /// query string had neither — `u32::MAX`, the same value the lobby's own
@@ -225,13 +228,20 @@ pub extern "C" fn ship_init(
     {
         editor.give(given);
     }
+    let seed = ((seed_hi as u64) << 32) | seed_lo as u64;
+    editor.market = spawn_from(star, station).and_then(|(star, station)| {
+        worldgen::Galaxy::new(seed, galaxy_type(galaxy))
+            .system(star)
+            .and_then(|system| system.station(station).map(|s| s.kind))
+    });
     unsafe {
-        SEED = ((seed_hi as u64) << 32) | seed_lo as u64;
+        SEED = seed;
         GALAXY = galaxy;
         SPAWN = spawn_from(star, station);
         GAME = None;
         EDITOR = Some(editor);
     }
+    bims::host_aboard(room_aboard);
 }
 
 /// What a design phase opens on. The codes cross the boundary as `preset=`
@@ -305,6 +315,38 @@ pub extern "C" fn ship_simulate(
         EDITOR = Some(editor);
         GAME = started;
     }
+    bims::host_aboard(room_aboard);
+}
+
+/// A dock somebody lives on, anywhere in the galaxy the seed and type
+/// name: the `roll`-th of them, wrapping. For `?mode=1&random=1` —
+/// `nix run .#test` — where the page rolls the number and hands the star
+/// and station this answers to `ship_simulate`. The star, or [`NONE`] for a
+/// galaxy nobody lives in; [`ship_picked_station`] is the other half of the
+/// same answer, kept so the galaxy is walked once and not twice.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_pick_dock(
+    seed_hi: u32,
+    seed_lo: u32,
+    galaxy: u32,
+    roll_hi: u32,
+    roll_lo: u32,
+) -> u32 {
+    let seed = ((seed_hi as u64) << 32) | seed_lo as u64;
+    let roll = ((roll_hi as u64) << 32) | roll_lo as u64;
+    let picked = world::spawn_anywhere(&worldgen::Galaxy::new(seed, galaxy_type(galaxy)), roll);
+    unsafe {
+        PICKED = picked;
+    }
+    picked.map(|(star, _)| star).unwrap_or(NONE)
+}
+
+/// The station [`ship_pick_dock`] last picked, or [`NONE`].
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_picked_station() -> u32 {
+    unsafe { PICKED }
+        .map(|(_, station)| station)
+        .unwrap_or(NONE)
 }
 
 /// The simulation's spawn for the seed and type the page opened with: the
@@ -383,6 +425,9 @@ pub extern "C" fn ship_render() {
             // a step: at 24x that is one picture rather than twenty-four.
             game.world.aboard.render();
             game.frame = game.frame.wrapping_add(1);
+            game.tick_airlock();
+            game.stream_sky();
+            game.follow_player();
             world_paint::paint(game, list())
         }
         None => paint::paint(editor(), list()),
@@ -570,13 +615,12 @@ pub extern "C" fn ship_hovered_part() -> u32 {
     editor().hovered_part()
 }
 
+/// The kind of a part by id, off the **live** ship — the design being laid
+/// out, or the one flying — so the game's readout can name what the pointer
+/// is over the same way the designer's does.
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_part_kind(part_id: u32) -> u32 {
-    editor()
-        .design
-        .part(part_id)
-        .map(|p| p.kind.code())
-        .unwrap_or(0)
+    design().part(part_id).map(|p| p.kind.code()).unwrap_or(0)
 }
 
 // --- drags ----------------------------------------------------------------
@@ -716,6 +760,28 @@ pub extern "C" fn ship_resource_count() -> u32 {
 }
 
 /// What a unit of it costs at the station.
+/// Whether the station the ship is at sells `resource`: the design phase's
+/// spawn station, or the one the ship is docked at — and 0 anywhere else,
+/// since there is nobody to buy from. The goods panel greys a row on it;
+/// `worldgen::StationKind::sells` is the rule.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_sold_here(resource: u32) -> u32 {
+    let Some(resource) = ResourceId::ALL.get(resource as usize).copied() else {
+        return 0;
+    };
+    let sold = match game() {
+        Some(g) => match g.world.ship.state {
+            world::ShipState::Docked { station } => g
+                .world
+                .station(station)
+                .is_some_and(|s| s.kind.sells(resource)),
+            _ => false,
+        },
+        None => editor().sells(resource),
+    };
+    u32::from(sold)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_trade_price_hi(resource: u32) -> u32 {
     hi(with_resource(resource, trade_price))
@@ -1061,6 +1127,52 @@ pub extern "C" fn ship_world_x() -> f64 {
     game().map(|g| g.world.ship.position().x).unwrap_or(0.0)
 }
 
+/// Stand the ship somewhere, for a harness. Nothing on the page calls it:
+/// a station's residents are fifty tiles from a hull that is days away by
+/// trip, and a picture of them is worth having without the trip.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_put_for_probe(x: f64, y: f64) {
+    if let Some(game) = game() {
+        game.world.put_for_probe(worldgen::math::dvec2(x, y));
+    }
+}
+
+/// Where station `id` is — its middle — and how far out its hull reaches;
+/// for a harness that wants to stand the ship beside one.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_station_x(id: u32) -> f64 {
+    game()
+        .and_then(|g| g.world.station(id))
+        .map(|s| s.centre().x)
+        .unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_station_y(id: u32) -> f64 {
+    game()
+        .and_then(|g| g.world.station(id))
+        .map(|s| s.centre().y)
+        .unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_station_radius(id: u32) -> f64 {
+    game()
+        .and_then(|g| g.world.station(id))
+        .map(|s| s.radius())
+        .unwrap_or(0.0)
+}
+
+/// How many people live on station `id`; nought for a derelict, and for a
+/// station that is not there.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_station_residents(id: u32) -> u32 {
+    game()
+        .and_then(|g| g.world.station(id))
+        .map(|s| s.residents())
+        .unwrap_or(0)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_world_y() -> f64 {
     game().map(|g| g.world.ship.position().y).unwrap_or(0.0)
@@ -1117,7 +1229,7 @@ pub extern "C" fn ship_trip_aborting() -> u32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_crew_count() -> u32 {
-    game().map(|g| g.world.aboard.count()).unwrap_or(0)
+    game().map(|g| g.world.aboard.crew_count()).unwrap_or(0)
 }
 
 /// Where a Bim is, in the ship view's camera units about the ship — what
@@ -1137,10 +1249,110 @@ fn crew_on_screen(who: u32) -> (f32, f32) {
     let Some(game) = game() else {
         return (0.0, 0.0);
     };
-    if who >= game.world.aboard.count() {
+    if who >= game.world.aboard.crew_count() {
         return (0.0, 0.0);
     }
     world_paint::crew_on_screen(game, who)
+}
+
+// --- the helm ---------------------------------------------------------------
+//
+// The ship is flown from the helm: a Confirm or an Abort from a player whose
+// crew member is not standing at it is refused (`World::can_command`). The
+// page asks before it lets anybody aim, and sends the local player's crew
+// member there with a button. Slot *i* is Bim *i*, as with the bunks.
+
+/// Whether that player's crew member is at the helm. The page asks about
+/// the local player; a harness asks about the other one.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_at_helm(slot: u32) -> u32 {
+    game().is_some_and(|g| g.world.at_the_helm(slot)) as u32
+}
+
+/// Send the local player's crew member to the helm, to stand there until
+/// sent elsewhere. A room order, not a command — it crosses no seam. 1 when
+/// there is a way there, 0 when there is no helm or no route.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_order_helm() -> u32 {
+    game().is_some_and(|g| {
+        let slot = g.local;
+        g.world.order_to_helm(slot)
+    }) as u32
+}
+
+/// Stand a crew member at the helm this instant. For the harness, which is
+/// testing trips and not the walk to the seat.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_man_helm_for_probe(slot: u32) {
+    if let Some(game) = game() {
+        game.world.man_the_helm_for_probe(slot);
+    }
+}
+
+// --- the station's residents ------------------------------------------------
+//
+// The people living on the station the ship is near, when it is near one:
+// the room again, laid out on the station. Drawn by the wasm with the
+// station; what the host wants is where each one is on the canvas, for a
+// name — `RESIDENT_NAMES` in `web/ship.js`, indexed by station and seat.
+
+/// How many residents are being simulated. Nought away from any station,
+/// and nought at a derelict.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_resident_count() -> u32 {
+    let Some(game) = game() else {
+        return 0;
+    };
+    // Docked, they are in the ship's room, after the crew.
+    if game.world.aboard.is_joined() {
+        return game.world.aboard.resident_count();
+    }
+    game.world
+        .residents
+        .as_ref()
+        .map(|r| r.aboard.count())
+        .unwrap_or(0)
+}
+
+/// Which station they live on, **plus one**, or 0 for nobody — the same
+/// convention as `ship_docked_at`.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_resident_station() -> u32 {
+    let Some(game) = game() else {
+        return 0;
+    };
+    if let Some(station) = game.world.ship.state.alongside()
+        && game.world.aboard.is_joined()
+    {
+        return station + 1;
+    }
+    game.world
+        .residents
+        .as_ref()
+        .map(|r| r.station + 1)
+        .unwrap_or(0)
+}
+
+/// Where a resident is, in the ship view's camera units about the ship —
+/// what `ship_crew_x`/`_y` are for the crew.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_resident_x(who: u32) -> f32 {
+    resident_on_screen(who).0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_resident_y(who: u32) -> f32 {
+    resident_on_screen(who).1
+}
+
+fn resident_on_screen(who: u32) -> (f32, f32) {
+    let Some(game) = game() else {
+        return (0.0, 0.0);
+    };
+    if who >= ship_resident_count() {
+        return (0.0, 0.0);
+    }
+    world_paint::resident_on_screen(game, who)
 }
 
 /// The star the world is in, or [`NONE`] before there is a world. With
@@ -1171,6 +1383,41 @@ pub extern "C" fn ship_fuel_aboard() -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_fuel_reserved() -> u32 {
     game().map(|g| g.world.ship.reserved_fuel).unwrap_or(0)
+}
+
+// --- power ----------------------------------------------------------------
+
+/// Units a minute the wired reactors make. The four power exports are what
+/// the ship facts panel reads; `world::Power` is the one place the
+/// figures come from.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_power_supply() -> f64 {
+    game().map(|g| g.world.power().supply).unwrap_or(0.0)
+}
+
+/// Units a minute the wired consumers draw.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_power_draw() -> f64 {
+    game().map(|g| g.world.power().draw).unwrap_or(0.0)
+}
+
+/// What the wired batteries hold at most.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_power_storage() -> f64 {
+    game().map(|g| g.world.power().storage).unwrap_or(0.0)
+}
+
+/// What is in them now.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_power_charge() -> f64 {
+    game().map(|g| g.world.power().charge).unwrap_or(0.0)
+}
+
+/// 1 while the optional consumers have stopped: drawing more than the
+/// reactors make with the batteries flat.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_power_brownout() -> u32 {
+    game().map(|g| g.world.power().brownout()).unwrap_or(false) as u32
 }
 
 /// Whose route is on the map, **plus one**, or 0 if nobody has set one.
@@ -1480,6 +1727,101 @@ pub extern "C" fn ship_cmd_sell(slot: u32, resource: u32, units: u32) {
     }
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_cmd_keep(slot: u32, resource: u32, units: u32) {
+    let Some(resource) = ResourceId::ALL.get(resource as usize).copied() else {
+        return;
+    };
+    if let Some(game) = game() {
+        game.send(Command::SetCraftTarget {
+            slot,
+            resource,
+            units,
+        });
+    }
+}
+
+// --- making things ------------------------------------------------------------
+//
+// The recipe table, read a number at a time so the host can say what a
+// bench makes, and the targets the benches work to. Indexed by position in
+// `shipdesign::recipes::RECIPES`.
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_recipe_count() -> u32 {
+    shipdesign::RECIPES.len() as u32
+}
+
+fn recipe(i: u32) -> Option<&'static shipdesign::Recipe> {
+    shipdesign::RECIPES.get(i as usize)
+}
+
+/// The `PartKind` code a Bim stands at to make it.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_recipe_station(i: u32) -> u32 {
+    recipe(i).map(|r| r.station.code()).unwrap_or(0)
+}
+
+/// The `ResourceId` it makes, and how many.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_recipe_output(i: u32) -> u32 {
+    recipe(i).map(|r| r.output.0 as u32).unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_recipe_output_units(i: u32) -> u32 {
+    recipe(i).map(|r| r.output.1).unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_recipe_input_count(i: u32) -> u32 {
+    recipe(i).map(|r| r.inputs.len() as u32).unwrap_or(0)
+}
+
+/// The `j`th input's `ResourceId`, and how many of it.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_recipe_input(i: u32, j: u32) -> u32 {
+    recipe(i)
+        .and_then(|r| r.inputs.get(j as usize))
+        .map(|&(id, _)| id as u32)
+        .unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_recipe_input_units(i: u32, j: u32) -> u32 {
+    recipe(i)
+        .and_then(|r| r.inputs.get(j as usize))
+        .map(|&(_, units)| units)
+        .unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_recipe_minutes(i: u32) -> u32 {
+    recipe(i).map(|r| r.minutes).unwrap_or(0)
+}
+
+/// How many of `resource` the crew are to keep made. Set through
+/// `ship_cmd_keep`, which is a command like a trade.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_craft_target(resource: u32) -> u32 {
+    let Some(resource) = ResourceId::ALL.get(resource as usize).copied() else {
+        return 0;
+    };
+    game().map(|g| g.world.craft_target(resource)).unwrap_or(0)
+}
+
+// --- the crew's bodies ---------------------------------------------------------
+
+/// A crew member's radiation dose, in minutes-in-the-open — `crates/health`.
+/// Nought for a slot that is not a crew member.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_crew_dose(who: u32) -> f64 {
+    game()
+        .and_then(|g| g.world.health.get(who as usize))
+        .map(|h| h.dose)
+        .unwrap_or(0.0)
+}
+
 // --- what happened -------------------------------------------------------------
 //
 // The same arrangement as the room's diary: a code and a number, with
@@ -1551,6 +1893,21 @@ pub extern "C" fn ship_set_head_up(on: u32) {
         game.head_up = on != 0;
     }
 }
+
+/// Whether the ship view follows the crew member the player steers, or has
+/// been let go as a free camera. The same kind of thing as `ship_head_up`:
+/// a view setting, this browser's own, and no command.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_follow() -> u32 {
+    game().map(|g| g.follow as u32).unwrap_or(1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_set_follow(on: u32) {
+    if let Some(game) = game() {
+        game.set_follow(on != 0);
+    }
+}
 /// The pointer, over the ship view. Turned back through the heading, so a
 /// click lands on the tile it looks like it landed on at any heading.
 #[unsafe(no_mangle)]
@@ -1577,6 +1934,30 @@ pub extern "C" fn ship_game_tile_inside() -> u32 {
     }
 }
 
+/// The part under the pointer in the ship view, or 0 — the top of the tile,
+/// the way the designer's `ship_hovered_part` answers: what is standing
+/// there, else the conduit through it, else the deck, else the frame. The
+/// game's readout names it through `ship_part_kind`; the room's own
+/// `bims_spot_at` says what the *room* makes of the same point, which is
+/// the fixtures it has pictures for and the deck between them.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_game_hovered_part() -> u32 {
+    let Some((game, tile)) = game().and_then(|g| g.hover.map(|t| (g, t))) else {
+        return 0;
+    };
+    let grid = game.world.ship.design.grid();
+    [
+        Layer::Object,
+        Layer::Utility,
+        Layer::Floor,
+        Layer::Structure,
+    ]
+    .into_iter()
+    .map(|layer| grid.get(layer, tile))
+    .find(|&id| id != 0)
+    .unwrap_or(0)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_game_tile_x() -> i32 {
     game().and_then(|g| g.hover).map(|t| t.0).unwrap_or(0)
@@ -1585,6 +1966,41 @@ pub extern "C" fn ship_game_tile_x() -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn ship_game_tile_y() -> i32 {
     game().and_then(|g| g.hover).map(|t| t.1).unwrap_or(0)
+}
+
+// --- the room aboard --------------------------------------------------------
+//
+// The crew are the room's Bims, and the room's own exports — `bims_select_group`,
+// `bims_drag_begin`, `bims_order_move`, the timetable, the work list, the
+// fixture menus, all of `crates/game/src/lib.rs` — are in this module too,
+// because a `#[no_mangle]` in an rlib is exported from every cdylib that links
+// it. `bims::host_aboard` points them at the room the world is stepping,
+// which [`ship_init`] and [`ship_simulate`] do, so `web/crew.js` calls the
+// same `wasm.bims_*` on this page as on the room's.
+//
+// What those take is the room's own coordinates, and aboard those are design
+// world units: the two below are the pointer read back through the ship's
+// camera and heading, the same arithmetic `ship_game_hover` floors to a tile.
+
+/// The room the world is stepping, for the room's exports to act on.
+fn room_aboard() -> Option<&'static mut bims::game::Game> {
+    game().map(|g| &mut g.world.aboard.room)
+}
+
+/// A canvas point, in the room's coordinates aboard. Only meaningful once
+/// there is a world; nought before.
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_room_x(x: f32, y: f32) -> f32 {
+    game()
+        .map(|g| (g.design_point_at(x, y).x + g.world.aboard.offset.x) as f32)
+        .unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ship_room_y(x: f32, y: f32) -> f32 {
+    game()
+        .map(|g| (g.design_point_at(x, y).y + g.world.aboard.offset.y) as f32)
+        .unwrap_or(0.0)
 }
 
 // --- the self check -------------------------------------------------------

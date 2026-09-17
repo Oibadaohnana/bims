@@ -82,6 +82,7 @@ dependencies = [
  "bims",
  "economy",
  "flight",
+ "health",
  "physics",
  "shipdesign",
  "time",

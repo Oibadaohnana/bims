@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./check)",
+      "Bash(./check:*)",
+      "Bash(./build.sh)",
+      "Bash(cargo build:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(cargo check:*)",
+      "Bash(node --check:*)",
+      "Bash(node scratchpad/:*)",
+      "Bash(rustc --edition 2024:*)",
+      "Bash(nix flake check:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add -N:*)"
+    ]
+  }
+}

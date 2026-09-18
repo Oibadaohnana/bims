@@ -181,5 +181,39 @@ pub fn world_checksum(world: &World) -> u64 {
         hash.eat(request.code() as u64);
     }
 
+    // The mining sites: every rock still standing at each, and the marks.
+    // Integers throughout, so they go in whole.
+    for site in &world.sites {
+        hash.eat(site.belt as u64);
+        hash.eat(site.tiles.len() as u64);
+        for tile in &site.tiles {
+            hash.eat(tile.x as i64 as u64);
+            hash.eat(tile.y as i64 as u64);
+            hash.eat(tile.kind.code() as u64);
+        }
+        hash.eat(site.marked.len() as u64);
+        for &(x, y) in &site.marked {
+            hash.eat(x as i64 as u64);
+            hash.eat(y as i64 as u64);
+        }
+    }
+
+    // The construction sites: what is to be built where, and what has
+    // been carried to each. Integers throughout. The next id is in too:
+    // two worlds with the same sites and a different next id would hand
+    // the next site different names.
+    hash.eat(world.next_site as u64);
+    hash.eat(world.builds.len() as u64);
+    for site in &world.builds {
+        hash.eat(site.id as u64);
+        hash.eat(site.kind.code() as u64);
+        hash.eat(site.origin.0 as u64);
+        hash.eat(site.origin.1 as u64);
+        hash.eat(site.rotation.code() as u64);
+        for &units in site.delivered.iter().chain(site.carrying.iter()) {
+            hash.eat(units as u64);
+        }
+    }
+
     hash.0
 }

@@ -165,10 +165,22 @@ pub fn target_hop_days(desolation: f64) -> f64 {
 pub const STATION_SHARE: f64 = 0.6;
 
 /// Once a system has a station, the chance of a second, and then of a
-/// third. Each only where there is a body of the right kind free for it —
-/// [`parent_suits`] and "at most one station per parent body" still hold —
-/// so a one-planet system stays a one-station system whatever these say.
-pub const MORE_STATIONS: [f64; 2] = [0.55, 0.3];
+/// third, and so on up to six. Each only where there is a body of the right
+/// kind free for it — [`parent_suits`] and "at most one station per parent
+/// body" still hold — so a one-planet system stays a one-station system
+/// whatever these say. Two of a kind in one system is allowed: a system
+/// with two rocky planets can have an orbital round each, and with some of
+/// them now hostile there is a reason to have the second. Going from two
+/// rolls to five went with a version bump all the same — not for the
+/// layouts, which it leaves alone, but because a station's side went into
+/// the checksum at the same time and every pinned number moved anyway.
+pub const MORE_STATIONS: [f64; 5] = [0.8, 0.65, 0.5, 0.4, 0.3];
+
+/// What share of the stations somebody lives on are somebody else's: docked
+/// there, the crew are the enemy. Rolled off a station's own branch, so a
+/// station does not change sides when its neighbour gains a hazard. A
+/// derelict is never hostile — there is nobody aboard to be.
+pub const HOSTILE_SHARE: f64 = 0.3;
 
 /// Relays want somewhere nobody goes. A system at or above this is a
 /// candidate; below it, a relay is not sited there.
@@ -218,8 +230,17 @@ impl StationKind {
             (StationKind::Derelict, _) => false,
             // Made at the armoury and the workbench; nobody stocks them.
             (_, ResourceId::Emitter | ResourceId::Handgun | ResourceId::Vest) => false,
+            // Mined off an asteroid on the way to its ore; nobody stocks it.
+            (_, ResourceId::Rock) => false,
             (StationKind::MiningOutpost, ResourceId::Galvum) => true,
             (_, ResourceId::Galvum) => false,
+            // Fibre is grown where there is ground to grow it, and a bandage
+            // is on the shelf where there are people to hurt themselves: the
+            // orbitals, and the refineries for the bandage alone. Neither is
+            // a staple — a crew grows the one and rolls the other.
+            (StationKind::Orbital, ResourceId::Fibre | ResourceId::Bandage) => true,
+            (StationKind::Refinery, ResourceId::Bandage) => true,
+            (_, ResourceId::Fibre | ResourceId::Bandage) => false,
             _ => true,
         }
     }
@@ -275,44 +296,6 @@ pub fn parent_suits(kind: StationKind, parent: Option<BodyKind>) -> bool {
         (StationKind::Derelict, _) => true,
         _ => false,
     }
-}
-
-/// What one walk outside brings back from a belt.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct BeltYield {
-    /// Units of ore a suited Bim gathers in one walk.
-    pub ore: u32,
-    /// Whether the belt has galvum in it: one unit a walk, on top.
-    pub galvum: bool,
-}
-
-/// How much ore a walk gathers, least and most, and what share of belts
-/// carry galvum. Placeholders: a walk is an hour and a half outside, and
-/// eight to twelve ore is four to six metal, a wall and a half.
-pub const BELT_ORE: (u32, u32) = (8, 12);
-pub const GALVUM_SHARE: f64 = 0.35;
-
-/// What a belt yields. Off a stream of its own — [`Purpose::BeltYield`] —
-/// seeded by the galaxy, the star and the body, so it is the same for two
-/// players and it moved nothing else when it arrived. A body that is not a
-/// belt yields nothing.
-pub fn belt_yield(galaxy_seed: u64, star_id: u32, body_id: u32, kind: BodyKind) -> BeltYield {
-    if kind != BodyKind::AsteroidBelt {
-        return BeltYield {
-            ore: 0,
-            galvum: false,
-        };
-    }
-    let seed = crate::rng::seed_for(
-        galaxy_seed,
-        star_id,
-        crate::GENERATOR_VERSION,
-        crate::rng::Purpose::BeltYield,
-    );
-    let mut rng = crate::rng::Rng::new(seed ^ crate::rng::mix(body_id as u64));
-    let ore = BELT_ORE.0 + rng.below(BELT_ORE.1 - BELT_ORE.0 + 1);
-    let galvum = rng.chance(GALVUM_SHARE);
-    BeltYield { ore, galvum }
 }
 
 /// What is left to be pulled out of the wreck.
@@ -428,36 +411,9 @@ mod tests {
         assert!(high < 4_000, "{high} systems in ten thousand were desolate");
     }
 
-    /// A belt yields something and nothing else does; the same belt yields
-    /// the same thing every time, and about a third of them have galvum.
-    #[test]
-    fn a_belt_yields_the_same_thing_every_time_and_only_a_belt_yields() {
-        let a = belt_yield(7, 3, 2, BodyKind::AsteroidBelt);
-        assert_eq!(a, belt_yield(7, 3, 2, BodyKind::AsteroidBelt));
-        assert!(a.ore >= BELT_ORE.0 && a.ore <= BELT_ORE.1, "{a:?}");
-        for kind in [
-            BodyKind::RockyPlanet,
-            BodyKind::GasGiant,
-            BodyKind::IceWorld,
-        ] {
-            assert_eq!(belt_yield(7, 3, 2, kind).ore, 0);
-            assert!(!belt_yield(7, 3, 2, kind).galvum);
-        }
-        let mut rich = 0;
-        for body in 0..1000u32 {
-            if belt_yield(7, body, 1, BodyKind::AsteroidBelt).galvum {
-                rich += 1;
-            }
-        }
-        assert!(
-            (250..=450).contains(&rich),
-            "{rich} rich belts in a thousand"
-        );
-    }
-
     /// What is on the shelf where: galvum only at an outpost, an emitter
-    /// nowhere, nothing at a derelict, and everything else everywhere
-    /// somebody lives.
+    /// nowhere, rock nowhere, nothing at a derelict, and everything else
+    /// everywhere somebody lives.
     #[test]
     fn what_each_kind_of_station_sells() {
         use physics::ResourceId;
@@ -466,8 +422,12 @@ mod tests {
                 let want = match (kind, resource) {
                     (StationKind::Derelict, _) => false,
                     (_, ResourceId::Emitter | ResourceId::Handgun | ResourceId::Vest) => false,
+                    (_, ResourceId::Rock) => false,
                     (StationKind::MiningOutpost, ResourceId::Galvum) => true,
                     (_, ResourceId::Galvum) => false,
+                    (StationKind::Orbital, ResourceId::Fibre | ResourceId::Bandage) => true,
+                    (StationKind::Refinery, ResourceId::Bandage) => true,
+                    (_, ResourceId::Fibre | ResourceId::Bandage) => false,
                     _ => true,
                 };
                 assert_eq!(kind.sells(resource), want, "{kind:?} {resource:?}");
@@ -479,6 +439,17 @@ mod tests {
         assert!(StationKind::Relay.sells(ResourceId::Fuel));
         assert!(StationKind::Orbital.sells(ResourceId::Medkit));
         assert!(!StationKind::Orbital.sells(ResourceId::Handgun));
+        assert!(!StationKind::MiningOutpost.sells(ResourceId::Rock));
+        // Fibre and bandages: the orbitals, bandages at the refineries too,
+        // and neither is a staple.
+        assert!(StationKind::Orbital.sells(ResourceId::Fibre));
+        assert!(StationKind::Orbital.sells(ResourceId::Bandage));
+        assert!(StationKind::Refinery.sells(ResourceId::Bandage));
+        assert!(!StationKind::Refinery.sells(ResourceId::Fibre));
+        assert!(!StationKind::MiningOutpost.sells(ResourceId::Bandage));
+        assert!(!StationKind::Relay.sells(ResourceId::Fibre));
+        assert!(!STAPLES.contains(&ResourceId::Fibre));
+        assert!(!STAPLES.contains(&ResourceId::Bandage));
     }
 
     /// The matching rule, both ways round: what each kind accepts, and what
@@ -514,5 +485,69 @@ mod tests {
                 assert_eq!(n, 0, "{k:?} had salvage");
             }
         }
+    }
+}
+
+/// What one station has on the shelf: a bit a resource, in
+/// [`ResourceId::ALL`] order.
+///
+/// [`StationKind::sells`] is the ceiling — nothing a kind never stocks is
+/// ever on a shelf — and this is what one station keeps under it. The
+/// staples ([`STAPLES`]: ore, metal, fuel and both foods) are on every
+/// shelf, because a station where the crew can buy no fuel and nothing to
+/// eat is a trap rather than a place; each of the rest is rolled off the
+/// station's own stream, so two stations of a kind stock different things
+/// and there is a reason to fly to the other one. A theme — what a
+/// station is *for* — would replace the roll, not the ceiling.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Stock(pub u32);
+
+/// On every shelf the kind allows: what the crew build with, fly on and eat.
+pub const STAPLES: [ResourceId; 5] = [
+    ResourceId::Ore,
+    ResourceId::Metal,
+    ResourceId::Fuel,
+    ResourceId::Vegetable,
+    ResourceId::Tofu,
+];
+
+/// How likely a station is to stock any one good that is not a staple.
+pub const STOCKED_CHANCE: f64 = 0.6;
+
+impl Stock {
+    /// Nothing on the shelf: a derelict's, or a page with no market.
+    pub const NONE: Stock = Stock(0);
+
+    /// Roll one station's shelf. `roll` is the station's own stream, and a
+    /// draw is made for every resource the kind sells whether it is a
+    /// staple or not, so that adding a staple does not reshuffle the rest.
+    pub fn roll(kind: StationKind, roll: &mut crate::rng::Rng) -> Stock {
+        let mut bits = 0u32;
+        for &resource in ResourceId::ALL.iter() {
+            if !kind.sells(resource) {
+                continue;
+            }
+            let drawn = roll.chance(STOCKED_CHANCE);
+            if drawn || STAPLES.contains(&resource) {
+                bits |= 1 << resource as u32;
+            }
+        }
+        Stock(bits)
+    }
+
+    /// Everything the kind sells, without a roll: a fixed shelf for a
+    /// test that wants the kind's rule and nothing else.
+    pub fn everything(kind: StationKind) -> Stock {
+        let mut bits = 0u32;
+        for &resource in ResourceId::ALL.iter() {
+            if kind.sells(resource) {
+                bits |= 1 << resource as u32;
+            }
+        }
+        Stock(bits)
+    }
+
+    pub fn sells(self, resource: ResourceId) -> bool {
+        self.0 & (1 << resource as u32) != 0
     }
 }

@@ -59,10 +59,10 @@ use physics::ResourceId;
 pub const TILE: u32 = 52;
 
 /// What one reactor makes, in units a minute. Placeholder, pinned to one
-/// outcome: the playtest ship's eight consumers — six systems, the smelter
-/// and the workbench — draw a hundred and twelve between them, so one
-/// reactor runs the ship as it comes and a third bench is a second reactor
-/// or a brownout.
+/// outcome: the playtest ship's nine consumers — six systems, the smelter,
+/// the workbench and the drug lab — draw a hundred and seventeen between
+/// them, so one reactor runs the ship as it comes and a fourth bench is a
+/// second reactor or a brownout.
 pub const REACTOR_OUTPUT: f64 = 120.0;
 
 /// What one battery holds: half an hour of a reactor's output. Enough to
@@ -184,12 +184,16 @@ pub enum PartKind {
     /// A bench and a locker in one: where handguns, vests and medkits are
     /// made — [`crate::recipes`] — and where they are kept, four of them.
     Armoury = 34,
+    /// The bench where fibre is rolled into bandages — [`crate::recipes`].
+    /// The workbench's size and its habits: worked from the tile below,
+    /// draws, and a body sees over nothing of it.
+    DrugLab = 35,
 }
 
 impl PartKind {
     /// Every kind, in discriminant order. `ALL[k as usize] == k`, which
     /// [`PartKind::def`] relies on and [`defs_are_sound`] checks.
-    pub const ALL: [PartKind; 35] = [
+    pub const ALL: [PartKind; 36] = [
         PartKind::Floor,
         PartKind::Wall,
         PartKind::Door,
@@ -225,6 +229,7 @@ impl PartKind {
         PartKind::Workbench,
         PartKind::SuitLocker,
         PartKind::Armoury,
+        PartKind::DrugLab,
     ];
 
     /// The number that crosses the wasm boundary. No strings do.
@@ -298,7 +303,7 @@ impl Rotation {
 /// One part, as data.
 ///
 /// No name: no strings cross the wasm boundary, so `PART_NAMES` in
-/// `web/ship.js` is where the words live and this is only the numbers.
+/// `crates/app/src/names.rs` is where the words live and this is only the numbers.
 #[derive(Clone, Copy, Debug)]
 pub struct PartDef {
     pub kind: PartKind,
@@ -411,6 +416,34 @@ impl PartDef {
     pub fn turns(&self) -> bool {
         self.torque_thrust > 0.0
     }
+
+    /// Whether a line of sight stops at this part.
+    ///
+    /// The whole of the rule, and the only place it is written down.
+    /// Everything a body cannot walk through stands in the way of its eyes
+    /// too — a wall, a shelf, a reactor, a tank, the engines — except the
+    /// **low** furniture a Bim sees over: a bunk, the worktop, the hob, a
+    /// dishwasher, a table, a toilet, a basin, a tray of crops, the helm's
+    /// console, a battery on the deck. A door is a wall while its leaves
+    /// are shut and nothing while they are open, and which it is at the
+    /// moment is the room's to know; this says what it is shut. Nothing
+    /// that is walked over blocks sight.
+    pub fn blocks_sight(&self) -> bool {
+        match self.kind {
+            PartKind::Door => true,
+            PartKind::Bunk
+            | PartKind::Worktop
+            | PartKind::Hob
+            | PartKind::Dishwasher
+            | PartKind::Table
+            | PartKind::Toilet
+            | PartKind::Basin
+            | PartKind::HydroBay
+            | PartKind::Helm
+            | PartKind::Battery => false,
+            _ => self.blocks_movement,
+        }
+    }
 }
 
 /// The table. Placeholder numbers throughout; see the module note.
@@ -419,7 +452,7 @@ impl PartDef {
 /// told about how a part is approached — [`crate::validate`] already insists
 /// every one of them is floor a body can stand on and that they can all reach
 /// each other, so a design that passes here is one the crew can work.
-pub static PARTS: [PartDef; 35] = [
+pub static PARTS: [PartDef; 36] = [
     PartDef {
         kind: PartKind::Floor,
         footprint: (1, 1),
@@ -1048,6 +1081,27 @@ pub static PARTS: [PartDef; 35] = [
         power: -10.0,
         charge: 0.0,
     },
+    // The drug lab: the workbench's footprint and use spot, a lighter draw
+    // — a press and a steriliser rather than a lathe — and, like the
+    // armoury, a cabinet of its own for what it makes: locker class, since
+    // that is where a bandage is kept, and a bigger one than the armoury's
+    // because a dressing is small.
+    PartDef {
+        kind: PartKind::DrugLab,
+        footprint: (2, 1),
+        layer: Layer::Object,
+        blocks_movement: true,
+        requires: Some(Layer::Floor),
+        use_spots: &[(0, 1)],
+        price: 4_000,
+        shields: false,
+        capacity: Some((Storage::Locker, 6)),
+        recipe: &[(ResourceId::Metal, 5), (ResourceId::Components, 6)],
+        thrust: 0.0,
+        torque_thrust: 0.0,
+        power: -5.0,
+        charge: 0.0,
+    },
 ];
 
 /// Whether a part is one of the two cut across its tile. What the painters
@@ -1266,5 +1320,15 @@ pub fn defs_are_sound() -> bool {
             && (def.requires.is_none() == (kind == PartKind::Structure))
             && def.price > 0
             && def.capacity.is_none_or(|(_, units)| units > 0)
+            // Nothing a body walks through stops its eyes, bar a door with
+            // its leaves shut; and every wall, inside or out, stops them.
+            && (!def.blocks_sight() || def.blocks_movement || kind == PartKind::Door)
+            && (!matches!(
+                kind,
+                PartKind::Wall
+                    | PartKind::OutsideWall
+                    | PartKind::DiagonalWall
+                    | PartKind::DiagonalOutsideWall
+            ) || def.blocks_sight())
     })
 }

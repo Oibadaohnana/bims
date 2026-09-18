@@ -65,13 +65,15 @@ impl DrawList {
         self.data.clear();
     }
 
-    pub fn as_ptr(&self) -> *const f32 {
-        self.data.as_ptr()
-    }
-
-    /// The shapes as the host will read them.
+    /// The shapes as the app will read them.
     pub fn shapes(&self) -> &[f32] {
         &self.data
+    }
+
+    /// Every shape of `shapes` — this format, any buffer — as it is. What
+    /// puts a picture made in the same frame, the room's, onto the ship's.
+    pub fn append(&mut self, shapes: &[f32]) {
+        self.data.extend_from_slice(shapes);
     }
 
     /// Every shape of `shapes` — this format, any buffer — re-emitted with
@@ -96,6 +98,18 @@ impl DrawList {
                 shape[10],
                 shape[11],
             ]);
+        }
+    }
+
+    /// Every shape of `shapes` as it is, with its alpha scaled by `alpha`:
+    /// a picture drawn once and shown through. What a blueprint is — the
+    /// part's own picture, faded — so a ghost of a hob is the hob's picture
+    /// and not a second drawing of one.
+    pub fn append_faded(&mut self, shapes: &[f32], alpha: f32) {
+        let from = self.data.len();
+        self.append(shapes);
+        for shape in self.data[from..].chunks_exact_mut(STRIDE) {
+            shape[11] *= alpha;
         }
     }
 

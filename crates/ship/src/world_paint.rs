@@ -36,15 +36,16 @@
 //! window as before and then turned by `Game::camera_turn` after the fact
 //! (`DrawList::turn_from`). North up, both turns are what they always were.
 
+use bims::sight::Stance;
 use flight::Phase;
-use shipdesign::parts::{Layer, TILE};
+use shipdesign::parts::{Layer, PartKind, Rotation, TILE};
 use shipdesign::{Grid, ShipDesign};
 use world::ShipState;
 use worldgen::math::{DVec2, dvec2};
 use worldgen::{BodyKind, Node, StationKind};
 
 use crate::draw::{Color, DrawList};
-use crate::game::{Game, ViewMode};
+use crate::game::{Game, Overlay, ViewMode};
 use crate::hull;
 use crate::paint::PART_COLORS;
 use crate::starfield::FIELD;
@@ -55,6 +56,32 @@ const DECK: Color = Color::rgb(0.13, 0.15, 0.18);
 const GLOW: Color = Color::rgb(0.38, 0.86, 0.95);
 const STAR: Color = Color::rgb(0.98, 0.88, 0.55);
 const MUTED: Color = Color::rgba(0.55, 0.85, 0.95, 0.22);
+/// The electricity overlay: a part on a live network, and one that is not.
+const LIVE: Color = Color::rgb(0.50, 0.90, 0.60);
+const DEAD: Color = Color::rgb(0.98, 0.45, 0.32);
+
+/// What the rocks of a mining site are drawn in, by `world::Rock` code:
+/// stone, iron ore and galvum. Stone is the dull brown of the belt's icon,
+/// iron a silver that catches the light, galvum the purple nothing else
+/// aboard is. Told apart at a glance, which is the point: which asteroid
+/// is the rare one shows through its skin.
+pub static ROCK_COLORS: [Color; 3] = [
+    Color::rgb(0.42, 0.36, 0.30),
+    Color::rgb(0.72, 0.74, 0.78),
+    Color::rgb(0.62, 0.32, 0.82),
+];
+/// The seam between one rock tile and the next, and the lit edge on each.
+const ROCK_SEAM: Color = Color::rgba(0.0, 0.0, 0.0, 0.35);
+const ROCK_LIT: Color = Color::rgba(1.0, 1.0, 1.0, 0.10);
+/// A rock marked to be mined: ringed in the warm colour an order is.
+const MARK: Color = Color::rgb(0.98, 0.72, 0.35);
+/// A construction site: the blueprint's blue, and how far through the
+/// part's own picture shows for a site and for the blueprint in hand.
+const BLUEPRINT: Color = Color::rgb(0.45, 0.72, 1.0);
+const SITE_FADE: f32 = 0.55;
+const GHOST_FADE: f32 = 0.50;
+/// Where whoever uses a part would stand, as the designer marks it.
+const SPOT: Color = Color::rgba(0.98, 0.82, 0.35, 0.85);
 
 /// One colour per lobby slot. The route line is drawn in the colour of
 /// whoever set the destination, which is the whole of what
@@ -136,6 +163,11 @@ fn paint_ship(game: &Game, list: &mut DrawList) {
     let centre = (centre.x as f32, centre.y as f32);
     let mut ship = DrawList::default();
 
+    // The rocks of the mining site, if the ship is at one. In the ship's
+    // frame — they were laid out on its tile grid — so they go through the
+    // same turn the hull does; and under it, since they are outside it.
+    rocks(game, &mut ship);
+
     // Under everything: the rim that makes the hull a body against the
     // stars, and the exhaust, which shows where it clears the stern and
     // never over the deck.
@@ -149,14 +181,26 @@ fn paint_ship(game: &Game, list: &mut DrawList) {
     let rooms = bims::aboard::drawn_by_room(design);
     let mated = game.mated_airlock().map(|id| (id, game.airlock_ajar));
     hull_tiles(&mut ship, design, &grid, firing, &rooms, mated);
+    // What is laid out to be built, over the deck it will stand on: each
+    // site as the part's own picture, shown through, in the blueprint's
+    // blue, with how much of it has arrived along the bottom. And the
+    // blueprint in the player's hand, over the tile the pointer is on.
+    sites(game, &grid, &mut ship);
+    blueprint(game, &grid, &mut ship);
     hull::lights(&mut ship, design, &grid, game.frame);
 
-    // The tile under the pointer, rung. Part of the ship, so turned with it.
+    // The tile under the pointer, rung. Part of the ship, so turned with it
+    // — and a rock under the pointer while the player is marking rocks,
+    // which is on the same grid.
     let tile = TILE as f32;
+    let over_rock = game.marking
+        && game
+            .hover
+            .is_some_and(|(x, y)| game.world.site_here().is_some_and(|s| s.at(x, y).is_some()));
     if let Some((x, y)) = game.hover
-        && design.holds((x, y))
+        && (design.holds((x, y)) || over_rock)
     {
-        let m = tile_middle(x as u32, y as u32);
+        let m = signed_tile_middle(x, y);
         ship.push(
             crate::draw::KIND_RECT,
             m.x as f32,
@@ -185,13 +229,254 @@ fn paint_ship(game: &Game, list: &mut DrawList) {
     let offset = game.world.aboard.offset;
     let room_centre = (centre.0 + offset.x as f32, centre.1 + offset.y as f32);
     list.append_turned(game.world.aboard.room.shapes(), room_centre, turn);
+    // The electricity overlay, over the lot — the room's fixtures included,
+    // since a galley that draws power is rung as much as a reactor is — in
+    // the ship's frame and turned with it like the hull.
+    if game.overlay == Overlay::Electricity {
+        let mut over = DrawList::default();
+        electricity(&mut over, design, &grid);
+        list.append_turned(over.shapes(), centre, turn);
+    }
 }
 
-/// Frame, then deck, then what is standing on them, then what runs through
-/// them — the same order the design phase paints in, so the two views read
-/// as one ship. `skip` is what somebody else draws: the parts the room has
-/// pictures for. The hull's own working parts have pictures in `hull`;
-/// everything else is its colour, a tile at a time.
+/// The middle of a tile that may be off the hull, in design world units.
+fn signed_tile_middle(x: i32, y: i32) -> DVec2 {
+    dvec2(
+        (x as f64 + 0.5) * TILE as f64,
+        (y as f64 + 0.5) * TILE as f64,
+    )
+}
+
+/// The mining site's rocks, a tile each, in the ship's frame: every tile
+/// standing, in its kind's colour with a seam round it and a lit edge, and
+/// the marked ones ringed. Nothing while the ship is not at a site.
+fn rocks(game: &Game, ship: &mut DrawList) {
+    let Some(site) = game.world.site_here() else {
+        return;
+    };
+    let tile = TILE as f32;
+    for rock in &site.tiles {
+        let m = signed_tile_middle(rock.x, rock.y);
+        let (x, y) = (m.x as f32, m.y as f32);
+        let color = ROCK_COLORS[rock.kind.code() as usize % ROCK_COLORS.len()];
+        list_rock(ship, x, y, tile, color);
+    }
+    for &(x, y) in &site.marked {
+        let m = signed_tile_middle(x, y);
+        let (x, y) = (m.x as f32, m.y as f32);
+        ship.push(
+            crate::draw::KIND_RECT,
+            x,
+            y,
+            tile - 4.0,
+            tile - 4.0,
+            0.0,
+            4.0,
+            0.0,
+            MARK.alpha(0.35),
+        );
+        ship.push(
+            crate::draw::KIND_RECT,
+            x,
+            y,
+            tile - 4.0,
+            tile - 4.0,
+            0.0,
+            4.0,
+            4.0,
+            MARK,
+        );
+    }
+}
+
+/// One tile of rock: the seam is the tile, the rock is inset into it, and a
+/// lighter sliver along its top-left edge is the light on it.
+fn list_rock(list: &mut DrawList, x: f32, y: f32, tile: f32, color: Color) {
+    list.push(
+        crate::draw::KIND_RECT,
+        x,
+        y,
+        tile,
+        tile,
+        0.0,
+        0.0,
+        0.0,
+        ROCK_SEAM,
+    );
+    list.push(
+        crate::draw::KIND_RECT,
+        x,
+        y,
+        tile - 3.0,
+        tile - 3.0,
+        0.0,
+        5.0,
+        0.0,
+        color,
+    );
+    list.push(
+        crate::draw::KIND_RECT,
+        x - tile * 0.12,
+        y - tile * 0.12,
+        tile * 0.5,
+        tile * 0.5,
+        0.0,
+        6.0,
+        0.0,
+        ROCK_LIT,
+    );
+}
+
+/// The part a site or a blueprint is for, as its own picture, faded into
+/// `list`: the hull's or the fittings' picture where there is one, the
+/// deck's tile for plating, and the part's colour as a block otherwise —
+/// the same three askings as `hull_tiles`, so a ghost of a thing looks
+/// like the thing.
+fn faded_part(
+    list: &mut DrawList,
+    design: &ShipDesign,
+    grid: &Grid,
+    kind: PartKind,
+    origin: (u32, u32),
+    rotation: Rotation,
+    alpha: f32,
+) {
+    let tile = TILE as f32;
+    let part = shipdesign::PlacedPart {
+        id: 0,
+        kind,
+        origin,
+        rotation,
+    };
+    let mut picture = DrawList::default();
+    let drawn = kind != PartKind::Floor
+        && (hull::part(&mut picture, &part, grid, hull::Firing::NONE, None)
+            || crate::fittings::part(&mut picture, &part));
+    if !drawn {
+        let color = match kind {
+            PartKind::Floor => DECK,
+            PartKind::Structure => FRAME,
+            _ => PART_COLORS[kind as usize],
+        };
+        for (x, y) in part.tiles() {
+            let m = tile_middle(x, y);
+            picture.push(
+                crate::draw::KIND_RECT,
+                m.x as f32,
+                m.y as f32,
+                tile - 3.0,
+                tile - 3.0,
+                0.0,
+                4.0,
+                0.0,
+                color,
+            );
+        }
+    }
+    let _ = design;
+    list.append_faded(picture.shapes(), alpha);
+}
+
+/// The box round a part's tiles, in design units: `(x0, y0, x1, y1)`.
+fn part_box(kind: PartKind, origin: (u32, u32), rotation: Rotation) -> (f32, f32, f32, f32) {
+    let t = TILE as f32;
+    let (w, h) = shipdesign::parts::footprint(kind, rotation);
+    let x0 = origin.0 as f32 * t;
+    let y0 = origin.1 as f32 * t;
+    (x0, y0, x0 + w as f32 * t, y0 + h as f32 * t)
+}
+
+/// Every construction site, over the deck: the part shown through in the
+/// blueprint's blue, ringed, with a bar along its foot for how much of
+/// what it is made of has been carried to it. In the ship's frame, since
+/// a site is a tile of the ship.
+fn sites(game: &Game, grid: &Grid, ship: &mut DrawList) {
+    let design = &game.world.ship.design;
+    for site in &game.world.builds {
+        faded_part(
+            ship,
+            design,
+            grid,
+            site.kind,
+            site.origin,
+            site.rotation,
+            SITE_FADE,
+        );
+        let (x0, y0, x1, y1) = part_box(site.kind, site.origin, site.rotation);
+        ship.box_between(x0, y0, x1, y1, 3.0, BLUEPRINT.alpha(0.16));
+        ship.stroke_between(x0 + 1.5, y0 + 1.5, x1 - 1.5, y1 - 1.5, 3.0, 2.0, BLUEPRINT);
+        // What has arrived, as a share of what it is made of.
+        let recipe = site.recipe(design);
+        let wanted: u32 = recipe.iter().map(|&(_, u)| u).sum();
+        let there: u32 = recipe
+            .iter()
+            .map(|&(id, u)| site.delivered[id as usize].min(u))
+            .sum();
+        if wanted > 0 && there > 0 {
+            let share = there as f32 / wanted as f32;
+            let w = (x1 - x0 - 8.0) * share;
+            ship.rect(
+                x0 + 4.0 + w / 2.0,
+                y1 - 6.0,
+                w,
+                4.0,
+                0.0,
+                if there >= wanted { LIVE } else { BLUEPRINT },
+            );
+        }
+    }
+}
+
+/// The blueprint in the player's hand, over the tile the pointer is on:
+/// the part shown through, ringed in the live colour where it would go
+/// and the warning colour where it would not — the world's own answer,
+/// asked through `Game::ghost_check`. Nothing with no tool in hand, and
+/// nothing in the map view, where a tile means nothing.
+fn blueprint(game: &Game, grid: &Grid, ship: &mut DrawList) {
+    let Some((kind, rotation)) = game.placing else {
+        return;
+    };
+    let Some((x, y)) = game.hover else {
+        return;
+    };
+    if x < 0 || y < 0 {
+        return;
+    }
+    let origin = (x as u32, y as u32);
+    let ok = game.ghost_ok();
+    let color = if ok { LIVE } else { DEAD };
+    faded_part(
+        ship,
+        &game.world.ship.design,
+        grid,
+        kind,
+        origin,
+        rotation,
+        GHOST_FADE,
+    );
+    let (x0, y0, x1, y1) = part_box(kind, origin, rotation);
+    ship.box_between(x0, y0, x1, y1, 4.0, color.alpha(0.18));
+    ship.stroke_between(x0 + 1.0, y0 + 1.0, x1 - 1.0, y1 - 1.0, 4.0, 2.0, color);
+    // Where whoever uses it will stand, as the designer marks it.
+    if ok {
+        let t = TILE as f32;
+        let any = shipdesign::parts::any_side_will_do(kind);
+        for (dx, dy) in shipdesign::parts::use_spots(kind, rotation) {
+            let tile = (x + dx, y + dy);
+            if any && (grid.get(Layer::Floor, tile) == 0 || grid.get(Layer::Object, tile) != 0) {
+                continue;
+            }
+            let m = signed_tile_middle(tile.0, tile.1);
+            ship.ellipse(m.x as f32, m.y as f32, t * 0.30, t * 0.30, SPOT);
+        }
+    }
+}
+
+/// Frame, then deck, then what is standing on them — the same order the
+/// design phase paints in, so the two views read as one ship. `skip` is
+/// what somebody else draws: the parts the room has pictures for. The
+/// hull's own working parts have pictures in `hull`; everything else is its
+/// colour, a tile at a time.
 fn hull_tiles(
     list: &mut DrawList,
     design: &ShipDesign,
@@ -201,12 +486,9 @@ fn hull_tiles(
     open_airlock: Option<(u32, f32)>,
 ) {
     let tile = TILE as f32;
-    for layer in [
-        Layer::Structure,
-        Layer::Floor,
-        Layer::Object,
-        Layer::Utility,
-    ] {
+    // Not the utility layer: the conduit under the deck is the electricity
+    // overlay's to draw, and only while that is up — see `electricity`.
+    for layer in [Layer::Structure, Layer::Floor, Layer::Object] {
         for part in &design.parts {
             if part.layer() != layer || skip.contains(&part.id) {
                 continue;
@@ -251,6 +533,50 @@ fn hull_tiles(
     }
 }
 
+/// The electricity overlay, over the ship's picture: every part that makes,
+/// holds or draws power washed and rung — in the live colour when it is on
+/// a network with a reactor, in the warning colour when it is not — and
+/// the conduit under the deck drawn on top, the way the design phase draws
+/// it, so what is wired to what can be followed. The networks are asked
+/// once, for the whole ship, rather than a part at a time.
+fn electricity(list: &mut DrawList, design: &ShipDesign, grid: &Grid) {
+    let tile = TILE as f32;
+    let live: Vec<u32> = shipdesign::networks(design)
+        .into_iter()
+        .filter(|net| net.live())
+        .flat_map(|net| net.parts)
+        .collect();
+    for part in &design.parts {
+        let def = part.kind.def();
+        if !(def.supplies() || def.draws() || def.stores()) {
+            continue;
+        }
+        let color = if live.contains(&part.id) { LIVE } else { DEAD };
+        for (x, y) in part.tiles() {
+            let m = tile_middle(x, y);
+            list.rect(m.x as f32, m.y as f32, tile, tile, 0.0, color.alpha(0.18));
+            list.stroke_rect(
+                m.x as f32,
+                m.y as f32,
+                tile - 3.0,
+                tile - 3.0,
+                2.0,
+                2.0,
+                color,
+            );
+        }
+    }
+    for part in &design.parts {
+        if part.kind != PartKind::PowerConduit {
+            continue;
+        }
+        for at in part.tiles() {
+            let links = crate::fittings::conduit_links(design, grid, at);
+            crate::fittings::conduit(list, at, links);
+        }
+    }
+}
+
 /// Every station near enough to be in the picture, drawn where it is and
 /// as big as it is, so that one **approaches** rather than appears.
 ///
@@ -280,9 +606,26 @@ fn stations(game: &Game, list: &mut DrawList) {
         let at = crate::game::turned(offset.x as f32, -offset.y as f32, turn);
         let side = station.design.build_area as f32 * TILE as f32;
         let middle = (side / 2.0, side / 2.0);
+        let residents = game
+            .world
+            .residents
+            .as_ref()
+            .filter(|r| r.station == station.id);
 
-        if clearance > world::data::LOCAL_RADIUS_STATION {
+        // Somebody else's station is under a black fog until the crew
+        // have looked into it — see `bims::sight` — and its room, which
+        // draws that fog, is only open within the residents' range. Out
+        // to there it stays the plate it was from further off: a shape
+        // and a kind, and nothing of what is inside. The crew's own is
+        // its hull from the local frame in, as before.
+        let stranger = game.world.stance(station.id) != Stance::Friendly;
+        if clearance > world::data::LOCAL_RADIUS_STATION || (stranger && residents.is_none()) {
             let hull = (station.design.build_area as f32 - 2.0) * TILE as f32;
+            let plate = if stranger {
+                hull::HULL_UNKNOWN
+            } else {
+                hull::HULL_FAR
+            };
             list.push(
                 crate::draw::KIND_RECT,
                 at.0,
@@ -292,7 +635,7 @@ fn stations(game: &Game, list: &mut DrawList) {
                 turn,
                 8.0,
                 0.0,
-                hull::HULL_FAR,
+                plate,
             );
             paint_station(list, at.0, at.1, hull * 0.8, station.kind, 6.0);
             continue;
@@ -303,11 +646,6 @@ fn stations(game: &Game, list: &mut DrawList) {
         let open = docked
             .filter(|&id| id == station.id)
             .and(station.port().map(|p| (p.part_id, game.airlock_ajar)));
-        let residents = game
-            .world
-            .residents
-            .as_ref()
-            .filter(|r| r.station == station.id);
         let skip: Vec<u32> = match residents {
             Some(_) => bims::aboard::drawn_by_room(&station.design),
             None => Vec::new(),
@@ -334,11 +672,6 @@ fn stations(game: &Game, list: &mut DrawList) {
 /// host's name over their head: the same turn and shift the room's picture
 /// went through.
 pub fn resident_on_screen(game: &Game, who: u32) -> (f32, f32) {
-    // Docked, the residents are in the ship's room, after the crew, and
-    // land the way the crew do.
-    if game.world.aboard.is_joined() {
-        return crew_on_screen(game, game.world.aboard.crew_count() + who);
-    }
     let Some(residents) = &game.world.residents else {
         return (0.0, 0.0);
     };
@@ -443,6 +776,12 @@ fn local_node(game: &Game, list: &mut DrawList) {
     match node {
         Node::Station(_) => {}
         Node::Body(id) => {
+            // A belt the ship is holding at is drawn as its rocks, tile by
+            // tile in the ship's frame — see `rocks` — not as the handful
+            // of stones the map's icon is.
+            if game.world.site_here().is_some() {
+                return;
+            }
             if let Some(body) = game.world.system.body(id) {
                 paint_body(list, x, y, hull * 4.0, body.kind, 6.0);
             }

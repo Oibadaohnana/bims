@@ -30,7 +30,7 @@ use crate::room::{GLOW, HULL, PANEL_LIT, STEEL, WARN};
 /// bathroom door's rate.
 const RATE: f32 = 2.6;
 /// How far from the opening a body has to be for the door to open for it.
-const REACH: f32 = 64.0;
+pub const REACH: f32 = 64.0;
 /// How long the doorway has to be clear before the door shuts itself.
 const SHUT_AFTER: f32 = 1.2;
 /// How far from the opening a body counts as *in* it, for the panels not to

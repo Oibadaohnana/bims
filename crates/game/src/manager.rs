@@ -1,17 +1,19 @@
 //! What the player has told the place to keep in stock.
 //!
-//! Three numbers — vegetables, blocks of tofu and pots of stew in the cold
-//! store — and everything automated reads its target off this rather than
-//! being told separately. The hydroponic bay plants to the first two; the
-//! galley cooks to the third, one stew out of a vegetable and a block of
-//! tofu, and puts it in the cold store beside them. Whatever comes next
-//! (water, spares, a second Bim's worth of anything) belongs here beside
-//! them.
+//! Four numbers — vegetables, blocks of tofu, pots of stew and fibre in the
+//! cold store — and everything automated reads its target off this rather
+//! than being told separately. The hydroponic bay plants to the first two
+//! and the fourth; the galley cooks to the third, one stew out of a
+//! vegetable and a block of tofu, and puts it in the cold store beside
+//! them. Whatever comes next (water, spares, a second Bim's worth of
+//! anything) belongs here beside them.
 //!
-//! The three are set **separately** now. They used to be one number in food
-//! units that split two to one, which was the ratio a Bim ate at; a stew on
-//! the shelf takes one of each, and a target that was one dial for three
-//! things had no honest way to say "more soy".
+//! They are set **separately**. They used to be one number in food units
+//! that split two to one, which was the ratio a Bim ate at; a stew on the
+//! shelf takes one of each, and a target that was one dial for three things
+//! had no honest way to say "more soy". Fibre is not food at all — it is
+//! what a bandage is made of — and starts at nought like the stew, so a
+//! bay nobody has asked for it grows none.
 
 /// As much as the manager will accept of anything. A hundred is more than a
 /// Bim can eat in a season and well past what six trays can grow.
@@ -26,18 +28,24 @@ const TOFU_AT_DAWN: u32 = 10;
 /// game by cooking the store down, and every probe that pins where the crew
 /// are on the first morning would move.
 const STEW_AT_DAWN: u32 = 0;
+/// And no fibre, for the same reason: a bay that grew it unasked would
+/// plant a tray the first morning, and every probe pinned on the bay would
+/// move.
+const FIBRE_AT_DAWN: u32 = 0;
 
-/// Which of the three a caller means. The codes cross the wasm boundary —
-/// `bims_target(kind)` and `bims_set_target(kind, n)` — so they are fixed.
+/// Which of the four a caller means. The codes cross the boundary —
+/// `Game::target(kind)` and `Game::set_target(kind, n)` — so they are
+/// fixed, and appended to rather than reordered.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Stock {
     Veg = 0,
     Tofu = 1,
     Stew = 2,
+    Fibre = 3,
 }
 
 impl Stock {
-    pub const ALL: [Stock; 3] = [Stock::Veg, Stock::Tofu, Stock::Stew];
+    pub const ALL: [Stock; 4] = [Stock::Veg, Stock::Tofu, Stock::Stew, Stock::Fibre];
 
     pub fn code(self) -> u32 {
         self as u32
@@ -52,6 +60,7 @@ pub struct Manager {
     veg: u32,
     tofu: u32,
     stew: u32,
+    fibre: u32,
 }
 
 impl Manager {
@@ -60,6 +69,7 @@ impl Manager {
             veg: VEG_AT_DAWN,
             tofu: TOFU_AT_DAWN,
             stew: STEW_AT_DAWN,
+            fibre: FIBRE_AT_DAWN,
         }
     }
 
@@ -68,6 +78,7 @@ impl Manager {
             Stock::Veg => self.veg,
             Stock::Tofu => self.tofu,
             Stock::Stew => self.stew,
+            Stock::Fibre => self.fibre,
         }
     }
 
@@ -76,6 +87,7 @@ impl Manager {
             Stock::Veg => &mut self.veg,
             Stock::Tofu => &mut self.tofu,
             Stock::Stew => &mut self.stew,
+            Stock::Fibre => &mut self.fibre,
         };
         *slot = count.min(MOST);
     }
@@ -92,8 +104,13 @@ impl Manager {
         self.stew
     }
 
-    /// The two the bay grows, at once, which is how the bay asks.
-    pub fn stock_target(&self) -> (u32, u32) {
-        (self.veg, self.tofu)
+    pub fn fibre(&self) -> u32 {
+        self.fibre
+    }
+
+    /// The three the bay grows, at once, which is how the bay asks:
+    /// vegetables, tofu, fibre.
+    pub fn stock_target(&self) -> (u32, u32, u32) {
+        (self.veg, self.tofu, self.fibre)
     }
 }

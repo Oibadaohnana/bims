@@ -32,7 +32,7 @@ pub const REFERENCE_STEPS: u32 = 600;
 /// Pinned rather than computed, for the same reason `REFERENCE_HASH` is: a
 /// test comparing two computed values would pass happily while both were
 /// wrong. Update it only when the scenario below is meant to change.
-pub const REFERENCE_CHECKSUM: u64 = 0x_a4e2_c0a2_808a_0b16;
+pub const REFERENCE_CHECKSUM: u64 = 0x_2286_9ef2_3e6b_7d61;
 
 /// A world with the flyable fixture docked at the simulation's spawn: the
 /// default seed's first dock, which is where every fixture world starts.

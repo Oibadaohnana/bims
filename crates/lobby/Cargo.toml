@@ -1,20 +1,16 @@
-# The lobby's World tab: the wasm behind the galaxy preview in
-# web/builder.html.
+# The lobby's World tab: the galaxy preview and the system diagram.
 #
-# It is the third cdylib in the workspace, and a third one rather than an
-# export on the designer's because the builder is a different page: it has
-# no ship in it, no `Game`, and nothing to step — only a galaxy to draw, a
-# star to inspect, and a station to pick. Everything it knows about the world
-# it asks `worldgen`, which is the same crate the native server will generate
-# the same galaxy with. Nothing here imports the room or the designer.
+# A crate of its own rather than a corner of the designer's because the
+# lobby is a different screen: it has no ship in it, no `Game`, and nothing
+# to step — only a galaxy to draw, a star to inspect, and a station to pick.
+# Everything it knows about the world it asks `worldgen`, which is the same
+# crate the native server will generate the same galaxy with. Nothing here
+# imports the room or the designer.
 [package]
 name = "lobby"
 version = "0.1.0"
 edition = "2024"
-description = "The lobby's World tab — wasm exports, the galaxy preview and the system diagram for web/builder.html"
-
-[lib]
-crate-type = ["cdylib", "rlib"]
+description = "The lobby's World tab — the galaxy preview, a pick, and the system diagram"
 
 [dependencies]
 worldgen = { path = "../worldgen" }

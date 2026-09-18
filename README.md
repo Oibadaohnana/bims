@@ -1,6 +1,7 @@
 # Bims
 
-A 2D top-down game written in Rust, running in the browser via WebAssembly.
+A 2D top-down game written in Rust, on Bevy. It opens as a window on your
+desk.
 
 Two characters — Bims — pottering about a compartment on a ship. Either will
 cook a meal from start to finish and clear up after it, take itself to bed, or
@@ -23,80 +24,47 @@ as in the room, living the same life on the ship you designed.
 nix run .
 ```
 
-That builds the game, serves it, and opens it in a browser tab. `Ctrl+C` stops
-the server. Pass a port to pin one (`nix run . -- 3000`), or `--no-open` to keep
-it out of your browser.
+That builds the game and opens it. There are five things to run, and each is
+a name rather than a flag:
 
-There are three things to run:
+| command | `cargo run` | opens |
+| --- | --- | --- |
+| `nix run .` or `nix run .#game` | `cargo run -- game` | the whole game, in order: the start menu, setup or a lobby, the world and a station to start at, the ship design, then the world docked where you said |
+| `nix run .#simulation` | `cargo run -- simulation` | straight into the world on a prebuilt playtest ship, docked at a station |
+| `nix run .#design` | `cargo run -- design` | straight into the ship design, the playtest ship given, docked where the simulation docks |
+| `nix run .#room` | `cargo run -- room` | the behaviour test room — the Bims on a deck |
+| `nix run .#test` | `cargo run -- test` | the simulation somewhere else each time: docked at a random station somebody lives on, in a random galaxy |
+| `nix run .#combat` | `cargo run -- combat` | the simulation docked at a hostile station: the people living there are enemies, and a recruited crew member shoots at any it can see |
 
-| command | `./run` | opens | port |
-| --- | --- | --- | --- |
-| `nix run .` or `nix run .#game` | `./run game` | the whole game, in order: the start menu, setup or a lobby, the world and a station to start at, the ship design, then the world docked where you said | 8080 |
-| `nix run .#simulation` | `./run simulation` | straight into the world on a prebuilt playtest ship, docked at a station | 8083 |
-| `nix run .#room` | `./run room` | the behaviour test room — the Bims on a deck | 8084 |
-
-All three serve the same directory and differ only in which page they open,
-so they have separate default ports and can be up at the same time. The
-`./run` forms serve the live `web/` directory rather than the frozen copy in
-the Nix store, which is what you want while editing — see
-[The builder](#the-builder), [The ship designer](#the-ship-designer),
-[The game](#the-game) and [The simulation](#the-simulation).
-
-**Port 8080 used to serve the room.** It is the whole game now, and the room
-has moved to 8084; `builder`, `ship` and `serve` are gone as names. A server
-from an older build still sitting on a port is refused rather than reused —
-see below — so if `nix run .` says a different build is on 8080, that is the
-old room server: stop it with `Ctrl+C` in its terminal.
-
-Running it again while it is already up starts neither a second server nor a
-second tab. It recognises its own build by the wasm being served and just tells
-you where it is. That matters because an old tab keeps its own copy of the game
-running for as long as it stays open, so stacking them leaves you staring at two
-Bims wondering which is real — pass `--open` if you want another tab anyway.
-
-If the port has an *older* build on it, it says so and stops rather than quietly
-showing you stale content. A build is every module its page loads, hashed
-together — the game is the lobby's `lobby.wasm` and the designer's `ship.wasm`
-— so a rebuild of either reads as a different build. If the port is taken by
-something unrelated, it moves to the next free one.
-
-Without flakes, `./serve.sh` is `./run game` and takes the same arguments.
+The `cargo run` forms build from the working tree, which is what you want
+while editing — `cargo run --release -- test` is the same thing on the
+release profile, which is the build to play on; `nix run` builds from the
+git tree. The window wants a
+display and a GPU: winit and wgpu open the window system's libraries and the
+Vulkan loader at run time, and `shell.nix` puts them on `LD_LIBRARY_PATH`,
+so a bare `cargo run` outside the shell may open nothing — `nix develop` or
+`nix-shell` first, or let `./check` do it.
 
 The rest:
 
 ```sh
-nix develop            # a shell with the toolchain
-nix build              # the playable site lands in result/share/bims
-nix flake check        # builds the wasm and checks formatting
+nix develop            # a shell with the toolchain and the runtime libraries
+nix build              # the binary lands in result/bin/bims
+nix flake check        # builds it, runs every crate's tests, checks formatting
+./check                # everything above and a smoke run of each window
 ```
 
-`./build.sh` alone compiles the wasm modules into `web/` — there are two of
-them now, `bims.wasm` for the room and `ship.wasm` for the designer. Both
-scripts drop into
-`shell.nix` for the toolchain if `cargo` and `lld` are not already on PATH, so
-no global install is needed. `nix develop` uses that same `shell.nix`, so there
-is one list of development tools rather than two that drift apart.
-
-Opening `web/index.html` as a `file://` URL will not work: the page fetches
-`bims.wasm`, and `fetch` is blocked on file URLs. Serve it over http.
-
-Both entry points use `dev-server.py` rather than `python3 -m http.server`,
-because browser caching bites hard here. Files served out of the Nix store
-carry an mtime of 1970, and with no `Cache-Control` header the heuristic
-freshness rule — about a tenth of a file's apparent age — decides the page is
-good for decades and stops asking for it. You rebuild, reload, and are still
-looking at a build from hours ago. `dev-server.py` sends `no-store`, and the
-page loads `bims.js` and `bims.wasm` under a per-load query string, so a cache
-poisoned before any of that was in place cannot outlive it either.
+`bims --self-check` prints whether this build agrees with the constants the
+fixtures pin — the design hash, the world checksum, the money arithmetic —
+and exits non-zero if it does not.
 
 ## The builder
 
 `nix run .` opens here: what comes *before* the ship and the world — a start
-menu, a game setup screen, and a lobby. It is `web/builder.html` and `web/builder.js`, a
-page of its own — `web/bims.js` is the room and knows nothing about menus.
-It has a wasm of its own, `lobby.wasm` out of `crates/lobby`, and only the
-World tab touches it: the galaxy is generated and drawn there, and the rest of
-the page runs without it.
+menu, a game setup screen, and a lobby. It is `crates/app/src/screens/builder.rs`,
+a screen of its own — the room's screen knows nothing about menus. Only the
+World tab touches the galaxy, through `crates/lobby`: the galaxy is generated
+and drawn there, and the rest of the screen runs without it.
 
 **Play** goes straight to game setup. **Create lobby** opens a room other
 people will one day be able to walk into, and a code field beside the two of
@@ -137,17 +105,14 @@ of its own; see below. What crosses is numbers in a query string and nothing
 else: the money each Bim brings, the build area in tiles, how many players
 there are, which slot you are, the seed in its two halves, the galaxy type,
 and the star and the station the game starts at. `"large"` and `"full"` exist for the buttons;
-what a game is *started with* is what will cross into wasm, and no strings do
-— which goes for the euro sign as well, so what is written down is a bare
-count of euros.
-`scratchpad/builder-check.mjs` asserts that, query parameter by query
-parameter.
+what a game is *started with* is what crosses into the simulation, and no
+strings do — which goes for the euro sign as well, so what is written down is
+a bare count of euros.
 
 ### The multiplayer seam
 
-`net` in `web/builder.js` is the whole of it: `create`, `join`, `push`,
-`suggest`, `leave`, `deliver` for what comes in, and events the screens
-listen to. It is a local stand-in with the
+`Net` in `crates/app/src/screens/builder.rs` is the whole of it: `create`,
+`join`, `push`, `leave`, and what the screens read back from it. It is a local stand-in with the
 shape a transport will have, and **nothing in the screens reaches past it** —
 the slot list is drawn from what `net` says the players are, not from what the
 lobby knows about itself. Giving it a socket is meant to be a change to that
@@ -170,8 +135,7 @@ start at, and the page says so rather than picking one: opened without a star
 and a station in its query, or with ones the galaxy has not got, it shows
 **Nowhere to start** and a link back to the lobby. It never falls back to
 another spawn.
-It is `web/ship.html` and `web/ship.js` with a wasm of its own, `ship.wasm`,
-out of `crates/ship`.
+It is `crates/app/src/screens/designer.rs` over `crates/ship`.
 
 **No Bims exist during this phase.** Placing a part and taking it off again
 are both instant and free: nothing has been welded yet, and the money is only
@@ -207,7 +171,7 @@ a grid too small for the ship (under twenty tiles) opens empty too.
 
 The palette down the left is grouped the way a ship is thought about — hull,
 systems, crew, galley, heads, storage, bay — rather than the way the enum is
-numbered. The rows are built from what the wasm says exists, so a part added
+numbered. The rows are built from what `shipdesign` says exists, so a part added
 and forgotten in the grouping turns up under **Anything else** instead of
 quietly not existing.
 
@@ -263,7 +227,7 @@ What is left is always **worked out from the design**, never decremented as
 parts go down: a refused edit, a removal and a replayed run of edits cannot
 drift apart from what is actually on the ship. The sum itself —
 `money_per_bim × players`, plus the solo bonus — is `crates/economy`, so the
-browser and the native server that will one day be authoritative arrive at the
+game and the native server that will one day be authoritative arrive at the
 pool the same way, in whole euros, with overflow an error rather than a wrap.
 
 ### Buying what the ship will live on
@@ -407,24 +371,24 @@ and **the game starts**. Solo, one Accept settles it.
 
 - **`crates/shipdesign`** is the rules and nothing else: the part table, one
   `apply` that is the only way a design ever changes, `validate`, and
-  `design_hash`. It renders nothing, exports nothing to wasm, and compiles
-  natively as well as for wasm32 — the native server that will one day be
-  authoritative has to agree with the browser about what a legal ship is, and
-  `design_hash` has to come out **identical on both**. That is why nothing in
-  its data or its hash is a `usize` or a float. Its unit tests are plain
-  `cargo test`; the wasm half of the hash check is `ship_self_check`, read by
-  `scratchpad/ship-check.mjs`.
-- **`crates/ship`** is the browser's half: the camera, the pointer, the ghost,
-  the draw buffer. It decides nothing about what may be placed — it asks.
+  `design_hash`. It renders nothing and knows nothing about a window — the
+  native server that will one day be authoritative has to agree with the
+  game about what a legal ship is, and `design_hash` has to come out
+  **identical on both**. That is why nothing in its data or its hash is a
+  `usize` or a float. Its unit tests are plain `cargo test`; the same
+  constants are checked all at once by `bims --self-check`.
+- **`crates/ship`** is the screen's half: the camera, the pointer, the ghost,
+  the draw buffer, and `Session`, which is the design phase and the game it
+  turns into. It decides nothing about what may be placed — it asks.
 - **`crates/economy`** is the money: whole euros, the shared pool, what a
   station charges for a unit of anything, and which class of hold it goes in.
   Every sum in it is checked — overflow is an error, never a wrap.
 
-Its multiplayer seam is the same idea as the builder's. `net` in
-`web/ship.js` has a transport's shape, every Edit and every Accept goes
-through it carrying the design hash it was made against, and the host end
-applies messages in arrival order and reports a refusal back to whoever sent
-it. No click handler touches the wasm's editing exports directly.
+Its multiplayer seam is the same idea as the builder's. `Net` in
+`crates/app/src/screens/designer.rs` has a transport's shape, every Edit and
+every Accept goes through it carrying the design hash it was made against,
+and the host end applies messages in arrival order and reports a refusal back
+to whoever sent it. No click handler touches the editor directly.
 
 ## The game
 
@@ -443,15 +407,16 @@ Bim *i* at bunk *i*, in id order — and from then on hungry, tired, in need
 of the heads, cooking at the hob you placed, eating at your table, sleeping
 in your bunk, sweeping your deck and tending your bay, on the world's clock,
 inside that step. The cold store opens holding what you bought. Construction
-and health are still to come and go in the same step; a second clock would
+is in the same step — [the crew build what you lay out](#building-aboard),
+out of the hold — and health is still to come there; a second clock would
 be two simulations that disagree, and the failure would read as a ship in
 two places.
 
 The room's fixtures are drawn with the room's own pictures — the fridge, the
 hob and its pot, the pan, the bunk with its rails — turned with the ship, and
-the Bims are named over their heads by the page (`CREW_NAMES` in
-`web/ship.js`, the room's two names first, so the pair you met on the deck
-are the pair aboard).
+the Bims are named over their heads by the app (`CREW_NAMES` in
+`crates/app/src/names.rs`, the room's two names first, so the pair you met on
+the deck are the pair aboard).
 
 Three limits, honestly stated: the room has two bunks' and two seats' worth
 of identity, so at most two of a crew are simulated; every fixture is used
@@ -462,23 +427,24 @@ those problems, which is not an accident.
 
 ### Flying it
 
-The ship is flown **from the helm**. Nobody starts there: **Take the helm**
-on the helm panel walks the crew member you steer to the seat, and until
-they are standing at it the map aims at nothing and Confirm is dead — the
-panel says so. Once there they stay put rather than pottering about, go off
-to eat and sleep as the day demands, and walk back afterwards; a right-click
-sending them anywhere else is the end of it. Any player's crew member can
-take it. Then open the map with **M** — it keeps whatever zoom it was left
-at — click a planet, a station or a bare point in space, and the panel
-quotes the trip before anybody commits to it: how long, how much fuel, and
-whether it ends docked or holding alongside. Confirm sends the ship.
-**Change target** is the same thing as a button: it opens the map with
-nothing aimed at, and the next click is the new target — under way as
-much as at rest.
+The ship is flown **from the helm**, and the strip across the top of the
+screen is where it is flown from. Open the map with **M** — it keeps
+whatever zoom it was left at — click a planet, a station or a bare point in
+space, and the strip quotes the trip before anybody commits to it: how
+long, how much fuel, and whether it ends docked or holding alongside.
+Aiming is only looking, from anywhere. **Confirm** is the order, and an
+order wants somebody at the seat: the crew member you steer walks to the
+helm — the strip says so, with a Cancel beside it — and the order goes
+through the moment they get there; then they are let go, to eat and sleep
+as the day demands, and under way the helm is a job the crew hand round
+among themselves. Brake and Abort are on the strip too and walk the same
+walk. With the map closed the strip is the trip instead: where the ship is
+going, a bar of how far it has got, and how long is left — or the berth,
+while it is at one. A new click on the map under way is a new target, and
+Confirm flies it.
 
-From a berth, Confirm is first of all a **departure**. Everybody goes to
-their own side of the airlock — the station's people ashore, the crew back
-aboard, walking, nobody teleported — and the ship waits at the berth until
+From a berth, Confirm is first of all a **departure**. The crew come back
+aboard — walking, nobody teleported — and the ship waits at the berth until
 they have (or for half an hour, and then leaves without them). Then it
 **pushes off**: straight out of the station's door by its own length,
 heading untouched, and only then is the trip planned, from where it has got
@@ -549,8 +515,8 @@ it. A **recipe** is a bench, what goes in, what comes out and how long it
 takes; the **smelter** turns two ore into one metal in half an hour, and the
 **workbench** turns one metal into four components in twenty minutes, or
 one metal, two components and one **galvum** into an **emitter** in an
-hour. Galvum is the rare one — only a mining outpost sells it — and the
-emitter is what the interesting parts will be made of: a turret, a shield,
+hour. Galvum is the rare one — only a mining outpost sells it, and only one
+asteroid in ten has it in its core — and the emitter is what the interesting parts will be made of: a turret, a shield,
 a mining laser. Nobody sells an emitter.
 
 What turns a recipe into an errand is a **target**: on the items panel,
@@ -571,30 +537,120 @@ and both stop in a brownout.
 
 ### Mining, on foot
 
-Ore is gathered by a Bim in a **pressure suit**, and the whole of the
-design is that the outside is a clock, not a place. Hold station at an
-asteroid belt with a suit in the **suit locker** and room on the shelves,
-and the work list offers *Mining outside*: a Bim takes the suit from the
-locker, walks to the deck inside the airlock, goes out, and is held a tile
-beyond the collar in the suit — visor and all — for an hour and a half. Then
-it comes back in, hangs the suit up, and the belt's ore is on the shelf:
-eight to twelve units, and one of galvum on top if the belt is one of the
-third or so that carry it. Which belts are rich is the galaxy's and the same
-for everybody. The log says what came back, and says so when it was nothing
-because the shelves were full.
+Ore is dug out of asteroids by a Bim in a **pressure suit** with a pick,
+and the outside is a place. Hold station at an asteroid belt and the belt
+becomes a **mining site**: a field of eight to twelve asteroids laid out
+round the ship on the ship's own tile grid, close in — the nearest a few
+tiles off the hull — so that a walk to the rock is minutes. Every asteroid
+is **stone on the outside and ore in the middle**: the skin is bare rock,
+worth next to nothing, three tiles deep, and only what lies deeper is the
+ore — silver-grey **iron ore** on most of them, and purple **galvum** on
+about one asteroid in ten. Which one is the rare one shows through its
+skin, so you can see what you are digging for before you dig.
+
+Nothing is mined that you have not **marked**. The **Actions** tab at the
+bottom left has the one action there is, **Mine**: pick it and the pointer
+becomes a pick, a click on a rock tile marks it to be mined and a second
+click unmarks it, and the tab says how many rocks are marked, how many of
+those a walk could actually get to, and clears the lot. Escape or a
+right-click puts the pointer down again. A mark is a command like a deal,
+so every player's ship is digging the same rocks; the marks come off when
+the ship leaves.
+
+With rocks marked, a suit in the **suit locker** and room on the shelves,
+the work list offers *Mining outside*, and a Bim with it high enough on
+the list takes the suit from the locker, walks to the deck inside the
+airlock, goes out — and **walks**: the outside has a navigation grid of
+its own, a hundred tiles every way about the Bim, one cell a tile, with
+the hull and every rock on it, rebuilt as the Bim moves and as rocks come
+out. It goes to the nearest marked rock it can get to, stands on the tile
+beside it — straight on, never from a corner — and swings the pick for a
+dozen minutes until the tile is gone, then the next, until there is none
+left it can reach; then back to the port, in, and the suit hung up. A dig
+is therefore a **tunnel**: mark a line of tiles from the skin in to the
+core and the Bim takes them from the outside in, standing in each mined
+tile to reach the one behind it. A rock with rock on every side waits
+until one in front of it is mined, and the tab says how many are waiting
+like that.
+
+What comes back is on the shelf as each tile goes — two **rock** for a
+skin tile, two ore for an iron one, one galvum for a galvum one, as much
+as fits — and the log says what the walk brought when the Bim comes in.
+Rock is cargo like anything else, heavy and worth two euros a unit at any
+station, and nobody sells it. The site remembers: a tile mined is gone
+for good, and coming back to the belt finds the field as it was left.
 
 There is no air gauge. What bounds a walk is **radiation**: the suit lets a
-quarter of the open dose through, so a walk is about twenty minutes' worth,
-and the dose comes off at half a minute a minute under cover. A Bim whose
-dose is past half the critical line is not sent out again until it has come
-down; two walks back to back are fine, a third waits. The **Dose** line on
-the ship panel is each crew member's, in minutes-in-the-open, and the log
-says when a body crosses a line — a dose picked up, a dose cleared. One
-body outside at a time: the airlock is one Bim's while a walk is on.
+quarter of the open dose through, and the dose comes off at half a minute
+a minute under cover. A Bim whose dose is past half the critical line is
+not sent out again until it has come down, and one out there when it
+crosses the line finishes the rock it is at and comes in. The **Dose**
+line on the ship panel is each crew member's, in minutes-in-the-open, and
+the log says when a body crosses a line — a dose picked up, a dose
+cleared. One body outside at a time: the airlock is one Bim's while a walk
+is on.
 
 A walk interrupted — the Bim gets hungry out there — brings the body back
-in through the door, and the walk resumes from the gangway when the Bim is
-done eating, with the time already spent outside still counted.
+in through the door, and the walk starts again from the gangway when the
+Bim is done eating, picking its rock afresh. A right-click on the deck
+does nothing to a Bim outside: the walk is what brings it in.
+
+### Building, aboard
+
+The ship goes on being built after the design phase — by the crew, out of
+what is on the shelves, and nothing is instant. The **Build** tab at the
+bottom left is the palette: the parts by category — *Structure* for the
+deck, the walls and the hull and the ways through it, *Furniture*,
+*Production* for the benches, the armoury and the bay, *Galley*,
+*Hygiene*, *Power*, *Ship systems*, *Propulsion* — each row with what the
+part is made of, dimmed to a warning where the shelves have not got it,
+and a search box over the lot for when you know the word and not the
+heading. Pick a part and it is in your hand: a **blueprint** of it follows
+the pointer over the deck, the part's own picture shown through, green
+where it would go and red where it would not, with the reason at the top
+left — something standing there, no deck under it, or the one the designer
+would have given: it would go, but a Bim could then not get at the hob.
+`R` turns it, a click lays it out, a right-click or Escape puts it down.
+The rules are the designer's, asked of the ship as it will be once
+everything already laid out is built, so a wall on deck that is itself
+still a blueprint goes — the crew take the sites in the order they were
+laid out, and the deck is there by the time they come to the wall.
+
+A site laid out is a **construction site**, in blueprint blue, and the
+crew work it as a job — two rows on the work list, *Hauling* and
+*Building*. Whoever is free walks to a shelf, takes a load of what the
+site is made of, carries it over — a crate in both arms — and puts it down
+there, a load of twenty units at a time until everything is there; the
+bar along the foot of the site fills as it arrives, and the tab's **Laid
+out** list says the same in numbers, with a way to call each site off.
+Then a Bim stands beside it and puts it together, a few minutes for a
+wall and a couple of hours for a heavy engine, and the part is on the ship: the
+room the crew live in is laid out again under them with the new wall a
+solid in it, the new bunk a bed, the new shelf somewhere to fetch from,
+and nobody's errand is lost for it. What it cost is exactly the recipe,
+out of the hold in one go the moment the part goes down. The materials
+never leave the shelf before that: what has been carried to a site is
+*spoken for* — it cannot be sold or smelted from under the site, and the
+Build tab counts only what is free — so the ship weighs the same
+throughout and a site called off costs nothing.
+
+A site can be **outside the hull**. Plating laid out against the skin, an
+outside wall on it, a thruster in the void beside the ship: any site with
+no tile beside it that a body can stand on from the deck is reached from
+outside, and the crew do what the miners do — take the suit from the
+locker, go out through the airlock, walk round the hull on the outside's
+grid to the tile beside the site, carry the load there or build there,
+and come back in. The same dose rules apply, and the same one-at-a-time
+airlock. No tools are needed for any of it, only the materials.
+
+Two rules hold the ship and the building apart. **Nothing is built on a
+ship that is moving**: sites can only be laid out, and are only worked,
+while the ship is docked or holding station; under way the tab says so
+and the crew leave the sites alone. And **the ship stays put while it is
+built on**: a Confirm is refused while any site has a load carried to it
+or a Bim on the way to one. A bare blueprint with nothing done at it
+holds nothing — it is a plan, and the ship may fly with a plan on the
+deck — and cancelling a site frees the ship at once.
 
 ### Seeing where you are
 
@@ -649,15 +705,18 @@ faces the station's, the two collars — each stands half a tile out of
 its skin — meet as a tube between the hulls, and both doors are drawn
 parted. The game opens docked at the first station somebody lives on, never
 at a derelict. Escape opens a settings sheet with every key on it. An airlock has to be in the skin for that — one on the deck is a door
-to nowhere, and the checks say so. And docked, **the two are one room**: the
-ship's deck and the station's on one navigation grid with the passage
-between them, so a right-click on the station's deck sends James through the
-airlocks and the residents wander aboard — to the ship's galley, since a
-room has one and it is the ship's. Who is who is on their backs: the crew
-wear the ship's blue coverall and the station's people the station's
-orange one. Leaving takes the room apart again, once everybody has walked
-to their own side — see *Flying it* — and the residents are left to the
-station.
+to nowhere, and the checks say so. And docked, **the two are one deck**: the
+ship's and the station's on one navigation grid with the passage between
+them, so a right-click on the station's deck sends James through the
+airlocks. The station's people stay on the station: they live in a room of
+their own, with their own galley, heads, bunks and bay, on their own
+timetable and to their own manager's goals — a hundred vegetables, fifty
+blocks of tofu and two pots of stew a head in the cold store, and the bay
+planted to keep it so. The Management tab is the crew's own and reaches
+nobody ashore. Who is who is on their backs: the crew wear the ship's blue
+coverall and the station's people the station's orange one. Leaving takes
+the deck apart again, once the crew have all walked back aboard — see
+*Flying it*.
 
 Beyond the chart, the ship sees `VISION_RANGE` with the crew's own eyes,
 which out here is almost nothing, and a great deal further with a **sensor
@@ -672,12 +731,22 @@ one — so a start is rarely far from somewhere to go.
 
 ### Speed, and who decides
 
-Pause, 1×, 3×, 10× and 24×. **Every player has a request and the slowest one
-wins**; a pause by anybody is a pause. That is not a compromise, it is the
-point: the player who needs it slow is the player something is going wrong for,
-and nobody is ever carried past something they wanted to look at. The panel
-shows what everybody asked for as well as what is actually happening, so being
+Pause, 1×, 3×, 10× and 24×, beside the day and the clock at the top left.
+**Every player has a request and the slowest one wins**; a pause by anybody
+is a pause. That is not a compromise, it is the point: the player who needs
+it slow is the player something is going wrong for, and nobody is ever
+carried past something they wanted to look at. The button held down is
+what you asked for and the one coloured is what is actually happening, and
+with more than one player each one's request is listed under, so being
 held at 1× is never a mystery.
+
+The rest of the screen: the **Inventory** down the left, the crew's money
+at its head and what is aboard under it by where it is kept; the readout
+under that, and the agendas; the crew member picked on the right; the tray
+at the bottom with its tabs — the room's three, then View, Actions, Build
+and **Ship**, which is the helm and the ship's facts — and the Station
+button beside them while there is a station; and what just happened, at
+the bottom right.
 
 ### Trading
 
@@ -686,11 +755,51 @@ to buy from. Holding station beside one is not docked — that wants an airlock 
 and out between them the pool buys nothing at all. Supply is unlimited and every
 station charges the same; what bounds a purchase is the money and the hold.
 
-What is *on the shelf* is the station's kind's: galvum only at a mining
-outpost, an emitter nowhere, nothing at a derelict — there is nobody aboard
-to sell it — and everything else everywhere somebody lives. A row the
-station does not sell is greyed with its buy buttons off, and stays, because
-what is aboard can still be sold there. Every station buys anything.
+The shelf is a window — **Station** on the tray, docked, opens it in the
+middle of the screen and the cross, Escape or casting off shuts it — and
+what is *on* it is two rules deep. The kind's is the ceiling: galvum only
+at a mining outpost, an emitter nowhere, rock nowhere, nothing at a
+derelict — there is nobody aboard to sell it. Under that each station keeps
+a shelf of its own, rolled off its seed: ore, metal, fuel and both foods
+are on every one, because a station where the crew can buy no fuel and
+nothing to eat is a trap, and each of the rest — components, suits,
+medkits, an outpost's galvum — is there or not, so two refineries stock
+different things and there is a reason to fly to the other one. A row the
+station does not sell is greyed with its buy buttons off, and stays,
+because what is aboard can still be sold there. Every station buys
+anything. A station is not yet *for* anything — a theme would replace the
+roll, not the ceiling.
+
+### What the crew can see
+
+The crew see **all the way round** — there is no cone — and what stops
+their eyes is what stands in the way: a wall, a bulkhead, the hull, a
+shelf or a reactor, a door with its leaves shut. Not the low things: a
+Bim sees over a table, a bunk, the worktop, a tray of crops. It is
+**traced**, tile by tile, from every crew member's eyes, and it is
+**shared**: what one of them sees, all of them see, and the screen shows
+the crew's view.
+
+A Bim standing **against a wall peeks round it**: as well as from where it
+stands, it looks from the tile either side of it along the wall, and what
+that adds is whatever lies past the wall's line. So a Bim pressed to the
+corner of a room sees the whole of the room round the corner, where one
+standing a tile back sees only the wedge the corner leaves — the wall's
+edge cuts the view. A peeking Bim shoots from the peek.
+
+What nobody sees is under a fog, and whose the structure is decides what
+the fog looks like. **Your own ship** is under a light one: the deck stays
+readable — you know where your own walls are — but whatever is standing
+there is not drawn. **Somebody else's station** — neutral or hostile — is
+**black** where nobody has looked, and **grey** in a ring a few tiles wide
+round what is seen: the walls and the fixtures show through the grey, and
+nobody standing among them does. The grey stays once earned; what has been
+looked at is known. Its people appear only in line of sight, and stay
+drawn for two seconds after they were last in it, so somebody stepping
+behind a bulkhead is a moment fading rather than winking out. From outside,
+a stranger's station is a black shape and your home station is its hull
+under the light fog. Home is the station you set out from; every other
+station is neutral, and `combat` makes the dock hostile.
 
 ### The two views
 
@@ -708,14 +817,14 @@ little hull pointing where the ship is pointing.
 The camera is **north-up in both by default**. It is the ship that turns on
 screen. A camera that followed the heading would make a flip legible and every
 other moment unreadable — you could not tell which way you were going, because
-"which way" would always look the same. **Head up** (the View panel, or `N`)
+"which way" would always look the same. **Head up** (the View tab, or `N`)
 is the other choice: the ship held square to the window and the sky and the
 map turned round it instead.
 
 The ship view **follows the crew member you steer**: James is what sits in
 the middle, on the deck or across a station, and a drag can shove the view
 only so far before he would be off the edge. **Free camera** (the View
-panel, or `F`) lets it go — the view stays where it is and a drag or the
+tab, or `F`) lets it go — the view stays where it is and a drag or the
 keys take it anywhere, for looking at the far end of a station while the
 crew are busy at this one — and **Follow** snaps it back to him.
 
@@ -724,10 +833,10 @@ crew are busy at this one — and **Follow** snaps it back to him.
 - **`crates/flight`** is what a design does when you push it — mass, centre of
   mass, inertia, acceleration, how fast it turns — and the trip that takes it
   somewhere. A plan is worked out **once** and then read at a time: nothing
-  integrates, so a browser at 24×, a browser at 1× and a server catching up on
+  integrates, so a window at 24×, a window at 1× and a server catching up on
   an hour of somebody's disconnection all put the ship in the same place.
 - **`crates/world`** is the star system, the ship in it, the clock, and the
-  order things happen in. It renders nothing and exports nothing to wasm.
+  order things happen in. It renders nothing and knows nothing about a window.
 
 What the steps after this one are promised is written down at the top of
 `crates/world/src/lib.rs`: Bims live in ship-design tile coordinates and the
@@ -737,8 +846,8 @@ ship's rotation does not reach them, every ship change goes through
 is the radiation input.
 
 Which world you land in is a seed and a galaxy shape, and for now they come off
-`ship.html`'s query string with a fixed default behind them. The lobby's World
-tab will pick them instead; nothing else about them changes.
+the settings the lobby hands over, with a fixed default behind them. The
+lobby's World tab will pick them instead; nothing else about them changes.
 
 ## What the ship will make
 
@@ -763,7 +872,7 @@ the brownout* under the game, below.
 
 ### The walk outside
 
-Built. *Mining, on foot* under the game.
+Built, and the outside is a place now: *Mining, on foot* under the game.
 
 ### The armoury
 
@@ -791,14 +900,18 @@ fight, below, which is not built.
   waiting for. What a derelict has left in it is generated already.
 - **Boarding** is docking to somebody hostile. The rooms join into one, one
   nav grid, and the fight is Bims with handguns in corridors the station
-  layout already promises are walkable. A wound is a condition in the health
+  layout already promises are walkable. The first half of that is in:
+  `combat` docks at a hostile station, a recruited Bim shoots what it can
+  see, and the station's people take the hits — see
+  [Combat mode](#combat-mode-and-the-inventory). What is not: them
+  shooting back, armour, and a wound as a condition. A wound is a condition in the health
   crate, arriving the way hunger and sleep are meant to; the medkit is a
   held thing and treating is a job.
 
 ## The simulation
 
-`nix run .#simulation` is the game without the front of it: `ship.html?mode=1`
-opens the world at once, for one player, on the **playtest ship** —
+`nix run .#simulation` is the game without the front of it: it opens the
+world at once, for one player, on the **playtest ship** —
 `shipdesign::playtest_ship()`, a twenty-tile hull with one of everything a
 crew of one needs to live and to fly, a full tank, metal and components on
 the shelf and a few days' food in the cold store. It is laid out the way a
@@ -816,25 +929,24 @@ the room's navigation cannot walk a one-tile gap. It has `SIMULATION_MONEY`
 (a placeholder €50 000) in hand. It is for playtesting the world quickly, and
 it is the one place the old "lowest star with a station" spawn survives:
 the world is the fixed default seed's, a two-arm spiral, docked at that
-system's first station. `seedHi`, `seedLo`, `galaxy`, `star` and `station`
-in the query override those when a particular world is wanted.
+system's first station. `nix run .#test` is the same ship somewhere else
+each time: a random seed, and a dock somebody lives on picked at random
+across that galaxy.
 
 The ship's part count and `design_hash` are pinned — `PLAYTEST_PARTS` and
-`PLAYTEST_HASH` — and checked natively and in `ship.wasm` like the reference
-design's, so the simulation opens on the same ship on every target.
-`scratchpad/simulation-check.mjs` boots the page, checks all of that, and
-flies a trip to the end at 24x.
+`PLAYTEST_HASH` — and checked like the reference design's, so the simulation
+opens on the same ship on every machine.
 
 ## The crew
 
 Two Bims live aboard: **James** and **Kate**. Their names are written over
 their heads on the deck, each has an agenda down the left, and the one you have
 selected has its bars and its crew sheet down the right. The same panels, the
-same keys and the same menus are on the ship page once the world is open —
-`1` or a drag to select, right-click the deck to move, `r` to recruit, and
+same keys and the same menus are on the ship's screen once the world is open
+— `1` or a drag to select, right-click the deck to move, `r` to recruit, and
 the tray at the bottom left — because the crew aboard are these Bims and the
-panels are one script, `web/crew.js`, shared by both pages. In the simulation
-there is one of them, James.
+panels are one module, `crates/app/src/crew.rs`, shared by both screens. In
+the simulation there is one of them, James.
 
 They are not two kinds of thing. Both run the same needs on the same clock,
 both take themselves to bed and to the galley and to the heads for the same
@@ -844,10 +956,10 @@ right-click move order, recruiting, and every item on every fixture menu act on
 him and only him. Kate takes no instruction from anybody and lives her whole
 day on her own account — which is the point of her being there.
 
-A Bim's name, coverall and hair are the host's business and the drawing's; the
-simulation knows crew member 0 and crew member 1. No strings cross the wasm
-boundary, so the names are written on the canvas by `web/bims.js` after the
-shape buffer has been replayed, not carried across in it.
+A Bim's name, coverall and hair are the app's business and the drawing's; the
+simulation knows crew member 0 and crew member 1. No strings come out of the
+room, so the names are written over the deck by the app after the shape
+buffer has been replayed, not carried across in it.
 
 ### Picking one, and the crew sheet
 
@@ -906,11 +1018,11 @@ rule exists to make findable.
 An entry with no words for it is **dropped from the page** rather than padded
 with a placeholder. A line that says "Something happened." reads as the Bim
 having had a mysterious experience when in truth the table is simply short an
-entry; a missing row is at least honest, and it is what `smoke.mjs` counts.
+entry; a missing row is at least honest.
 
-No strings cross the wasm boundary, here as everywhere. An entry is a day, a
-time, a code and one number; `MEMORY_LINES` in `web/bims.js` is where the
-sentences live. A Bim that remembers being sick remembers `(day 4, 18:22,
+No strings come out of the room, here as everywhere. An entry is a day, a
+time, a code and one number; `memory_line` in `crates/app/src/names.rs` is
+where the sentences live. A Bim that remembers being sick remembers `(day 4, 18:22,
 WasSick, 0)` and "on the deck" is the host's wording of nothing at all. The
 book is bounded — a few hundred entries, oldest falling off the front — so a
 game left running does not grow without end. Memory is finite; so is this.
@@ -985,7 +1097,7 @@ foot of a bed should cost nothing.
 | Click one | Select it — a click is just a box of no size. Only James takes orders |
 | Click empty floor / `Esc` | Deselect — the right-hand panels go with it |
 | Right-click the floor | Send the selection there — opens a door on the way if it must |
-| Tray, bottom left | **Schedule** — paint the day and set the thresholds; **Management** — autonomy, food to keep, what is aboard |
+| Tray, bottom left | **Schedule** — paint the day and set the thresholds; **Management** — autonomy, food to keep, what is aboard; on the ship, **Build** — lay parts out for the crew to build |
 | Action thresholds, under the strip | Rest and Food: how low each may get before the Bim acts, and a tick box to stop it acting at all |
 | Point at anything | Top left says what it is, and what is lying on it |
 | Point at a management row | The place it names is ringed on the deck |
@@ -1011,8 +1123,8 @@ point: crossing a panel on the way somewhere else sets nothing off. The ring a
 management row draws round its fixture is not one of these and needs no
 affordance — nothing pops up, nothing is said, and it is gone the instant the
 pointer moves on. The one number inside a tooltip that could go stale — the
-rested-enough level in the schedule's — is filled in from wasm rather than
-written into the markup.
+rested-enough level in the schedule's — is read off the room rather than
+written into the words.
 
 Either button opens a fixture's menu, and doing so leaves the selection alone;
 a *sweep* across one is still a marquee. Right-clicking bare floor is still a
@@ -1366,7 +1478,7 @@ until the tray is already worked.
 It is in *food units*, and a unit divides two to one — two thirds vegetables,
 one third tofu — so asking for **99** sets the target to **66 vegetables and 33
 blocks of tofu**. The field shows the split as you type it, read back out of
-wasm rather than worked out twice.
+the room rather than worked out twice.
 
 That target is what the bay plants to, and it is the only demand there is for
 now. The manager is where the rest will go as they arrive: one row per thing
@@ -1629,6 +1741,35 @@ so letting the Bim go picks up where it left off.
 It shows in two places, because one of them is easy to miss: a badge in the
 header, and a broken amber ring around the Bim itself, in a colour used for
 nothing else and drawn whether or not the Bim happens to be selected.
+
+### Combat mode, and the inventory
+
+A recruited Bim is in **combat mode**: it draws its weapon and, whenever an
+enemy is in range and in its own line of sight — the peek round a wall
+included — it fires. Everybody carries a **hand laser pistol** from the
+start. It does nothing else about the enemy: it stands where it was put,
+as a recruited Bim does, and shoots from there; walking it somewhere is
+still yours to order, and it holds its fire while it walks. Let it go and
+the weapon is holstered.
+
+Every shot is a **bolt** that flies — at the weapon's speed, until it
+reaches a body, a wall or the end of its range — and is always drawn,
+whatever it flies through. Friendly fire is **blue**, an enemy's **red**.
+A shot's odds of landing are the weapon's **accuracy at ten tiles**,
+falling off with distance from there; a hit takes the weapon's damage off
+the body it lands on, and a miss flies visibly wide. Who is an enemy is the
+station's business: at a hostile station the people living there are
+enemies, ringed in red, and `nix run .#combat` opens the game docked at
+one. They do not shoot back yet.
+
+The moment a Bim is recruited its **inventory** pops up, and the tray's
+**Inventory** tab shows the same for whoever is selected, recruited or not:
+three armour slots down the left — head, body, legs — and the weapon slot
+on the right with its numbers beside it: range, accuracy at ten tiles, shot
+speed, damage a shot, fire rate, and DPS, which is the fire rate times the
+damage — what it could do a second with every shot landing. They are slots
+because changing equipment will want them to be; for now nothing can be
+moved between them, and there is no armour to put in the three.
 
 ## Needs, and the day they make
 
@@ -2044,7 +2185,7 @@ twenty-four minutes of real time and a six-hour sleep takes six — and because
 the clock runs off the same `dt` as everything else, the speed slider carries it
 along. At 24x a whole day goes by in one minute.
 
-Nothing about time crosses the wasm boundary as a string: the host reads the
+Nothing about time comes out of the room as a string: the app reads the
 minute count and formats it. The light level comes from the same clock, eased in
 at dawn and out at dusk, and is laid over the finished frame as one tinted
 rectangle — so nothing in `room.rs` has to know what time it is.
@@ -2085,14 +2226,16 @@ read and edited rather than glanced at.
 
 ## How it fits together
 
-The simulation is entirely Rust. Each frame the host calls `bims_update`, which
-advances the world and rebuilds a flat buffer of shapes in wasm linear memory;
-`web/bims.js` reads that buffer and replays it onto a canvas. The only things
-crossing the boundary are a handful of numbers and one pointer, which means no
-binding generator and no JavaScript in the build — `cargo build` is the whole
-pipeline, and the module has zero imports.
+The simulation is entirely Rust, and so is the window. Each frame the app
+steps whichever screen is up and asks it for a flat buffer of shapes; the
+buffer is tessellated into one mesh (`crates/app/src/shapes.rs`) and drawn by
+egui with the panels round it, and the words — names over heads, labels on
+the map, the readouts — go on after. The rules crates hand over numbers and
+shapes and nothing else: no string leaves them, so the native server that
+will one day run the same crates has nothing to say and nothing to disagree
+about. `cargo build` is the whole pipeline.
 
-### Ten crates
+### Eleven crates
 
 The repository is a cargo workspace and everything is under `crates/`. The
 split is not tidiness — each line of it is something that has to give the same
@@ -2100,22 +2243,23 @@ answer in two places at once:
 
 | Crate | What it is | Who else needs it |
 | --- | --- | --- |
-| `game` | The room: the simulation, and its wasm exports. A cdylib | — |
-| `ship` | `web/ship.html`: the design phase, and the game it starts. Camera, pointer, draw buffer. The other cdylib | — |
+| `app` | The window: Bevy and egui, the four screens, the pointer, the words. The one binary | — |
+| `game` | The room: the simulation, and the shapes it draws itself as | `world`, which runs it aboard the ship; `app`, on its own as the test room |
+| `ship` | The design phase and the game it starts: `Session`, the editor, the two cameras, the painters | `app` |
+| `lobby` | The World tab's galaxy: a camera over it, a pick, and the system diagram | `app` |
 | `world` | One star system, the ship in it, and the one clock they both run on | `ship`; the native server, which has to run the identical loop |
 | `flight` | What a design does when you push it, and the closed-form plan that flies a trip | `world`; the native server, which has to put the ship in the same place |
 | `shipdesign` | What a ship is made of and the rules for putting one together | `ship`, `flight` and `world`; the native server, which has to admit the same ships |
 | `worldgen` | The galaxy, what is in each system, and station blueprints | The native server that will one day be authoritative, which has to generate the identical world from the same seed |
 | `physics` | Ship mass, engine thrust, travel time. Pure arithmetic | `worldgen`, to check its layouts; `shipdesign` and `flight`, to weigh and fly a real ship |
 | `economy` | Money: whole euros, the shared pool, what a station charges and which hold it goes in | `shipdesign`, `world` and `ship`; anything that ever charges for anything later |
-| `health` | One body's health: conditions with stages, mending, death. Radiation dose, sickness and cancer are the first two | The crew step, which will hold one per Bim; the native server, which has to agree about who survived |
+| `health` | One body's health: conditions with stages, mending, death. Radiation dose, sickness and cancer are the first two | The crew step, which holds one per Bim; the native server, which has to agree about who survived |
 | `time` | How long a minute, an hour and a day are | All of them — a day that is two lengths is two games |
 
-Everything builds for `wasm32` and for the host both, and `nix flake check`
-builds them both ways and runs the libraries' unit tests natively. `game` is
-wasm-shaped and is checked by the probes and harnesses in `scratchpad/`
-instead; so is most of `ship`, bar the arithmetic that turns a design tile into
-a place on screen and back, which is pure and is unit tested.
+`cargo test --workspace` runs every crate's tests, and `nix flake check`
+builds the app and runs them. `game` carries no unit tests of its own and is
+checked by the native probes in `scratchpad/` instead; `./check smoke` opens
+each of the four windows for sixty frames and keeps a picture of two of them.
 
 ### Inside the room
 
@@ -2123,7 +2267,7 @@ Relative to `crates/game/src/`:
 
 | File | What lives there |
 | --- | --- |
-| `lib.rs` | The wasm exports the host calls |
+| `lib.rs` | The module list, and why `time` is reached as `crate::time` |
 | `game.rs` | Ties the room, the Bim and the running task together; input |
 | `room.rs` | The room: layout, fixture state, and how it is drawn |
 | `bath.rs` | The heads: its bulkheads, its door, and its fittings |
@@ -2139,7 +2283,20 @@ Relative to `crates/game/src/`:
 | `character.rs` | The Bim — how it decides where to go, and how it is drawn |
 | `draw.rs` | The shape buffer and the local frame used for sprites |
 | `math.rs`, `rng.rs` | Vectors, rectangles, angles, and a PCG32 generator |
-| `web/bims.js` | Canvas renderer, input, and the fixture menus |
+
+And in `crates/app/src/`:
+
+| File | What lives there |
+| --- | --- |
+| `main.rs` | The four things to run, and the screen state machine |
+| `screens/room.rs` | The behaviour test room: the deck, the pointer, the speed, the status line |
+| `screens/builder.rs` | The menu, the setup screen and the lobby, with the World tab |
+| `screens/designer.rs` | The design phase, and the `Net` seam every edit goes through |
+| `screens/game.rs` | The game: the helm, the map, the station, the ship's facts |
+| `crew.rs` | The crew's panels, shared by the room and the game: needs, the sheet, the agendas, the tray, the fixture menus |
+| `names.rs` | Every word on the screen, indexed by the codes the crates hand over |
+| `shapes.rs` | The shape buffer, turned into a mesh |
+| `canvas.rs`, `theme.rs`, `format.rs`, `dev.rs` | The pointer, the palette and widgets, numbers as words, and the smoke run |
 
 ### Getting about
 
@@ -2266,7 +2423,7 @@ table when steering is not enough.
 ### The room is a fixed size
 
 The room is 860×580 world units whatever the window is; `Game::resize` works
-out a scale and offset to centre it in the canvas, and the host applies that
+out a scale and offset to centre it in the canvas, and the app applies that
 transform when drawing and inverts it for pointer positions. Furniture at
 honest proportions is worth more than filling every pixel, and it means the
 layout constants in `room.rs` can be trusted.
@@ -2282,12 +2439,14 @@ chopping thin air.
 Twelve floats per shape: `kind, x, y, w, h, rot, radius, line, r, g, b, a`.
 `kind` is 0 for a rectangle and 1 for an ellipse; everything on screen is built
 from those two. Rotation is about the shape's own centre, and a non-zero `line`
-strokes the outline instead of filling it. `bims_stride()` reports the stride so
-the host never has to hardcode it.
+strokes the outline instead of filling it; 2 is a right-angled triangle, the
+bottom-left half of its box, which the diagonal hull plates are. `draw::STRIDE`
+is the stride, and `crates/app/src/shapes.rs` asserts its own copy equals it.
 
-If you change the layout, note that the renderer reads the stride at runtime but
-still assumes the field *order* in `crates/game/src/draw.rs`.
+If you change the layout, note that the replay in `shapes.rs` assumes the
+field *order* in `crates/game/src/draw.rs`.
 
-One trap worth knowing: `f32::clamp` panics when its bounds are crossed, and
-that panic path drags Rust's formatting machinery into the wasm — it cost 19 KB
-of the binary before being swapped for the branchless `clamp` in `crates/game/src/math.rs`.
+One trap worth knowing: `f32::clamp` panics when its bounds are crossed. The
+room uses the branchless `clamp` in `crates/game/src/math.rs` instead, which
+dates from when the panic path cost 19 KB of a wasm binary; it is still the
+one to use, because a panic in a step is a stall with no message.

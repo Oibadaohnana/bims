@@ -41,15 +41,19 @@
 use economy::{Money, Storage, storage, trade_value};
 use flight::{Dynamics, Phase, Plan, PlanError, Target, angle};
 use physics::ResourceId;
-use shipdesign::parts::PartKind;
+use shipdesign::parts::{PartKind, Rotation};
 use shipdesign::{CARGO_SLOTS, ShipDesign, design_hash};
 use worldgen::math::DVec2;
 use worldgen::{Galaxy, GalaxyType, Node, StarSystem};
 
+use bims::sight::Stance;
+
+use crate::build::{self, BuildSite, SiteRefusal};
 use crate::crew::{Aboard, Residents};
 use crate::data;
 use crate::event::{Refusal, WorldEvent};
 use crate::frame::{self, Frame};
+use crate::mining::{self, MiningSite};
 use crate::speed::{self, Speed};
 use crate::station::{Berth, Station};
 
@@ -92,6 +96,37 @@ pub enum Command {
         slot: u32,
         resource: ResourceId,
         units: u32,
+    },
+    /// Mark a rock tile at the mining site to be mined, or unmark a marked
+    /// one — `(x, y)` in the ship's design tiles, where the site's rocks
+    /// are. A command because the crew work to the marks and every
+    /// player's ship has to agree about which rocks are wanted.
+    MarkRock {
+        slot: u32,
+        x: i32,
+        y: i32,
+    },
+    /// Take every mark off.
+    ClearMarks {
+        slot: u32,
+    },
+    /// Lay out a part to be built: a construction site at `origin`, turned
+    /// by `rotation`, for the crew to carry the materials to and put
+    /// together — see [`crate::build`]. A command because the crew work to
+    /// the sites and every player's ship has to agree about what is being
+    /// built where. Refused while the ship is not at rest, and where the
+    /// part would not go.
+    PlaceSite {
+        slot: u32,
+        kind: PartKind,
+        origin: (u32, u32),
+        rotation: Rotation,
+    },
+    /// Take a site away again. Whatever was carried to it was only ever
+    /// spoken for and is the hold's again.
+    CancelSite {
+        slot: u32,
+        site: u32,
     },
 }
 
@@ -297,6 +332,11 @@ pub struct World {
     /// at a time — the nearest. A derelict's room has nobody in it. See
     /// [`crate::crew`].
     pub residents: Option<Residents>,
+    /// The ship's power over its live networks, worked out from the parts
+    /// once per change to them — `on_ship_changed` — rather than once a
+    /// step: it is a union-find over every tile of the grid, and the
+    /// parts change when something is built and not otherwise.
+    power_budget: shipdesign::PowerBudget,
     /// What the crew have seen, shared between all of them and never
     /// forgotten. Sorted, so a checksum over it means something.
     pub discovered: Vec<Node>,
@@ -315,6 +355,30 @@ pub struct World {
     pub health: Vec<health::HealthState>,
     /// One per player, in slot order. The world runs at the slowest of them.
     pub speed_requests: Vec<Speed>,
+    /// The asteroids about every belt the ship has held station at, one
+    /// site a belt in belt order, laid out the first time the ship came
+    /// to rest there and kept — a mined tile stays mined. See
+    /// [`crate::mining`].
+    pub sites: Vec<MiningSite>,
+    /// Bumped every time a site's rocks change, so the room rebuilds its
+    /// outside grid then and only then.
+    pub site_version: u64,
+    /// What the walk under way has mined so far — rock, ore, galvum — to
+    /// be said all at once when the Bim comes back in.
+    walk_tally: (u32, u32, u32),
+    /// The parts laid out to be built and not built yet, in the order they
+    /// were laid out — which is the order the crew take them in. See
+    /// [`crate::build`]. In `world_checksum` whole.
+    pub builds: Vec<BuildSite>,
+    /// The next site's id. Only ever climbs, like a part's.
+    pub next_site: u32,
+    /// The station the crew set out from: the one place they are at home,
+    /// and friendly unless it is on the list below.
+    pub home: u32,
+    /// The stations whose people are enemies, sorted by id. Nothing puts a
+    /// station here but [`World::set_hostile`] — the `combat` command, so
+    /// far — and everywhere else is neutral. See [`World::stance`].
+    pub hostile: Vec<u32>,
 }
 
 impl World {
@@ -376,12 +440,20 @@ impl World {
             aboard,
             stations,
             residents: None,
+            power_budget: shipdesign::power_budget(&design_for_charge),
             discovered: Vec::new(),
             craft_targets: [0; CARGO_SLOTS],
             health: vec![health::HealthState::new(); players as usize],
             // Everybody starts at real time. Anything else would have the
             // world already moving before the first player had looked at it.
             speed_requests: vec![Speed::Real; players as usize],
+            sites: Vec::new(),
+            site_version: 0,
+            walk_tally: (0, 0, 0),
+            builds: Vec::new(),
+            next_site: 1,
+            home: station_id,
+            hostile: Vec::new(),
         };
 
         // The whole system, charted. The crew picked this dock off the
@@ -447,6 +519,7 @@ impl World {
         self.discover_along(was, now, &mut events);
         self.settle_frame(&mut events);
         self.settle_residents();
+        self.settle_site();
 
         // 5. Crew: the room's own update, aboard, on this clock. Bims live
         //    in ship-design coordinates and the ship's position, rotation and
@@ -471,12 +544,22 @@ impl World {
         self.aboard.room.set_craft_orders(orders);
         let eva = self.eva_offer();
         self.aboard.room.set_eva(eva);
+        //    And the construction sites, what each still wants, and who may
+        //    go out to one beyond the hull. What the room did about them is
+        //    read in stage 7.
+        let builds = self.build_orders();
+        let suit_ok = self.suit_ok();
+        self.aboard.room.set_build_orders(builds, suit_ok);
         self.aboard.step();
         if let Some(residents) = &mut self.residents {
             residents.aboard.step();
         }
+        self.visit(&mut events);
         for recipe in self.aboard.room.take_crafted() {
             self.finish_craft(recipe, &mut events);
+        }
+        for at in self.aboard.room.take_mined() {
+            self.finish_tile(at);
         }
         for _ in 0..self.aboard.room.take_walks() {
             self.finish_walk(&mut events);
@@ -488,9 +571,23 @@ impl World {
         //    draws — nothing aboard reads it yet.
         self.run_power();
 
-        // 7. Construction. Empty. What goes here builds and pulls apart
-        //    through `shipdesign::materials`, out of what is aboard, and asks
-        //    `World::can_modify_part` before it touches anything.
+        // 7. Construction: what the crew did at the sites this step — a load
+        //    taken off a shelf, a load put down, a load given up, a part put
+        //    together — moved through the hold. Building goes through
+        //    `shipdesign::materials`, out of what is aboard, and asks
+        //    `World::can_modify_part` first. See `crate::build`.
+        for (site, resource, units) in self.aboard.room.take_picked() {
+            self.finish_pick(site, resource, units);
+        }
+        for site in self.aboard.room.take_dropped() {
+            self.finish_drop(site);
+        }
+        for site in self.aboard.room.take_returned() {
+            self.finish_return(site);
+        }
+        for site in self.aboard.room.take_built() {
+            self.finish_build(site, &mut events);
+        }
 
         // 8. Health and radiation: each crew member's body, dosed while it
         //    is outside in a suit and sheltered otherwise. The design's
@@ -510,7 +607,11 @@ impl World {
             | Command::SetSpeed { slot, .. }
             | Command::Buy { slot, .. }
             | Command::Sell { slot, .. }
-            | Command::SetCraftTarget { slot, .. } => slot,
+            | Command::SetCraftTarget { slot, .. }
+            | Command::MarkRock { slot, .. }
+            | Command::ClearMarks { slot }
+            | Command::PlaceSite { slot, .. }
+            | Command::CancelSite { slot, .. } => slot,
         };
 
         match command {
@@ -541,6 +642,15 @@ impl World {
             Command::SetCraftTarget {
                 resource, units, ..
             } => self.set_craft_target(resource, units),
+            Command::MarkRock { x, y, .. } => self.mark_rock(x, y),
+            Command::ClearMarks { .. } => self.clear_marks(),
+            Command::PlaceSite {
+                kind,
+                origin,
+                rotation,
+                ..
+            } => self.place_site(slot, kind, origin, rotation, events),
+            Command::CancelSite { site, .. } => self.cancel_site(slot, site, events),
         }
     }
 
@@ -726,6 +836,13 @@ impl World {
             });
             return;
         }
+        // The ship does not move while it is built on — see `crate::build`.
+        // Asked of a ship at rest only: one already under way is being
+        // redirected, and nothing is built on it in the meantime anyway.
+        if self.at_rest() && self.under_construction() {
+            events.push(refused(slot, Refusal::UnderConstruction));
+            return;
+        }
 
         match self.ship.state.clone() {
             ShipState::Travelling { plan, departed } => {
@@ -823,6 +940,7 @@ impl World {
                     departed: self.clock_minutes,
                 };
                 self.unjoin_rooms();
+                self.leave_site(events);
                 events.push(WorldEvent::Departed { slot });
             }
             Err(error) => {
@@ -914,11 +1032,14 @@ impl World {
         self.join_rooms(id, berth);
     }
 
-    /// Docked: the ship's room and the station's become one, so the crew
-    /// can walk through the airlocks. See [`crate::docking`]. The station
-    /// keeps a room of its own with nobody in it, for its pictures — the
-    /// joined room draws the ship's fixtures and everybody's bunks, and the
-    /// station's galley is only furniture in it.
+    /// Docked: the ship's room and the station's become one deck, so the
+    /// crew can walk through the airlocks. See [`crate::docking`]. The
+    /// station's people are **not** in it: they keep their own room, laid
+    /// out on the station's design with the station's galley, heads, bunks
+    /// and benches for fixtures, and go on living there on their own
+    /// timetable, under their own manager. The joined room is the ship's
+    /// fixtures and the ship's crew, with the station's deck to walk on and
+    /// the station's fixtures as furniture to walk round.
     fn join_rooms(&mut self, id: u32, berth: Berth) {
         let Some(station) = self.station(id) else {
             return;
@@ -936,12 +1057,13 @@ impl World {
             station.residents(),
             station.map_seed,
         );
-        // The residents: out of the station's room if it is open, or fresh
-        // at their bunks if the ship arrived faster than the room opened.
+        // The residents' room: the one already open, or opened now if the
+        // ship arrived faster than the room did.
         let residents = match self.residents.take() {
-            Some(residents) if residents.station == id => residents.take(),
-            _ => Residents::open(id, &design, count, seed, self.clock_minutes).take(),
+            Some(residents) if residents.station == id => residents,
+            _ => Residents::open(id, &design, count, seed, self.clock_minutes),
         };
+        self.drop_loads();
         let ship_seed = self.galaxy_seed ^ self.steps;
         let crew = std::mem::replace(&mut self.aboard, Aboard::new(&self.ship.design, 1, 0))
             .room
@@ -951,31 +1073,149 @@ impl World {
             &self.ship.design,
             &design,
             crew,
-            residents,
             ship_seed,
             self.clock_minutes,
         );
-        let mut kept = Residents::open(id, &design, 0, seed, self.clock_minutes);
-        // Its doors are the joined room's to draw — those are the ones with
-        // people walking through them, and a second picture of each in a
-        // state of its own would be a door in two states at once.
-        kept.aboard.room.set_doors_drawn(false);
-        self.residents = Some(kept);
+        let mut residents = residents;
+        // Its doors are the joined room's to draw — one picture of each,
+        // in one state — and the joined room is told where the residents
+        // are every step (`visit`) so its doors open for them too.
+        residents.aboard.room.set_doors_drawn(false);
+        // And its fog is the joined room's, over both decks: this room
+        // draws none, and its people only where the crew can see them.
+        residents.aboard.room.set_fog(bims::sight::Fog::None);
+        self.residents = Some(residents);
+        self.apply_stances();
+    }
+
+    /// Whose a station is, to the crew: home is friendly, a station on the
+    /// hostile list is hostile, and everywhere else is neutral.
+    pub fn stance(&self, station: u32) -> Stance {
+        if self.hostile.binary_search(&station).is_ok() {
+            Stance::Hostile
+        } else if station == self.home {
+            Stance::Friendly
+        } else {
+            Stance::Neutral
+        }
+    }
+
+    /// Make a station's people enemies, or not. The rooms that are open
+    /// on it are told at once.
+    pub fn set_hostile(&mut self, station: u32, hostile: bool) {
+        match (self.hostile.binary_search(&station), hostile) {
+            (Err(i), true) => self.hostile.insert(i, station),
+            (Ok(i), false) => {
+                self.hostile.remove(i);
+            }
+            _ => {}
+        }
+        self.apply_stances();
+    }
+
+    /// Tell every room open on a station whose it is: the residents' room
+    /// its own stance, for its fog and the ring under each of its people,
+    /// and the joined deck which of its tiles are the station's. Asked
+    /// whenever a room opens or a stance changes.
+    fn apply_stances(&mut self) {
+        let docked = self.ship.state.station();
+        let ashore = self.residents.as_ref().map(|r| self.stance(r.station));
+        if let (Some(residents), Some(stance)) = (&mut self.residents, ashore) {
+            residents.aboard.room.set_stance(stance);
+            residents
+                .aboard
+                .room
+                .set_hostile_bodies(stance == Stance::Hostile);
+        }
+        let foreign = match (self.aboard.station_box, docked) {
+            (Some((lo, hi)), Some(station)) if self.aboard.is_joined() => Some((
+                bims::math::Rect::from_corners(
+                    bims::math::vec2(lo.x as f32, lo.y as f32),
+                    bims::math::vec2(hi.x as f32, hi.y as f32),
+                ),
+                self.stance(station),
+            )),
+            _ => None,
+        };
+        match foreign {
+            Some((rect, stance)) => self.aboard.room.set_foreign(Some(rect), stance),
+            None => self.aboard.room.set_foreign(None, Stance::Neutral),
+        }
+    }
+
+    /// Docked, the residents walk about in their own room and the joined
+    /// room draws the doors: it is told where they are, in its own units,
+    /// so a door opens for a resident walking through it the way it does
+    /// for the crew. Once a step, after both rooms have moved.
+    fn visit(&mut self, events: &mut Vec<WorldEvent>) {
+        if !self.aboard.is_joined() {
+            return;
+        }
+        let visitors: Vec<DVec2> = match &self.residents {
+            Some(residents) => (0..residents.aboard.count())
+                .map(|who| residents.aboard.position(who))
+                .collect(),
+            None => Vec::new(),
+        };
+        self.aboard.visit(&visitors);
+        // And which of them the crew can see, for their own room to draw.
+        // Off the last trace, which is a frame's rather than a step's —
+        // nobody crosses a bulkhead in a sixtieth of a minute.
+        let seen = self.aboard.seen(&visitors);
+        if let Some(residents) = &mut self.residents {
+            residents.aboard.room.set_seen(&seen);
+        }
+        // The fight: a hostile station's people are the crew's targets, at
+        // those same positions, and whatever landed on one since the last
+        // step comes off the body it belongs to. The rooms are two, so the
+        // shot is fired in one and the wound is in the other.
+        let hostile = self
+            .residents
+            .as_ref()
+            .is_some_and(|r| self.stance(r.station) == Stance::Hostile);
+        let hits = self.aboard.room.take_hits();
+        let Some(residents) = self.residents.as_mut().filter(|_| hostile) else {
+            self.aboard.room.set_hostiles(Vec::new());
+            return;
+        };
+        let room = &mut residents.aboard.room;
+        for (who, damage) in hits {
+            if who >= room.crew_count() as usize || !room.is_alive(who) {
+                continue;
+            }
+            let before = room.health(who);
+            room.wound(who, damage);
+            if before > 0.0 && room.health(who) <= 0.0 {
+                events.push(WorldEvent::EnemyDown {
+                    station: residents.station,
+                    who: who as u32,
+                });
+            }
+        }
+        let alive: Vec<bool> = (0..room.crew_count())
+            .map(|who| room.is_alive(who as usize) && room.health(who as usize) > 0.0)
+            .collect();
+        let targets = self.aboard.hostiles(&visitors, &alive);
+        self.aboard.room.set_hostiles(targets);
     }
 
     /// Under way again: the ship's room is the ship's alone. The residents
-    /// are let go — the station's room reopens with them at their bunks
-    /// while the ship is still within range, which is the same forgetting
-    /// as flying out of range and back.
+    /// were in their own room throughout and go on in it, drawing their
+    /// own doors again, until the ship is out of range.
     fn unjoin_rooms(&mut self) {
         if !self.aboard.is_joined() {
             return;
         }
+        // A room taken apart drops every errand, a load in somebody's arms
+        // with it: whatever was on its way to a site is the hold's again.
+        self.drop_loads();
         let seed = self.galaxy_seed ^ self.steps;
         let old = std::mem::replace(&mut self.aboard, Aboard::new(&self.ship.design, 1, 0));
-        let (aboard, _residents) = old.unjoined(&self.ship.design, seed, self.clock_minutes);
-        self.aboard = aboard;
-        self.residents = None;
+        self.aboard = old.unjoined(&self.ship.design, seed, self.clock_minutes);
+        if let Some(residents) = &mut self.residents {
+            residents.aboard.room.set_doors_drawn(true);
+            residents.aboard.room.set_fog(bims::sight::Fog::All);
+        }
     }
 
     /// The nearest station, and how far the ship is from its hull.
@@ -1029,6 +1269,9 @@ impl World {
                 seed,
                 self.clock_minutes,
             ));
+            // Whose it is: its fog is black for a stranger's, and its
+            // people are ringed for an enemy's.
+            self.apply_stances();
         }
     }
 
@@ -1096,7 +1339,8 @@ impl World {
         // A battery taken off takes what was in it; one put on arrives
         // empty. Either way the charge cannot exceed what is there to hold
         // it.
-        let storage = shipdesign::power_budget(&self.ship.design).storage;
+        self.power_budget = shipdesign::power_budget(&self.ship.design);
+        let storage = self.power_budget.storage;
         if self.ship.charge > storage {
             self.ship.charge = storage;
         }
@@ -1112,7 +1356,7 @@ impl World {
     /// have drawn was never there to take. The clamp at nought *is* the
     /// brownout.
     fn run_power(&mut self) {
-        let budget = shipdesign::power_budget(&self.ship.design);
+        let budget = self.power_budget;
         let net = (budget.supply - budget.draw) * data::STEP_MINUTES;
         self.ship.charge = (self.ship.charge + net).clamp(0.0, budget.storage);
     }
@@ -1132,14 +1376,15 @@ impl World {
     }
 
     /// Whether one of `recipe` could be made out of the hold right now:
-    /// every input aboard, and room in the output's class for the output
-    /// once the inputs are out of it.
+    /// every input aboard and not spoken for by a construction site, and
+    /// room in the output's class for the output once the inputs are out
+    /// of it.
     fn can_make(&self, recipe: &shipdesign::Recipe) -> bool {
         let design = &self.ship.design;
         let inputs_aboard = recipe
             .inputs
             .iter()
-            .all(|&(id, units)| design.carrying(id) >= units);
+            .all(|&(id, units)| self.free(id) >= units);
         let class = storage(recipe.output.0);
         let freed: u32 = recipe
             .inputs
@@ -1205,14 +1450,313 @@ impl World {
         events.push(WorldEvent::Crafted { recipe });
     }
 
+    // --- building -------------------------------------------------------------
+
+    /// Whether the ship is standing still: docked, or holding station.
+    /// The only time a site may be laid out or worked — see
+    /// [`crate::build`].
+    pub fn at_rest(&self) -> bool {
+        matches!(
+            self.ship.state,
+            ShipState::Docked { .. } | ShipState::Holding
+        )
+    }
+
+    /// Whether anything is being built: a site with something carried to
+    /// it, or a Bim on the way to one. What refuses a Confirm — the ship
+    /// does not move while it is built on.
+    pub fn under_construction(&self) -> bool {
+        self.builds.iter().any(|s| s.begun()) || self.aboard.room.building_under_way()
+    }
+
+    /// Units of `resource` the sites have spoken for, delivered or in
+    /// somebody's arms.
+    pub fn reserved(&self, resource: ResourceId) -> u32 {
+        self.builds
+            .iter()
+            .fold(0u32, |sum, s| sum.saturating_add(s.reserved(resource)))
+    }
+
+    /// Units of `resource` aboard that nothing has claimed: what may be
+    /// sold, smelted, or carried to another site. Every hand that reaches
+    /// for the hold asks this rather than the raw count.
+    pub fn free(&self, resource: ResourceId) -> u32 {
+        self.ship
+            .design
+            .carrying(resource)
+            .saturating_sub(self.reserved(resource))
+    }
+
+    pub fn site(&self, id: u32) -> Option<&BuildSite> {
+        self.builds.iter().find(|s| s.id == id)
+    }
+
+    /// The design with every pending site already on it, in order, each
+    /// that will go. What a new site is checked against, so a wall laid
+    /// out on deck that is itself laid out goes: the deck will be there by
+    /// the time the wall is built, since the crew take the sites in order.
+    fn design_with_sites(&self) -> ShipDesign {
+        let free = shipdesign::Budget::new(Money::MAX);
+        let mut design = self.ship.design.clone();
+        for site in &self.builds {
+            if let Ok(next) = shipdesign::apply(&design, &free, site.edit()) {
+                design = next;
+            }
+        }
+        design
+    }
+
+    /// Whether a site for `kind` at `origin` turned `rotation` may be laid
+    /// out: the ship at rest, the part going where the rules say it may on
+    /// the ship as it will be once the pending sites are built, and the
+    /// ship as it would then be raising no error the ship does not raise
+    /// already — a wall across the spot the hob is worked from is a crew
+    /// that starve in front of it, and the design phase would have refused
+    /// it too. `Err` is why: a refusal, or the code of the first new fault
+    /// as [`crate::event::Refusal::WontFit`] with `issue` set.
+    pub fn can_place_site(
+        &self,
+        kind: PartKind,
+        origin: (u32, u32),
+        rotation: Rotation,
+    ) -> Result<(), SiteRefusal> {
+        if !self.at_rest() {
+            return Err(SiteRefusal::UnderWay);
+        }
+        let site = BuildSite::new(0, kind, origin, rotation);
+        let before = self.design_with_sites();
+        let after =
+            match shipdesign::apply(&before, &shipdesign::Budget::new(Money::MAX), site.edit()) {
+                Ok(after) => after,
+                Err(why) => return Err(SiteRefusal::WontFit(why.code())),
+            };
+        let crew = self.ship.crew_count;
+        let errors = |design: &ShipDesign| -> Vec<u32> {
+            shipdesign::validate(design, crew)
+                .into_iter()
+                .filter(|i| i.severity == shipdesign::Severity::Error)
+                .map(|i| i.code)
+                .collect()
+        };
+        let already = errors(&before);
+        if let Some(&code) = errors(&after).iter().find(|c| !already.contains(c)) {
+            return Err(SiteRefusal::Fault(code));
+        }
+        Ok(())
+    }
+
+    fn place_site(
+        &mut self,
+        slot: u32,
+        kind: PartKind,
+        origin: (u32, u32),
+        rotation: Rotation,
+        events: &mut Vec<WorldEvent>,
+    ) {
+        match self.can_place_site(kind, origin, rotation) {
+            Ok(()) => {}
+            Err(SiteRefusal::UnderWay) => {
+                events.push(refused(slot, Refusal::UnderWay));
+                return;
+            }
+            Err(SiteRefusal::WontFit(_) | SiteRefusal::Fault(_)) => {
+                events.push(refused(slot, Refusal::WontFit));
+                return;
+            }
+        }
+        let id = self.next_site;
+        self.next_site += 1;
+        self.builds.push(BuildSite::new(id, kind, origin, rotation));
+        events.push(WorldEvent::SitePlaced { site: id, kind });
+    }
+
+    fn cancel_site(&mut self, slot: u32, site: u32, events: &mut Vec<WorldEvent>) {
+        let Some(at) = self.builds.iter().position(|s| s.id == site) else {
+            events.push(refused(slot, Refusal::NoSuchSite));
+            return;
+        };
+        let gone = self.builds.remove(at);
+        events.push(WorldEvent::SiteCancelled { kind: gone.kind });
+    }
+
+    /// Every site, one order each, this step: what it still wants carried
+    /// — the first material short of its recipe that the hold has any free
+    /// of, a load of it — and, with everything there, that it is to be
+    /// built and how long that takes. A site wanting neither is still on
+    /// the list — a load may be on its way to it, and the walk has to find
+    /// it — with nothing to start at it: short of something the hold has
+    /// none of, or a wall on deck that is itself still a site, waiting for
+    /// the deck. Nothing while the ship is not at rest. In the order the
+    /// sites were laid out, which is what the room picks from.
+    pub fn build_orders(&self) -> Vec<bims::game::Build> {
+        if !self.at_rest() {
+            return Vec::new();
+        }
+        let design = &self.ship.design;
+        let free = shipdesign::Budget::new(Money::MAX);
+        let t = shipdesign::TILE as f32;
+        let offset = self.aboard.offset;
+        self.builds
+            .iter()
+            .map(|site| {
+                let recipe = site.recipe(design);
+                let tiles = site
+                    .tiles()
+                    .into_iter()
+                    .map(|(x, y)| {
+                        bims::math::Rect::from_min_size(
+                            bims::math::vec2(
+                                x as f32 * t + offset.x as f32,
+                                y as f32 * t + offset.y as f32,
+                            ),
+                            bims::math::vec2(t, t),
+                        )
+                    })
+                    .collect();
+                let haul = recipe.iter().find_map(|&(id, _)| {
+                    let short = site.short(design, id);
+                    let load = short.min(data::HAUL_LOAD).min(self.free(id));
+                    (load > 0).then_some((id as u32, load))
+                });
+                // Only a part that would go down now is worth putting
+                // together: one on a site that is itself waiting is not,
+                // and nor is one `can_modify_part` says to leave.
+                let buildable = site.stocked(design)
+                    && self.can_modify_part(site.kind)
+                    && shipdesign::apply(design, &free, site.edit()).is_ok();
+                let minutes = if buildable {
+                    build::build_minutes(&recipe) as f32
+                } else {
+                    0.0
+                };
+                bims::game::Build {
+                    site: site.id,
+                    tiles,
+                    haul,
+                    minutes,
+                }
+            })
+            .collect()
+    }
+
+    /// Who may put a suit on and go out to a site beyond the hull, by
+    /// slot: alive, under the dose limit — the same line a walk to mine
+    /// draws — and a suit aboard to wear. The airlock itself is the room's
+    /// to find.
+    fn suit_ok(&self) -> Vec<bool> {
+        let suit = self.ship.design.carrying(ResourceId::Suit) > 0;
+        self.health
+            .iter()
+            .map(|h| suit && !h.dead && h.dose < data::EVA_DOSE_LIMIT)
+            .collect()
+    }
+
+    /// A Bim took a load off a shelf for `site`: as much of `units` of
+    /// `resource` as the hold has free is now in its arms — spoken for, not
+    /// moved. A site that has gone gets nothing, and the Bim carries a
+    /// crate of nothing to nowhere, which the room sorts out at its next
+    /// walk.
+    fn finish_pick(&mut self, site: u32, resource: u32, units: u32) {
+        let Some(resource) = ResourceId::ALL.get(resource as usize).copied() else {
+            return;
+        };
+        let got = units.min(self.free(resource));
+        if let Some(site) = self.builds.iter_mut().find(|s| s.id == site) {
+            site.carrying[resource as usize] += got;
+        }
+    }
+
+    /// A load arrived: everything in transit to the site is delivered.
+    fn finish_drop(&mut self, site: u32) {
+        if let Some(site) = self.builds.iter_mut().find(|s| s.id == site) {
+            for (delivered, carrying) in site.delivered.iter_mut().zip(site.carrying.iter_mut()) {
+                *delivered += core::mem::take(carrying);
+            }
+        }
+    }
+
+    /// A load was given up short of the site: the hold's again.
+    fn finish_return(&mut self, site: u32) {
+        if let Some(site) = self.builds.iter_mut().find(|s| s.id == site) {
+            site.carrying = [0; CARGO_SLOTS];
+        }
+    }
+
+    /// Every load in somebody's arms, the hold's again: for a room being
+    /// taken apart, whose crew drop everything they were carrying without
+    /// the room saying so.
+    fn drop_loads(&mut self) {
+        for site in &mut self.builds {
+            site.carrying = [0; CARGO_SLOTS];
+        }
+    }
+
+    /// A Bim put a site together: the part goes down and its recipe comes
+    /// out of the hold in one go, if the rules still allow it — the deck
+    /// under it may have been laid out and cancelled since, the metal sold
+    /// — and an event either way. The site is finished with whatever
+    /// happened: a part that will not go is a site to lay out again, not
+    /// one to stand at for ever. The room is laid out again under the
+    /// crew with the part in it.
+    fn finish_build(&mut self, site: u32, events: &mut Vec<WorldEvent>) {
+        let Some(at) = self.builds.iter().position(|s| s.id == site) else {
+            return;
+        };
+        let site = self.builds.remove(at);
+        if !self.can_modify_part(site.kind) {
+            events.push(WorldEvent::BuildLost { kind: site.kind });
+            return;
+        }
+        // The reservation is this site's own, and it is gone with the site
+        // — so the recipe is checked against what is free of *every other*
+        // site's claim, which is what `free` says now that it is out of
+        // the list.
+        let recipe = site.recipe(&self.ship.design);
+        if recipe.iter().any(|&(id, units)| self.free(id) < units) {
+            events.push(WorldEvent::BuildLost { kind: site.kind });
+            return;
+        }
+        match shipdesign::build_from_cargo(&self.ship.design, site.edit()) {
+            Ok(next) => {
+                self.ship.design = next;
+                self.on_ship_changed();
+                self.relayout_room();
+                events.push(WorldEvent::Built { kind: site.kind });
+            }
+            Err(_) => events.push(WorldEvent::BuildLost { kind: site.kind }),
+        }
+    }
+
+    /// The room aboard laid out again on the ship as it now is — with the
+    /// station's deck joined to it, if it is docked — keeping the crew,
+    /// their errands and everything else that is state. See
+    /// `Aboard::relayout`. The residents' room is the station's and is
+    /// not touched.
+    fn relayout_room(&mut self) {
+        let joined = self.ship.state.alongside().and_then(|id| {
+            let berth = self.berth_at(id)?;
+            let station = self.station(id)?;
+            crate::docking::join(
+                &self.ship.design,
+                self.ship.dynamics.centre_of_mass,
+                station,
+                &berth,
+            )
+        });
+        match joined {
+            Some(joined) if self.aboard.is_joined() => self.aboard.relayout(joined.design),
+            _ => {
+                let design = self.ship.design.clone();
+                self.aboard.relayout(design);
+            }
+        }
+    }
+
     // --- a walk outside ------------------------------------------------------
 
-    /// The belt the ship is holding at, if it is: at rest in the local
-    /// frame of a body of that kind.
-    fn belt_alongside(&self) -> Option<&worldgen::Body> {
-        if self.ship.state != ShipState::Holding {
-            return None;
-        }
+    /// The belt whose frame the ship is in, if it is in one, whatever the
+    /// ship is doing there.
+    fn belt_here(&self) -> Option<&worldgen::Body> {
         let Frame::Local(Node::Body(id)) = self.ship.frame else {
             return None;
         };
@@ -1221,11 +1765,102 @@ impl World {
             .filter(|b| b.kind == worldgen::BodyKind::AsteroidBelt)
     }
 
-    /// Whether the crew may walk outside this step, and who: holding at a
-    /// belt, a port to go out by, a suit in the locker, room on the shelf
-    /// for what comes back, and each Bim's dose under the limit.
+    /// The belt the ship is holding at, if it is: at rest in the local
+    /// frame of a body of that kind.
+    fn belt_alongside(&self) -> Option<&worldgen::Body> {
+        if self.ship.state != ShipState::Holding {
+            return None;
+        }
+        self.belt_here()
+    }
+
+    /// The hull's tiles, as the box they span — `(x0, y0, x1, y1)`,
+    /// inclusive — which is what a mining site is laid out clear of.
+    fn hull_box(&self) -> (i32, i32, i32, i32) {
+        let mut span: Option<(i32, i32, i32, i32)> = None;
+        for part in &self.ship.design.parts {
+            for (x, y) in part.tiles() {
+                let (x, y) = (x as i32, y as i32);
+                span = Some(match span {
+                    None => (x, y, x, y),
+                    Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                });
+            }
+        }
+        span.unwrap_or((0, 0, 0, 0))
+    }
+
+    /// Stage 4's last word: the ship has come to rest at a belt it has not
+    /// held at before, so the asteroids about it are laid out now, in the
+    /// frame it is holding in. Once per belt — coming back finds the site
+    /// as it was left, mined tiles and all.
+    fn settle_site(&mut self) {
+        let Some(belt) = self.belt_alongside().map(|b| b.id) else {
+            return;
+        };
+        if self.sites.iter().any(|s| s.belt == belt) {
+            return;
+        }
+        let site = MiningSite::generate(self.galaxy_seed, self.star_id, belt, self.hull_box());
+        let at = self.sites.partition_point(|s| s.belt < belt);
+        self.sites.insert(at, site);
+        self.site_version += 1;
+    }
+
+    /// The mining site the ship is holding at, if it is at one.
+    pub fn site_here(&self) -> Option<&MiningSite> {
+        let belt = self.belt_alongside()?.id;
+        self.sites.iter().find(|s| s.belt == belt)
+    }
+
+    fn site_here_mut(&mut self) -> Option<&mut MiningSite> {
+        let belt = self.belt_alongside()?.id;
+        self.sites.iter_mut().find(|s| s.belt == belt)
+    }
+
+    /// Mark a rock at the site to be mined, or take the mark off again.
+    /// Nothing happens away from a site or off a rock.
+    fn mark_rock(&mut self, x: i32, y: i32) {
+        if let Some(site) = self.site_here_mut()
+            && site.toggle_mark(x, y)
+        {
+            self.site_version += 1;
+        }
+    }
+
+    fn clear_marks(&mut self) {
+        if let Some(site) = self.site_here_mut() {
+            site.clear_marks();
+            self.site_version += 1;
+        }
+    }
+
+    /// The ship is leaving the site: the marks come off, since an order to
+    /// mine a rock is an order about a place the ship is at, whoever is out
+    /// there is brought back in through the door, and what that walk had
+    /// mined so far is said now, since it will not come in on its own.
+    fn leave_site(&mut self, events: &mut Vec<WorldEvent>) {
+        // By the frame, not by the state: the ship is under way by the time
+        // this is asked.
+        if let Some(belt) = self.belt_here().map(|b| b.id)
+            && let Some(site) = self.sites.iter_mut().find(|s| s.belt == belt)
+        {
+            site.clear_marks();
+            self.site_version += 1;
+        }
+        self.aboard.room.recall_outside();
+        if self.walk_tally != (0, 0, 0) {
+            self.finish_walk(events);
+        }
+    }
+
+    /// Whether the crew may walk outside this step, and to what: holding at
+    /// a belt with rocks marked, a port to go out by, a suit in the locker,
+    /// room on the shelf for what comes back, and each Bim's dose under the
+    /// limit. The room is handed every rock as something to walk round and
+    /// the marked ones as where to go, in the ship's own units.
     pub fn eva_offer(&self) -> Option<bims::game::Eva> {
-        self.belt_alongside()?;
+        let site = self.site_here()?;
         shipdesign::dock::port(&self.ship.design)?;
         if self.ship.design.carrying(ResourceId::Suit) == 0 {
             return None;
@@ -1234,36 +1869,65 @@ impl World {
         if design.stored(Storage::Shelf) >= design.capacity(Storage::Shelf) {
             return None;
         }
+        let t = shipdesign::TILE as f32;
+        let middle = |(x, y): (i32, i32)| {
+            let (mx, my) = mining::tile_middle(x, y);
+            bims::math::vec2(mx as f32, my as f32)
+        };
         Some(bims::game::Eva {
-            minutes: data::EVA_MINUTES as f32,
             allowed: self
                 .health
                 .iter()
                 .map(|h| !h.dead && h.dose < data::EVA_DOSE_LIMIT)
                 .collect(),
+            targets: site.targets().map(middle).collect(),
+            rocks: site
+                .tiles
+                .iter()
+                .map(|r| {
+                    let m = middle((r.x, r.y));
+                    bims::math::Rect::from_min_size(
+                        bims::math::vec2(m.x - t / 2.0, m.y - t / 2.0),
+                        bims::math::vec2(t, t),
+                    )
+                })
+                .collect(),
+            version: self.site_version,
+            tile_minutes: data::MINE_TILE_MINUTES as f32,
         })
     }
 
-    /// A walk came back: what the belt yields, onto the shelf, as much of
-    /// it as fits. The belt is read now rather than when the walk began,
-    /// since a ship that set off mid-walk would have brought the walker in
-    /// through `abandon` and counted no walk.
-    fn finish_walk(&mut self, events: &mut Vec<WorldEvent>) {
-        let Some(belt) = self.belt_alongside() else {
-            events.push(WorldEvent::Mined { ore: 0, galvum: 0 });
+    /// A Bim mined the rock whose middle is `at`, in the ship's units: the
+    /// tile comes out of the site and what it yields goes on the shelf, as
+    /// much of it as fits, counted towards what the walk brings back. A
+    /// tile that is not there — mined by the other one, or the ship has
+    /// left — yields nothing.
+    fn finish_tile(&mut self, at: (f32, f32)) {
+        let t = shipdesign::TILE as f32;
+        let (x, y) = ((at.0 / t).floor() as i32, (at.1 / t).floor() as i32);
+        let Some(kind) = self.site_here_mut().and_then(|s| s.mine(x, y)) else {
             return;
         };
-        let yield_ = worldgen::belt_yield(self.galaxy_seed, self.star_id, belt.id, belt.kind);
+        self.site_version += 1;
+        let (resource, units) = mining::yield_of(kind);
         let design = &mut self.ship.design;
         let room = design
             .capacity(Storage::Shelf)
             .saturating_sub(design.stored(Storage::Shelf));
-        let ore = yield_.ore.min(room);
-        design.cargo[ResourceId::Ore as usize] += ore;
-        let galvum = if yield_.galvum && room > ore { 1 } else { 0 };
-        design.cargo[ResourceId::Galvum as usize] += galvum;
+        let got = units.min(room);
+        design.cargo[resource as usize] += got;
+        match kind {
+            mining::Rock::Stone => self.walk_tally.0 += got,
+            mining::Rock::Iron => self.walk_tally.1 += got,
+            mining::Rock::Galvum => self.walk_tally.2 += got,
+        }
         self.on_ship_changed();
-        events.push(WorldEvent::Mined { ore, galvum });
+    }
+
+    /// A walk came back: say what it brought, all at once.
+    fn finish_walk(&mut self, events: &mut Vec<WorldEvent>) {
+        let (rock, ore, galvum) = core::mem::take(&mut self.walk_tally);
+        events.push(WorldEvent::Mined { rock, ore, galvum });
     }
 
     /// Stage 8: each body, one step on, exposed while outside in the suit
@@ -1289,7 +1953,7 @@ impl World {
 
     /// The ship's power, as the crew would read it off a panel.
     pub fn power(&self) -> Power {
-        let budget = shipdesign::power_budget(&self.ship.design);
+        let budget = self.power_budget;
         Power {
             supply: budget.supply,
             draw: budget.draw,
@@ -1400,6 +2064,17 @@ impl World {
             .send_to(slot as usize, bims::math::vec2(at.x as f32, at.y as f32))
     }
 
+    /// Lift the post [`World::order_to_helm`] set, so that player's crew
+    /// member goes back about its errands. The page's Confirm walks the
+    /// Bim to the seat, gives the order once it is there, and then lets it
+    /// go — under way the helm is a job the room hands out itself. A room
+    /// order like the walk: it crosses no seam.
+    pub fn stand_down(&mut self, slot: u32) {
+        if slot < self.aboard.crew_count() {
+            self.aboard.room.stand_down(slot as usize);
+        }
+    }
+
     /// Stand that player's crew member at the helm this instant. For the
     /// probes: a test of a trip is not a test of the walk to the seat.
     pub fn man_the_helm_for_probe(&mut self, slot: u32) {
@@ -1421,7 +2096,7 @@ impl World {
         };
         if !self
             .station(station)
-            .is_some_and(|s| s.kind.sells(resource))
+            .is_some_and(|s| s.stock.sells(resource))
         {
             events.push(refused(slot, Refusal::NotSoldHere));
             return;
@@ -1457,8 +2132,9 @@ impl World {
         }
         // Reserved fuel is not the crew's to sell. It is spoken for by a trip
         // that has been committed to, and selling it would leave the ship
-        // short somewhere there is nothing to buy.
-        let aboard = self.ship.design.carrying(resource);
+        // short somewhere there is nothing to buy. Nor is what the
+        // construction sites have claimed — see `free`.
+        let aboard = self.free(resource);
         let sellable = if resource == ResourceId::Fuel {
             aboard.saturating_sub(self.ship.reserved_fuel)
         } else {
@@ -1604,7 +2280,7 @@ impl World {
     ///
     /// The page needs it to turn a frame into steps, and it is a fact about
     /// the world rather than about the browser — a 60 written down in
-    /// `web/ship.js` would be a second copy of [`data::STEP_MINUTES`] waiting
+    /// `crates/app/src/screens/game.rs` would be a second copy of [`data::STEP_MINUTES`] waiting
     /// to disagree with the first.
     pub fn steps_per_second(&self) -> f64 {
         time::MINUTES_PER_SECOND / data::STEP_MINUTES
@@ -1645,6 +2321,21 @@ impl World {
     pub fn plan(&self) -> Option<&Plan> {
         match &self.ship.state {
             ShipState::Travelling { plan, .. } => Some(plan),
+            _ => None,
+        }
+    }
+
+    /// How far through the trip the ship is, for a caller that wants to
+    /// draw a bar: minutes flown and minutes the whole trip takes, the
+    /// first never past the second. `None` when not `Travelling` — the
+    /// push-off and the docking are their own states with their own
+    /// lengths, and a stop is a trip too.
+    pub fn trip_progress(&self) -> Option<(f64, f64)> {
+        match &self.ship.state {
+            ShipState::Travelling { plan, departed } => {
+                let total = plan.duration();
+                Some(((self.clock_minutes - departed).clamp(0.0, total), total))
+            }
             _ => None,
         }
     }
@@ -1696,6 +2387,69 @@ impl World {
         let mut events = Vec::new();
         self.settle_frame(&mut events);
         events
+    }
+
+    /// Stage a fight: the station the ship is tied to made hostile, the
+    /// first crew member recruited and stood just inside its port, and the
+    /// first of its people stood a few tiles down the corridor from them —
+    /// the state a fight is looked at in without walking the station for
+    /// one. `false`, and nothing moved, away from a berth or at a station
+    /// nobody lives on. For probes and for `BIMS_FIGHT` in the app.
+    pub fn stage_fight_for_probe(&mut self) -> bool {
+        let Some(station) = self.ship.state.station() else {
+            return false;
+        };
+        let Some(ashore) = self.aboard.ashore else {
+            return false;
+        };
+        let Some(port) = self.station(station).and_then(|s| s.port()) else {
+            return false;
+        };
+        if !self
+            .residents
+            .as_ref()
+            .is_some_and(|r| r.aboard.count() > 0)
+        {
+            return false;
+        }
+        self.set_hostile(station, true);
+        // The resident: four tiles further in than the crew member, along
+        // the corridor the port opens onto, in the station's own frame.
+        let reach = (data::ASHORE_TILES + 4.0) * shipdesign::TILE as f64;
+        let there = bims::math::vec2(
+            (port.centre.0 - port.outward.0 as f64 * reach) as f32,
+            (port.centre.1 - port.outward.1 as f64 * reach) as f32,
+        );
+        if let Some(residents) = &mut self.residents {
+            residents.aboard.room.put_for_probe(0, there);
+        }
+        // The crew member: just inside the station's door, under orders.
+        self.aboard
+            .room
+            .put_for_probe(0, bims::math::vec2(ashore.x as f32, ashore.y as f32));
+        self.aboard.room.recruit_for_probe(0, true);
+        true
+    }
+
+    /// Let go of the dock and hold at the first belt of this system, its
+    /// site laid out — the state a walk outside is looked at in. `false`,
+    /// and nothing moved, when the system has no belt. For probes and for
+    /// `BIMS_AT_BELT` in the app.
+    pub fn hold_at_belt_for_probe(&mut self) -> bool {
+        let Some(belt) = self
+            .system
+            .bodies
+            .iter()
+            .find(|b| b.kind == worldgen::BodyKind::AsteroidBelt)
+            .cloned()
+        else {
+            return false;
+        };
+        self.undock_for_probe();
+        self.put_for_probe(belt.position);
+        self.settle_frame_for_probe();
+        self.settle_site();
+        true
     }
 }
 

@@ -41,9 +41,8 @@ pub enum Phase {
     /// has it. Editing is locked; from here on the world's clock is running.
     ///
     /// The code is unchanged from when this was called `Finished` and meant
-    /// "waiting for a play phase that does not exist yet" — it crosses the
-    /// wasm boundary, and `PHASE_DESIGN` in `web/ship.js` is the other half of
-    /// the pair.
+    /// "waiting for a play phase that does not exist yet"; `Session::designing`
+    /// and `Session::playing` are the two questions asked of it.
     Game = 1,
 }
 
@@ -84,10 +83,10 @@ pub struct Editor {
     /// The issue whose tiles are being pointed at in the list, if any.
     pub focus: Option<usize>,
 
-    /// What kind of station the design phase is docked at, which is what
-    /// decides what the goods panel will sell — `StationKind::sells`. `None`
-    /// is a page with no spawn, which never reaches a Buy anyway.
-    pub market: Option<worldgen::StationKind>,
+    /// The shelf of the station the design phase is docked at, which is
+    /// what decides what the goods panel will sell — `worldgen::Stock`.
+    /// `None` is a page with no spawn, which never reaches a Buy anyway.
+    pub market: Option<worldgen::Stock>,
 
     issues: Vec<Issue>,
     /// Where the outside can see in. Kept beside the issues and refreshed
@@ -96,6 +95,11 @@ pub struct Editor {
     /// frame for nothing.
     exposed: ExposureMap,
     hash: u64,
+    /// The room's fixtures, drawn by the room on the design as it stands —
+    /// `paint::fixtures`. Kept with the issues for the same reason: laying
+    /// the room out is a walk of the whole design, and not one to do sixty
+    /// times a second for a ship nobody is changing.
+    fixtures: crate::draw::DrawList,
 }
 
 impl Editor {
@@ -120,6 +124,7 @@ impl Editor {
         let hash = design_hash(&design);
         let issues = validate(&design, players);
         let exposed = exposure(&design);
+        let fixtures = crate::paint::fixtures(&design);
         Editor {
             design,
             budget: Budget::new(starting_pool(money_per_bim, players).unwrap_or(0)),
@@ -137,6 +142,7 @@ impl Editor {
             issues,
             exposed,
             hash,
+            fixtures,
         }
     }
 
@@ -144,7 +150,7 @@ impl Editor {
     /// phase with no market sells nothing, and the harness's bare page is
     /// the only one of those.
     pub fn sells(&self, resource: ResourceId) -> bool {
-        self.market.is_some_and(|kind| kind.sells(resource))
+        self.market.is_some_and(|stock| stock.sells(resource))
     }
 
     /// An editor whose design phase is already over: `design` laid out,
@@ -196,6 +202,12 @@ impl Editor {
         shipdesign::has_errors(&self.issues)
     }
 
+    /// The room's fixtures on the design as it stands, as the room draws
+    /// them. See `paint::fixtures`.
+    pub fn fixtures(&self) -> &[f32] {
+        self.fixtures.shapes()
+    }
+
     /// Everything derived from the design, redone. Called after an edit and
     /// nowhere else — validation walks the whole grid and is not something to
     /// do sixty times a second for a ship nobody is changing.
@@ -203,6 +215,7 @@ impl Editor {
         self.hash = design_hash(&self.design);
         self.issues = validate(&self.design, self.players);
         self.exposed = exposure(&self.design);
+        self.fixtures = crate::paint::fixtures(&self.design);
         self.focus = None;
         // A ship that has changed is a ship nobody has accepted.
         for slot in &mut self.accepts {
@@ -211,7 +224,7 @@ impl Editor {
     }
 
     /// Put a part down. `0` means it took; anything else is an
-    /// [`EditError`] code, which `EDIT_LINES` in `web/ship.js` turns into a
+    /// [`EditError`] code, which `EDIT_LINES` in `crates/app/src/names.rs` turns into a
     /// sentence.
     ///
     /// This is the only door in. The host reaches it through `net`, so that

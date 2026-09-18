@@ -7,7 +7,7 @@
 //! simulation and one loop: [`World::step`].
 //!
 //! It renders nothing and exports nothing to wasm. `crates/ship` draws it and
-//! `web/ship.js` steps it, the same way `crates/shipdesign` is the rules and
+//! `crates/app` steps it, the same way `crates/shipdesign` is the rules and
 //! `crates/ship` is the pointer. The split is not tidiness — a native server
 //! has to run exactly this loop and reach exactly the same world, and two
 //! implementations of it would be two different games.
@@ -46,6 +46,7 @@
 //! with it ([`docking`]); but a station is still not a solid a trip has to
 //! fly round.
 
+pub mod build;
 pub mod checksum;
 pub mod crew;
 pub mod data;
@@ -53,13 +54,16 @@ pub mod docking;
 pub mod event;
 pub mod fixture;
 pub mod frame;
+pub mod mining;
 pub mod speed;
 pub mod station;
 pub mod world;
 
+pub use build::{BuildSite, SiteRefusal};
 pub use checksum::world_checksum;
 pub use event::{Refusal, WorldEvent};
 pub use frame::Frame;
+pub use mining::{MiningSite, Rock, RockTile};
 pub use speed::Speed;
 pub use station::{Berth, Station};
 pub use world::{

@@ -45,9 +45,13 @@ pub enum Purpose {
     StationContents = 6,
     /// The seed handed on to the map generator that will build an interior.
     MapSeed = 7,
-    /// What a belt yields to a walk outside. Its own stream, so adding it
-    /// moved nothing else in the galaxy.
+    /// What a belt yielded to a walk outside, when the outside was a clock
+    /// rather than a place. Retired with the mining site; the number is
+    /// kept, since a purpose is never renumbered.
     BeltYield = 8,
+    /// The asteroids about a belt: how many, their shapes, and which of
+    /// them carry galvum. Its own stream, like the yield.
+    MiningSite = 9,
 }
 
 /// SplitMix64's finalizer. Takes a counter-ish input to a well-spread output,

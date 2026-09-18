@@ -1,23 +1,15 @@
-# The ship designer and the game it starts: the wasm both halves of
-# web/ship.html run in.
+# The ship designer and the game it starts: `Session`, which is the design
+# phase and then the world, with the cameras and the painters that turn
+# either into a buffer of shapes for `crates/app` to draw.
 #
-# It is the second cdylib in the workspace, and it is a *second* one rather
-# than another export on the room's because the two are different pages. The
-# room is `web/index.html` + `web/bims.js` and knows nothing about menus or
-# tiles; this is `web/ship.html` + `web/ship.js` and has no `Game` in it at
-# all. Nothing here imports the room's modules.
-#
-# The rules live next door in `shipdesign`, which renders nothing and can be
-# compiled by a native server. What is here is everything that is only true of
-# a browser: a camera, a pointer, a ghost under it, and a buffer of shapes.
+# The rules live next door in `shipdesign` and `world`, which render nothing
+# and can be compiled by a native server. What is here is everything that is
+# only true of a screen: a camera, a pointer, a ghost under it, and shapes.
 [package]
 name = "ship"
 version = "0.1.0"
 edition = "2024"
-description = "The ship design phase — wasm exports, input and the draw buffer for web/ship.html"
-
-[lib]
-crate-type = ["cdylib", "rlib"]
+description = "The ship design phase and the game it starts — the session, the cameras and the painters"
 
 [dependencies]
 bims = { path = "../game" }

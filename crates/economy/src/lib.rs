@@ -168,6 +168,14 @@ pub fn trade_price(resource: ResourceId) -> Money {
         ResourceId::Handgun => 1_500,
         ResourceId::Vest => 800,
         ResourceId::Medkit => 120,
+        // What an asteroid is skinned in. Nobody sells it and a station pays
+        // next to nothing for it; it is what a pick brings back on the way to
+        // the ore.
+        ResourceId::Rock => 2,
+        // A crop, cheaper than the vegetables it grows beside; and what the
+        // drug lab rolls two of into a dressing for a wound.
+        ResourceId::Fibre => 6,
+        ResourceId::Bandage => 40,
     }
 }
 
@@ -187,12 +195,16 @@ pub fn storage(resource: ResourceId) -> Storage {
         | ResourceId::Metal
         | ResourceId::Components
         | ResourceId::Galvum
-        | ResourceId::Emitter => Storage::Shelf,
+        | ResourceId::Emitter
+        | ResourceId::Rock => Storage::Shelf,
         ResourceId::Fuel => Storage::FuelTank,
-        ResourceId::Vegetable | ResourceId::Tofu => Storage::ColdStore,
-        ResourceId::Suit | ResourceId::Handgun | ResourceId::Vest | ResourceId::Medkit => {
-            Storage::Locker
-        }
+        // Fibre is a crop, and goes cold with the rest of the harvest.
+        ResourceId::Vegetable | ResourceId::Tofu | ResourceId::Fibre => Storage::ColdStore,
+        ResourceId::Suit
+        | ResourceId::Handgun
+        | ResourceId::Vest
+        | ResourceId::Medkit
+        | ResourceId::Bandage => Storage::Locker,
     }
 }
 
@@ -268,6 +280,9 @@ mod tests {
         assert_eq!(trade_price(ResourceId::Handgun), 1_500);
         assert_eq!(trade_price(ResourceId::Vest), 800);
         assert_eq!(trade_price(ResourceId::Medkit), 120);
+        assert_eq!(trade_price(ResourceId::Rock), 2);
+        assert_eq!(trade_price(ResourceId::Fibre), 6);
+        assert_eq!(trade_price(ResourceId::Bandage), 40);
 
         assert_eq!(storage(ResourceId::Ore), Storage::Shelf);
         assert_eq!(storage(ResourceId::Metal), Storage::Shelf);
@@ -281,6 +296,9 @@ mod tests {
         assert_eq!(storage(ResourceId::Handgun), Storage::Locker);
         assert_eq!(storage(ResourceId::Vest), Storage::Locker);
         assert_eq!(storage(ResourceId::Medkit), Storage::Locker);
+        assert_eq!(storage(ResourceId::Rock), Storage::Shelf);
+        assert_eq!(storage(ResourceId::Fibre), Storage::ColdStore);
+        assert_eq!(storage(ResourceId::Bandage), Storage::Locker);
     }
 
     #[test]

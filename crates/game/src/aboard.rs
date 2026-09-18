@@ -29,6 +29,7 @@
 //! | shower | the shower, used from its use spot; a solid the ship draws |
 //! | smelter, workbench | a bench each, used from its use spot; solids the ship draws |
 //! | suit locker | where a walk outside starts and ends; a solid the ship draws |
+//! | shelf | where a load for a construction site is picked up; a solid the ship draws |
 //! | airlock (the port) | the gangway inside it and the spot outside it, for a walk |
 //! | door | a powered door — see `crate::door` |
 //! | anything else a body cannot walk through | a solid the nav grid avoids |
@@ -55,7 +56,7 @@ use shipdesign::{PartKind, PlacedPart, ShipDesign};
 
 use crate::game::Game;
 use crate::math::{Rect, Vec2, vec2};
-use crate::room::{Bench, Layout};
+use crate::room::{Bench, Layout, More, Still};
 
 /// How far inside the port the gangway is, in tiles — the same distance the
 /// world sends the crew back to before casting off — and how far beyond the
@@ -129,12 +130,18 @@ pub fn layout_of(design: &ShipDesign) -> Layout {
         .unwrap_or_else(|| tile_rect(0, 0));
     let grid = design.grid();
     let mut others: Vec<Rect> = Vec::new();
+    // And what stops a line of sight: the same tiles, and the parts that
+    // do, below. A door is not here — see `doors`.
+    let mut opaque: Vec<Rect> = Vec::new();
+    let mut extras: Vec<(Still, Rect)> = Vec::new();
+    let mut more = More::default();
     let (x0, y0) = ((interior.min.x / t) as i32, (interior.min.y / t) as i32);
     let (x1, y1) = ((interior.max.x / t) as i32, (interior.max.y / t) as i32);
     for y in y0..y1 {
         for x in x0..x1 {
             if grid.get(Layer::Floor, (x, y)) == 0 {
                 others.push(tile_rect(x, y));
+                opaque.push(tile_rect(x, y));
             }
         }
     }
@@ -149,22 +156,23 @@ pub fn layout_of(design: &ShipDesign) -> Layout {
     // middle of the run it read as off the end rather than off the side,
     // which laid the trays across the bay in six strips instead of one a
     // tile. North when there is no bay to ask.
+    let side_of = |p: &PlacedPart| {
+        let spot = *p.use_spots().first()?;
+        let at = tile_middle(spot.0, spot.1);
+        let frame = part_rect(p);
+        Some(if at.x < frame.min.x {
+            vec2(-1.0, 0.0)
+        } else if at.x > frame.max.x {
+            vec2(1.0, 0.0)
+        } else if at.y > frame.max.y {
+            vec2(0.0, 1.0)
+        } else {
+            vec2(0.0, -1.0)
+        })
+    };
     let bay_side = of_kind(design, PartKind::HydroBay)
         .first()
-        .and_then(|p| {
-            let spot = *p.use_spots().first()?;
-            let at = tile_middle(spot.0, spot.1);
-            let frame = part_rect(p);
-            Some(if at.x < frame.min.x {
-                vec2(-1.0, 0.0)
-            } else if at.x > frame.max.x {
-                vec2(1.0, 0.0)
-            } else if at.y > frame.max.y {
-                vec2(0.0, 1.0)
-            } else {
-                vec2(0.0, -1.0)
-            })
-        })
+        .and_then(|p| side_of(p))
         .unwrap_or(vec2(0.0, -1.0));
 
     // The doors, each with the way its leaves slide: along the bulkhead it
@@ -194,6 +202,9 @@ pub fn layout_of(design: &ShipDesign) -> Layout {
     ];
     for part in &design.parts {
         let def = part.kind.def();
+        if def.layer == Layer::Object && def.blocks_sight() && part.kind != PartKind::Door {
+            opaque.push(part_rect(part));
+        }
         if def.layer != Layer::Object || !def.blocks_movement {
             continue;
         }
@@ -205,19 +216,57 @@ pub fn layout_of(design: &ShipDesign) -> Layout {
             continue;
         }
         others.push(part_rect(part));
+        // A second of a kind the room has a picture for is drawn as one,
+        // standing still. A chair and a bunk are never here: the room
+        // seats and beds every one of them.
+        // Every second of a kind the room works is worked too: the rest
+        // go to the room as fixtures of their own, and a chain picks the
+        // closest free one. A table and a basin are the two the room only
+        // draws — every chair is seated already, and a basin is a heads'
+        // half, paired with the toilet nearest it below.
+        let frame = part_rect(part);
+        match part.kind {
+            PartKind::Worktop => more.worktops.push(frame),
+            PartKind::Hob => more.hobs.push(frame),
+            PartKind::ColdStore => more.fridges.push(frame),
+            PartKind::Dishwasher => more.dishwashers.push(frame),
+            PartKind::BroomLocker => more.lockers.push(frame),
+            PartKind::Table => extras.push((Still::Table, frame)),
+            PartKind::Basin => extras.push((Still::Basin, frame)),
+            PartKind::HydroBay => {
+                let side = side_of(part).unwrap_or(vec2(0.0, -1.0));
+                more.bays.push((frame, side));
+            }
+            PartKind::Toilet => {
+                let nearest = of_kind(design, PartKind::Basin)
+                    .iter()
+                    .map(|b| part_rect(b))
+                    .min_by(|a, b| {
+                        let da = (a.center() - frame.center()).len();
+                        let db = (b.center() - frame.center()).len();
+                        da.partial_cmp(&db).unwrap_or(core::cmp::Ordering::Equal)
+                    })
+                    .unwrap_or(frame);
+                more.heads.push((frame, nearest));
+            }
+            _ => {}
+        }
     }
 
     // The shower: its footprint, and the spot in front of it off its use
     // spot, turned with the part. It stays a solid in `others` — the room
     // has no picture for it and the ship painter draws it.
-    let shower = of_kind(design, PartKind::Shower).first().map(|p| {
+    let shower_of = |p: &PlacedPart| {
         let at = p
             .use_spots()
             .first()
             .map(|&(x, y)| tile_middle(x, y))
             .unwrap_or_else(|| part_rect(p).center() + vec2(0.0, t));
         (part_rect(p), at)
-    });
+    };
+    let showers = of_kind(design, PartKind::Shower);
+    let shower = showers.first().map(|p| shower_of(p));
+    more.showers = showers.iter().skip(1).map(|p| shower_of(p)).collect();
 
     let helm = first(PartKind::Helm);
 
@@ -233,6 +282,19 @@ pub fn layout_of(design: &ShipDesign) -> Layout {
             .unwrap_or_else(|| part_rect(p).center() + vec2(0.0, t));
         (part_rect(p), at)
     });
+    // The hull, every tile of it, for the grid a body walks outside on: a
+    // suited Bim goes round the ship, not through it. Structure is the
+    // layer everything stands on, so a tile with structure is a tile of
+    // the ship.
+    let area = design.build_area as i32;
+    let mut hull: Vec<Rect> = Vec::new();
+    for y in 0..area {
+        for x in 0..area {
+            if grid.get(Layer::Structure, (x, y)) != 0 {
+                hull.push(tile_rect(x, y));
+            }
+        }
+    }
     let port = shipdesign::dock::port(design);
     let gangway = port.as_ref().map(|p| {
         vec2(
@@ -247,6 +309,21 @@ pub fn layout_of(design: &ShipDesign) -> Layout {
             face.1 as f32 + p.outward.1 as f32 * OUTSIDE_TILES * t,
         )
     });
+
+    // The shelves, every one, worked from its use spot like a bench: where
+    // a load of materials for a construction site is picked up. Solids in
+    // `others` still; the ship draws them.
+    let shelves: Vec<(Rect, Vec2)> = of_kind(design, PartKind::Shelf)
+        .iter()
+        .map(|p| {
+            let at = p
+                .use_spots()
+                .first()
+                .map(|&(x, y)| tile_middle(x, y))
+                .unwrap_or_else(|| part_rect(p).center() + vec2(0.0, t));
+            (part_rect(p), at)
+        })
+        .collect();
 
     // The workstations: every part with a recipe made at it, in id order,
     // each with the spot in front of it off its use spot, turned with the
@@ -293,16 +370,27 @@ pub fn layout_of(design: &ShipDesign) -> Layout {
         suit_locker,
         gangway,
         outside,
+        hull,
+        shelves,
         others,
+        opaque,
+        more,
+        extras,
         doors,
+        airlocks: of_kind(design, PartKind::Airlock)
+            .iter()
+            .map(|p| part_rect(p))
+            .collect(),
         veg: design.carrying(ResourceId::Vegetable),
         tofu: design.carrying(ResourceId::Tofu),
     }
 }
 
 /// The parts the room draws for itself — its fixtures — so a painter that
-/// draws the rest of the ship as tiles can leave these to the room. The
-/// same rule as `layout_of`: the first of each mapped kind, by id.
+/// draws the rest of the ship as tiles can leave these to the room. Every
+/// part of every kind the room has a picture for: the first of each is
+/// the fixture the room works, and the rest it draws standing still
+/// (`Layout::extras`), so none of them is a coloured block.
 pub fn drawn_by_room(design: &ShipDesign) -> Vec<u32> {
     [
         PartKind::Door,
@@ -320,16 +408,8 @@ pub fn drawn_by_room(design: &ShipDesign) -> Vec<u32> {
     ]
     .into_iter()
     .flat_map(|kind| {
-        let parts = of_kind(design, kind);
-        // Every chair and every bunk is drawn — the room has a berth and a seat
-        // for each of them; of everything else, the first.
-        let drawn = match kind {
-            PartKind::Chair | PartKind::Bunk | PartKind::Door => usize::MAX,
-            _ => 1,
-        };
-        parts
+        of_kind(design, kind)
             .into_iter()
-            .take(drawn)
             .map(|p| p.id)
             .collect::<Vec<_>>()
     })

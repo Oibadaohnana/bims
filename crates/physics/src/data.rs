@@ -72,12 +72,23 @@ pub enum ResourceId {
     /// A medkit: vegetables and a component at the armoury. What treating a
     /// wound will use up.
     Medkit = 11,
+    /// Bare rock: what the outside of an asteroid is made of, and what a
+    /// pick brings back from it until it is through to the ore. Worth
+    /// almost nothing and heavier than anything — a shelf of it is ballast.
+    Rock = 12,
+    /// A crop: what the bay grows besides food, and what a bandage is made
+    /// of. Stowed cold like the vegetables, because it is a plant, and
+    /// worth nothing to anyone but a drug lab.
+    Fibre = 13,
+    /// A bandage: two fibre at the drug lab. What closes a wound; used up
+    /// on the wound. Kept in a locker like the medkit.
+    Bandage = 14,
 }
 
 impl ResourceId {
     /// Every resource, in discriminant order. `ALL[id as usize].id == id`,
     /// which [`ResourceId::def`] relies on and [`defs_are_sound`] checks.
-    pub const ALL: [ResourceId; 12] = [
+    pub const ALL: [ResourceId; 15] = [
         ResourceId::Ore,
         ResourceId::Metal,
         ResourceId::Fuel,
@@ -90,6 +101,9 @@ impl ResourceId {
         ResourceId::Handgun,
         ResourceId::Vest,
         ResourceId::Medkit,
+        ResourceId::Rock,
+        ResourceId::Fibre,
+        ResourceId::Bandage,
     ];
 
     pub fn def(self) -> &'static ResourceDef {
@@ -123,7 +137,7 @@ pub struct ResourceDef {
 /// components and the galvum that went into it, and four components weigh
 /// one metal. `shipdesign::recipes` is where those recipes live and
 /// `every_recipe_conserves_mass` there is what holds this column to them.
-pub static RESOURCES: [ResourceDef; 12] = [
+pub static RESOURCES: [ResourceDef; 15] = [
     ResourceDef {
         id: ResourceId::Ore,
         mass_per_unit: 10.0,
@@ -172,6 +186,21 @@ pub static RESOURCES: [ResourceDef; 12] = [
     ResourceDef {
         id: ResourceId::Medkit,
         mass_per_unit: 3.0,
+    },
+    ResourceDef {
+        id: ResourceId::Rock,
+        mass_per_unit: 12.0,
+    },
+    // A crop, a bale of it to the unit, so heavier than a crate of
+    // vegetables; and the bandage weighs the two fibre it is rolled from,
+    // like everything else that is made.
+    ResourceDef {
+        id: ResourceId::Fibre,
+        mass_per_unit: 1.0,
+    },
+    ResourceDef {
+        id: ResourceId::Bandage,
+        mass_per_unit: 2.0,
     },
 ];
 

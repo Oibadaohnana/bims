@@ -56,17 +56,17 @@
 //! - **Every walkable tile must actually be walkable.** [`validate`] passes a
 //!   design whose use spots are all reachable over floor tiles whose object
 //!   layer is empty or non-blocking — including one-tile corridors and
-//!   doorways. The room's navigation **cannot be assumed to satisfy that**:
-//!   it is a 10-unit cell grid that inflates every obstacle by a
-//!   `BODY_MARGIN` of 23, over a tile that is [`parts::TILE`] = 52 units. A
-//!   one-tile gap between two walls is 52 units wide with 23 taken off each
-//!   side, which leaves 6 — and the centre-sampled line test in `nav.rs`
-//!   already has a known failure mode at exactly that kind of clearance (see
-//!   CLAUDE.md, "A route the body cannot hold to"). So **stage 5 needs
-//!   tile-based navigation, or has to prove the existing one walks every
-//!   design this crate accepts**. Accepting a ship the crew cannot cross
-//!   would look like a Bim frozen mid-errand, which is the hardest failure
-//!   aboard to diagnose.
+//!   doorways. The room's navigation keeps that for a **straight** one-tile
+//!   gap: aboard, its grid is phased to the tiles (`Nav::tiled`, five cells
+//!   a tile), so a tile's middle is always a cell's middle and the six
+//!   units a `BODY_MARGIN` of 23 leaves down a 52-unit gap always hold a
+//!   cell — `a_one_tile_corridor_can_be_walked` in `crates/world` pins it,
+//!   corner included. What it still does **not** walk is a gap that is
+//!   only diagonal: two solids touching corner to corner one tile apart
+//!   leave nothing a body of that radius fits through, and [`validate`]
+//!   does not know that. Accepting a ship the crew cannot cross would look
+//!   like a Bim frozen mid-errand, which is the hardest failure aboard to
+//!   diagnose.
 //! - **A use spot is where a Bim stands to use a part.** Not where the part
 //!   is. The chain that walks to a cold store walks to one of
 //!   [`parts::use_spots`], and the design was validated on exactly that.
@@ -125,7 +125,7 @@ pub use dock::{Port, port};
 // for the sake of a type and two lookups.
 pub use economy::{Money, Storage, starting_pool, storage, trade_price, trade_value};
 pub use mass::{acceleration, hull_mass, ship_mass};
-pub use materials::{bound_materials, build_from_cargo, deconstruct_to_cargo};
+pub use materials::{bound_materials, build_from_cargo, deconstruct_to_cargo, recipe_for};
 pub use parts::{
     BATTERY_CHARGE, Layer, PartDef, PartKind, REACTOR_OUTPUT, Rotation, TILE, essential,
     is_diagonal, part_mass, solid_corner,

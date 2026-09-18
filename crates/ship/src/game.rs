@@ -8,7 +8,7 @@
 //! # The page drives the clock, and that is deliberate
 //!
 //! [`Game::step`] advances the world by exactly one step and nothing else
-//! decides how many of those happen. `web/ship.js` keeps an accumulator, works
+//! decides how many of those happen. `crates/app/src/screens/game.rs` keeps an accumulator, works
 //! out how many steps a frame is worth at the effective speed, and calls this
 //! that many times. Putting the accumulator in here would mean the wasm had an
 //! opinion about real time, which is the one thing it has no way to measure.
@@ -16,17 +16,17 @@
 //! # Commands are queued, not applied
 //!
 //! A command from the page is put on a list and handed to the **next** step.
-//! That is what makes the stamp `web/ship.js` puts on it mean something: a
+//! That is what makes the stamp `crates/app/src/screens/game.rs` puts on it mean something: a
 //! command applies at a step, the same step for everybody, and a transport
 //! that arrives late has something to compare against. Applying one the
 //! instant a button is pressed would work perfectly and would be impossible to
 //! wire a network into later.
 
 use flight::{PlanError, Target, angle};
-use shipdesign::parts::TILE;
+use shipdesign::parts::{PartKind, Rotation, TILE};
 use shipdesign::{Money, ShipDesign};
 use world::world::Command;
-use world::{Preview, Speed, World, WorldEvent};
+use world::{Preview, SiteRefusal, Speed, World, WorldEvent};
 use worldgen::GalaxyType;
 use worldgen::math::{DVec2, dvec2};
 
@@ -70,6 +70,22 @@ const AIRLOCK_EASE: f32 = 0.18;
 /// the map is first opened.
 const MAP_FIT: f32 = 0.8;
 
+/// What the ship view is drawn to show, over and above the ship: the tray's
+/// View tab. A view setting like `Game::head_up` — this window's own, read
+/// by the painter and by nothing that decides anything.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Overlay {
+    /// The ship as it is: the deck, the parts, the crew. The conduit under
+    /// the deck is not drawn, because at the game's scale a run through
+    /// every powered room is wiring over the picture.
+    #[default]
+    Plain,
+    /// Electricity: the conduit is drawn, and everything that makes, holds
+    /// or draws power is rung — lit if it is on a live network, warned if
+    /// it is not.
+    Electricity,
+}
+
 pub struct Game {
     pub world: World,
     pub mode: ViewMode,
@@ -98,10 +114,28 @@ pub struct Game {
     /// and nothing that decides anything reads this. Off by default, because
     /// a fixed sky is what makes a flip legible; see `camera.rs`.
     pub head_up: bool,
+    /// Whether the player is marking rocks: the Actions tab's Mine tool is
+    /// on, so a rock under the pointer is rung. A tool setting, this
+    /// window's own; a mark itself is a command and crosses the seam.
+    pub marking: bool,
+    /// What the ship view is showing over the ship — the tray's View tab.
+    /// A view setting like `head_up`, this window's own.
+    pub overlay: Overlay,
+    /// The part the player is about to lay out, and which way round: the
+    /// Build tab's tool, drawn as a blueprint under the pointer. A tool
+    /// setting, this window's own, like `marking`; the site itself is a
+    /// command and crosses the seam.
+    pub placing: Option<(PartKind, Rotation)>,
+    /// Whether the blueprint under the pointer would go, worked out once
+    /// per tile it is over rather than every frame — `validate` walks the
+    /// whole ship. `(kind, tile, rotation)` it was asked for, and the
+    /// answer.
+    ghost_check: Option<((PartKind, (i32, i32), Rotation), Result<(), SiteRefusal>)>,
     /// Whether the ship view follows the crew member the player steers, or
-    /// has been let go to be dragged anywhere — `Camera::set_loose`. On by
-    /// default; a view setting like `head_up`, this browser's own, and
-    /// nothing that decides anything reads it.
+    /// has been let go to be dragged anywhere — `Camera::set_loose`. Off by
+    /// default — the game opens on the whole ship, free to be dragged, and
+    /// `F` or the View panel tethers it; a view setting like `head_up`, this
+    /// window's own, and nothing that decides anything reads it.
     pub follow: bool,
     /// Frames drawn. What the exhaust flickers and the running lights blink
     /// off — a picture clock, counted by the render and by nothing that
@@ -148,19 +182,35 @@ impl Game {
             aimed: None,
             hover: None,
             head_up: false,
-            follow: true,
+            follow: false,
+            marking: false,
+            overlay: Overlay::default(),
+            placing: None,
+            ghost_check: None,
             frame: 0,
             airlock_ajar: 0.0,
             stars: Starfield::new(seed),
         };
         game.fit_ship();
         game.fit_map();
+        game.ship_view.set_loose(true);
         Some(game)
     }
 
     pub fn resize(&mut self, width: f32, height: f32) {
         self.ship_view.resize(width, height);
         self.map_view.resize(width, height);
+    }
+
+    /// The canvas is this big, and the views are to start again from it:
+    /// the whole hull in the ship view, everything found in the map. For a
+    /// host that only learns the canvas's size after the game has opened —
+    /// the desktop lays its panels out around the window it was given —
+    /// and wants the opening view the game would have had at that size.
+    pub fn fit(&mut self, width: f32, height: f32) {
+        self.resize(width, height);
+        self.fit_ship();
+        self.fit_map();
     }
 
     /// The camera the page should be painting through.
@@ -250,6 +300,18 @@ impl Game {
         self.stars.advance(velocity, self.world.clock_minutes);
     }
 
+    /// Put the crew member the player steers in the middle of the ship view
+    /// now, once, whatever the camera is doing: a tethered view has its
+    /// shove undone, a loose one is brought back to them and left loose.
+    pub fn centre_on_player(&mut self) {
+        let who = bims::bim::PLAYER as u32;
+        if who >= self.world.aboard.count() {
+            return;
+        }
+        let (x, y) = crate::world_paint::crew_on_screen(self, who);
+        self.ship_view.recentre(x, y);
+    }
+
     /// Follow the crew member the player steers, or stop: the ship view is
     /// let loose so a drag takes it anywhere, and tethered again it snaps
     /// back to them on the next frame.
@@ -335,8 +397,23 @@ impl Game {
     /// once; a step that produced nothing adds nothing.
     pub fn step(&mut self) {
         let commands = std::mem::take(&mut self.queued);
+        let (hash, sites, state) = (
+            self.world.design_hash(),
+            self.world.builds.len(),
+            self.world.ship.state.code(),
+        );
         let events = self.world.step(&commands);
         self.events.extend(events);
+        // The ship may have changed under a still pointer — a part built, a
+        // site laid out, the ship set off — and then the blueprint's answer
+        // is asked again. Only then: the answer is a validation of the
+        // whole ship, and at 24x this runs many times a frame.
+        if hash != self.world.design_hash()
+            || sites != self.world.builds.len()
+            || state != self.world.ship.state.code()
+        {
+            self.ghost_check = None;
+        }
     }
 
     /// Queue an order for the next step.
@@ -353,7 +430,7 @@ impl Game {
         self.queued.push(command);
     }
 
-    /// What step a command queued now will apply at. The stamp `web/ship.js`
+    /// What step a command queued now will apply at. The stamp `crates/app/src/screens/game.rs`
     /// puts on every message, and the thing a transport would compare.
     pub fn next_step(&self) -> u64 {
         self.world.steps + 1
@@ -446,6 +523,76 @@ impl Game {
     pub fn clear_preview(&mut self) {
         self.preview = None;
         self.aimed = None;
+    }
+
+    /// Whether the blueprint under the pointer would go where it is, and
+    /// why not if not — the world's `can_place_site`, asked once per tile
+    /// the pointer crosses and remembered, since it validates the whole
+    /// ship. `None` with no tool in hand or the pointer off the hull's
+    /// grid. The answer goes stale when the ship changes under a still
+    /// pointer, which `step` clears for.
+    pub fn ghost_check(&mut self) -> Option<Result<(), SiteRefusal>> {
+        let (kind, rotation) = self.placing?;
+        let tile = self.hover?;
+        let key = (kind, tile, rotation);
+        if let Some((asked, answer)) = self.ghost_check
+            && asked == key
+        {
+            return Some(answer);
+        }
+        let answer = if tile.0 < 0 || tile.1 < 0 {
+            Err(SiteRefusal::WontFit(
+                shipdesign::EditError::OutOfBounds.code(),
+            ))
+        } else {
+            self.world
+                .can_place_site(kind, (tile.0 as u32, tile.1 as u32), rotation)
+        };
+        self.ghost_check = Some((key, answer));
+        Some(answer)
+    }
+
+    /// The last answer, if it is about the tile the pointer is on now —
+    /// for a readout with no hand to ask with. A frame behind the pointer
+    /// at most.
+    pub fn ghost_answer(&self) -> Option<Result<(), SiteRefusal>> {
+        let (kind, rotation) = self.placing?;
+        let tile = self.hover?;
+        self.ghost_check
+            .as_ref()
+            .filter(|(asked, _)| *asked == (kind, tile, rotation))
+            .map(|(_, answer)| *answer)
+    }
+
+    /// Whether the last answer was that the blueprint would go — for the
+    /// painter, which has no hand to ask with; `Session::render` asks
+    /// first.
+    pub fn ghost_ok(&self) -> bool {
+        self.ghost_check
+            .as_ref()
+            .is_some_and(|(_, answer)| answer.is_ok())
+    }
+
+    /// Put the blueprint's tool in hand, or down, and turn it. The check
+    /// is forgotten with the tool.
+    pub fn set_placing(&mut self, placing: Option<(PartKind, Rotation)>) {
+        self.placing = placing;
+        self.ghost_check = None;
+    }
+
+    pub fn rotate_placing(&mut self) {
+        if let Some((kind, rotation)) = self.placing {
+            self.set_placing(Some((kind, rotation.next())));
+        }
+    }
+
+    /// The construction site under `tile`, if one is laid out over it.
+    pub fn site_at(&self, tile: (i32, i32)) -> Option<&world::BuildSite> {
+        if tile.0 < 0 || tile.1 < 0 {
+            return None;
+        }
+        let tile = (tile.0 as u32, tile.1 as u32);
+        self.world.builds.iter().find(|s| s.tiles().contains(&tile))
     }
 
     /// The speed this player has asked for.

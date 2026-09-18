@@ -42,7 +42,7 @@ use shipdesign::{Budget, Edit, Money, PartKind, Rotation, ShipDesign, apply};
 use worldgen::math::{DVec2, dvec2};
 use worldgen::rng::Rng;
 use worldgen::system::StationBlueprint;
-use worldgen::{Node, StarSystem, StationKind};
+use worldgen::{Node, StarSystem, StationKind, Stock};
 
 /// Layouts already built, by kind and seed. A layout is a pure function of
 /// the two, and building one is two thousand edits through `apply`, each of
@@ -97,6 +97,8 @@ pub struct Station {
     pub anchor: DVec2,
     /// The seed the residents' room is opened with.
     pub map_seed: u64,
+    /// What is on its shelves; `World::buy` asks it and nothing else does.
+    pub stock: Stock,
 }
 
 impl Station {
@@ -110,6 +112,7 @@ impl Station {
             anchor: at.sub(angle::rotate_design(dvec2(half, half), 0.0)),
             design,
             map_seed: blueprint.map_seed,
+            stock: blueprint.stock,
         }
     }
 

@@ -31,8 +31,14 @@ fn main() {
     }
     // Run to whatever the first argument asks for: "start" for a few frames
     // in, "bed" for the first moment somebody is asleep, "table" for the first
-    // moment somebody is at a meal.
+    // moment somebody is at a meal, "board" for the middle of a stew for the
+    // shelf — the vegetable in rounds on one side of the board and the tofu
+    // half cut on the other.
     let want = std::env::args().nth(1).unwrap_or_else(|| "start".into());
+    let board = want == "board";
+    if board {
+        game.set_target(manager::Stock::Stew, 1);
+    }
     // Sitting on the deck for want of anybody to talk to. Pinned forward and
     // re-pinned each frame, because the other one coming over for a word
     // would put the clock straight back to nothing.
@@ -53,6 +59,11 @@ fn main() {
         n += 1;
         if sulking {
             if game.broken_down_for_probe(bim::PLAYER) {
+                break;
+            }
+        } else if board {
+            let sides = game.board_for_probe();
+            if sides.iter().all(|c| !c.is_empty()) && sides[0].pieces >= 3 {
                 break;
             }
         } else if target == 0 && n >= 120 {
@@ -84,11 +95,7 @@ fn main() {
         }
     }
     eprintln!("frame {n}");
-    let shapes: Vec<f32> = {
-        let ptr = game.draw_ptr();
-        let len = game.draw_len();
-        unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec()
-    };
+    let shapes: Vec<f32> = game.shapes().to_vec();
 
     let stride = draw::STRIDE;
     println!(

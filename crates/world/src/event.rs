@@ -2,7 +2,7 @@
 //!
 //! The same arrangement as the room's diary and the designer's issue list, and
 //! for the same reason: **no strings cross the wasm boundary**, so an event is
-//! a code and a number or two, and `EVENT_LINES` in `web/ship.js` is where the
+//! a code and a number or two, and `EVENT_LINES` in `crates/app/src/names.rs` is where the
 //! sentences live. An event whose code has no line there is *dropped* from the
 //! page rather than shown as a placeholder, and what catches a missing one is
 //! the row count against `ship_event_count()`.
@@ -18,6 +18,7 @@
 
 use flight::PlanError;
 use physics::ResourceId;
+use shipdesign::PartKind;
 use worldgen::Node;
 
 use crate::frame::Frame;
@@ -64,15 +65,32 @@ pub enum WorldEvent {
     /// from the hold, or there was no longer room for the output. The
     /// labour is lost, and this says so.
     CraftLost { recipe: u32 },
-    /// A walk outside came back with `ore` units of ore, and `galvum` of
-    /// galvum, in the hold. Nought of both means the shelves were full.
-    Mined { ore: u32, galvum: u32 },
+    /// A walk outside came back with so much rock, ore and galvum on the
+    /// shelf. Nought of all three means it mined nothing, or the shelves
+    /// were full.
+    Mined { rock: u32, ore: u32, galvum: u32 },
     /// A crew member's body crossed a line — see `health::HealthEvent`.
     /// One code per health event, `who` as the value.
     Health {
         who: u32,
         event: health::HealthEvent,
     },
+    /// A construction site was laid out for a part of `kind`, and is
+    /// `site` from now on. See `crate::build`.
+    SitePlaced { site: u32, kind: PartKind },
+    /// A site was taken away again, nothing built.
+    SiteCancelled { kind: PartKind },
+    /// A Bim put a site together and the part is on the ship: its recipe
+    /// out of the hold, the part in.
+    Built { kind: PartKind },
+    /// A Bim put a site together and nothing was built: the materials had
+    /// gone from the hold, or the part would no longer go where it was
+    /// laid out. The site is gone with the labour, and this says so.
+    BuildLost { kind: PartKind },
+    /// One of a hostile station's people went down under the crew's fire.
+    /// See `bims::combat`, and `World::visit`, which is where a hit
+    /// crosses from the crew's room to theirs.
+    EnemyDown { station: u32, who: u32 },
 }
 
 /// Why a command did nothing.
@@ -109,6 +127,18 @@ pub enum Refusal {
     /// `worldgen::StationKind::sells`. Galvum is the outposts' alone, an
     /// emitter is nobody's, and a derelict has nobody to sell anything.
     NotSoldHere = 9,
+    /// A construction site laid out while the ship is not at rest. Nothing
+    /// is built on a ship that is moving — see `crate::build`.
+    UnderWay = 10,
+    /// A site the rules would not put there, or that would leave the ship
+    /// with a fault it has not got. `World::can_place_site` says which,
+    /// before anything is sent.
+    WontFit = 11,
+    /// A site that is not there: built, or cancelled already.
+    NoSuchSite = 12,
+    /// A Confirm while something is being built. The ship does not move
+    /// while it is built on: cancel the site, or let them finish.
+    UnderConstruction = 13,
 }
 
 impl Refusal {
@@ -142,6 +172,11 @@ impl WorldEvent {
             WorldEvent::Mined { .. } => 16,
             // 17 to 26: `HealthEvent` runs 1 to 10.
             WorldEvent::Health { event, .. } => 16 + event.code(),
+            WorldEvent::SitePlaced { .. } => 27,
+            WorldEvent::SiteCancelled { .. } => 28,
+            WorldEvent::Built { .. } => 29,
+            WorldEvent::BuildLost { .. } => 30,
+            WorldEvent::EnemyDown { .. } => 31,
         }
     }
 
@@ -156,8 +191,16 @@ impl WorldEvent {
             | WorldEvent::Undocking { slot } => slot as i64,
             WorldEvent::Docking { station } => station as i64,
             WorldEvent::Crafted { recipe } | WorldEvent::CraftLost { recipe } => recipe as i64,
-            WorldEvent::Mined { ore, galvum } => (ore + 100 * galvum) as i64,
+            WorldEvent::Mined { rock, ore, galvum } => {
+                (rock + 1_000 * ore + 1_000_000 * galvum) as i64
+            }
+            // The station in the thousands, the person in the units.
+            WorldEvent::EnemyDown { station, who } => (who + 1_000 * station) as i64,
             WorldEvent::Health { who, .. } => who as i64,
+            WorldEvent::SitePlaced { kind, .. }
+            | WorldEvent::SiteCancelled { kind }
+            | WorldEvent::Built { kind }
+            | WorldEvent::BuildLost { kind } => kind.code() as i64,
             WorldEvent::Arrived { station } => station.map(i64::from).unwrap_or(-1),
             WorldEvent::PlanFailed { error, .. } => error.code() as i64,
             WorldEvent::Discovered { node } => match node {

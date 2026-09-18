@@ -53,7 +53,7 @@ pub enum Severity {
 /// What is wrong.
 ///
 /// The discriminants cross the wasm boundary and index `ISSUE_LINES` in
-/// `web/ship.js`; they are written out and not renumbered. Errors are
+/// `crates/app/src/names.rs`; they are written out and not renumbered. Errors are
 /// numbered from 1 and warnings from 20, so the two never have to be told
 /// apart by arithmetic — but [`Issue::severity`] is what decides, not the
 /// range.
@@ -143,7 +143,7 @@ impl IssueCode {
 /// One fault, and where to point at it.
 ///
 /// `parts` and `tiles` are how the page shows it: the tiles get a highlight.
-/// Neither carries words — `ISSUE_LINES` in `web/ship.js` is where the
+/// Neither carries words — `ISSUE_LINES` in `crates/app/src/names.rs` is where the
 /// sentences live, the same way `MEMORY_LINES` holds the diary's.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Issue {

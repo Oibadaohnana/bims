@@ -19,7 +19,7 @@ use worldgen::Node;
 pub const STEP_MINUTES: f64 = time::MINUTES_PER_SECOND / 60.0;
 
 /// How fast the world will run. One constant, and raising it is not a change
-/// to this step — see the note on `MAX_STEPS_PER_FRAME` in `web/ship.js`,
+/// to this step — see the note on `MAX_STEPS_PER_FRAME` in `crates/app/src/screens/game.rs`,
 /// which has to move with it or the top of the range stops being reachable.
 pub const TOP_SPEED: u32 = 24;
 
@@ -67,6 +67,14 @@ pub const LOCAL_HYSTERESIS: f64 = 1.25;
 /// [`LOCAL_HYSTERESIS`] further.
 pub const RESIDENTS_RANGE: f64 = 50.0 * shipdesign::TILE as f64;
 
+/// What a station's people keep in their cold store, a head: the targets
+/// their own manager works to — the bay planted to keep the greens and the
+/// soy up, stew cooked ahead for the shelf. Theirs, not the crew's: the
+/// Management tab is the crew's own and reaches nobody ashore.
+pub const RESIDENT_VEG_EACH: u32 = 100;
+pub const RESIDENT_TOFU_EACH: u32 = 50;
+pub const RESIDENT_STEW_EACH: u32 = 2;
+
 /// How far out a station is drawn as a hull in the ship view rather than
 /// left to the map. Twice the local frame: far enough that a station comes
 /// into the picture as a speck and grows, rather than appearing.
@@ -96,9 +104,11 @@ pub const HELM_REACH: f64 = shipdesign::TILE as f64;
 /// ship's.
 pub const ASHORE_TILES: f64 = 2.5;
 
-/// How long one walk outside is, in game minutes: an hour and a half out
-/// there gathering ore, on top of the suit and the airlock either end.
-pub const EVA_MINUTES: f64 = 90.0;
+/// How long one tile of rock takes to mine, in game minutes, with the Bim
+/// standing beside it with a pick. A walk is as many of these as there are
+/// marked rocks it can get to, on top of the suit and the airlock either
+/// end and the walk out to each.
+pub const MINE_TILE_MINUTES: f64 = 12.0;
 
 /// What the suit lets through, as a multiplier on the open-air dose rate
 /// in `crates/health`: a quarter, so a walk is about twenty-two minutes'
@@ -124,3 +134,16 @@ pub const DEFAULT_SEED: u64 = 0x_5749_4e44_4f57_0001;
 /// not so much that money stops mattering. The game proper gets what the
 /// design phase left of the pool instead.
 pub const SIMULATION_MONEY: Money = 50_000;
+
+/// How long putting a part together takes, in game minutes: this much
+/// whatever it is, plus this much a unit of what it is made of. A wall of
+/// two metal is six minutes beside it; a heavy engine, two hundred and
+/// fifty units, a little over two hours. The carrying is on top, a load
+/// at a time — see [`HAUL_LOAD`].
+pub const BUILD_MINUTES_BASE: f64 = 5.0;
+pub const BUILD_MINUTES_PER_UNIT: f64 = 0.5;
+
+/// How many units of one material a Bim carries to a construction site in
+/// one trip. A wall is one trip; the heavy engine's hundred and fifty
+/// metal is eight.
+pub const HAUL_LOAD: u32 = 20;

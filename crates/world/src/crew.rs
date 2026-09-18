@@ -33,7 +33,9 @@
 use bims::bim::Bim;
 use bims::character::Uniform;
 use bims::game::Game as Room;
+use bims::manager::Stock;
 use bims::math::vec2;
+use bims::sight::Fog;
 use shipdesign::parts::{Layer, TILE};
 use shipdesign::{ShipDesign, dock};
 use worldgen::math::{DVec2, dvec2};
@@ -46,10 +48,10 @@ const STEP_SECONDS: f32 = (data::STEP_MINUTES / time::MINUTES_PER_SECOND) as f32
 
 /// The room aboard, and the crew in it.
 ///
-/// Docked, it is the ship **and the station** as one room — see
-/// [`crate::docking`] — with the ship's crew first and the station's
-/// residents after them, and the ship's own grid sitting `offset` into the
-/// room's. Everything that reads a position through here gets it in the
+/// Docked, it is the ship **and the station** as one deck — see
+/// [`crate::docking`] — with the ship's crew in it and the station's
+/// residents in a room of their own ([`Residents`]), and the ship's own
+/// grid sitting `offset` into the room's. Everything that reads a position through here gets it in the
 /// **ship's** frame, whichever room it is; only the painter and the pointer
 /// need the offset, to put the room's picture and the room's coordinates
 /// where the ship is.
@@ -58,8 +60,9 @@ pub struct Aboard {
     /// Where the ship's design origin sits in the room's grid, in design
     /// units. Nought for a ship on its own.
     pub offset: DVec2,
-    /// How many of the room's Bims are the ship's crew. Indices below it
-    /// are the crew, from it the residents of the station docked to.
+    /// How many of the room's Bims are the ship's crew: all of them, now
+    /// that a station's residents keep their own room. Kept as a count so
+    /// a second crew — another player's — has somewhere to go.
     pub crew: u32,
     /// The design the room is laid out on: the ship's, or the joined one.
     pub design: ShipDesign,
@@ -70,6 +73,16 @@ pub struct Aboard {
     /// to. Neither for a ship on its own.
     pub ashore: Option<DVec2>,
     pub gangway: Option<DVec2>,
+    /// Where a station design point lands in the room, while joined: the
+    /// image of the station's origin and its two axes as unit steps in the
+    /// room's grid. How the residents, walking about in their own room,
+    /// are put on this deck for its doors to open for them — see
+    /// [`Aboard::visit`].
+    pub station_frame: Option<(DVec2, DVec2, DVec2)>,
+    /// The station's box on the joined deck, in the room's units, while
+    /// joined: what tells the station's fixtures from the ship's in a
+    /// layout of the whole. See [`Aboard::leave_the_station_s`].
+    pub station_box: Option<(DVec2, DVec2)>,
 }
 
 impl Aboard {
@@ -87,24 +100,42 @@ impl Aboard {
             design: design.clone(),
             ashore: None,
             gangway: None,
+            station_frame: None,
+            station_box: None,
         }
     }
 
-    /// The ship and its station as one room, with the ship's crew and the
-    /// station's residents in it — each where they were standing in their
-    /// own room, now in the joined one. Both crews come from
-    /// `Game::take_crew`, so nobody is mid-errand: a chain aimed at a
-    /// fixture in a room that no longer exists is not a chain worth keeping.
+    /// The ship and its station as one deck, with the ship's crew in it —
+    /// each where they were standing in the ship's room, now in the joined
+    /// one. The crew come from `Game::take_crew`, so nobody is mid-errand:
+    /// a chain aimed at a fixture in a room that no longer exists is not a
+    /// chain worth keeping. The station's residents are not moved: they
+    /// stay in their own room, with their own fixtures.
     pub fn joined(
         joined: Joined,
         ship: &ShipDesign,
         station: &ShipDesign,
         crew: Vec<Bim>,
-        residents: Vec<Bim>,
         seed: u64,
         minutes: f64,
     ) -> Aboard {
-        let layout = bims::aboard::layout_of(&joined.design);
+        let mut layout = bims::aboard::layout_of(&joined.design);
+        // The station's box on the joined deck: its four corners through
+        // the join, since a station docked side on is turned.
+        let side = station.build_area as f64 * TILE as f64;
+        let corners = [
+            joined.from_station(dvec2(0.0, 0.0)),
+            joined.from_station(dvec2(side, 0.0)),
+            joined.from_station(dvec2(0.0, side)),
+            joined.from_station(dvec2(side, side)),
+        ];
+        let (mut lo, mut hi) = (corners[0], corners[0]);
+        for c in &corners {
+            lo = dvec2(lo.x.min(c.x), lo.y.min(c.y));
+            hi = dvec2(hi.x.max(c.x), hi.y.max(c.y));
+        }
+        let station_box = Some((lo, hi));
+        Self::leave_the_station_s(station_box, &mut layout);
         let (w, h) = (layout.bounds.width(), layout.bounds.height());
         let mut room = Room::with_layout(layout, seed, &[], w, h);
         let shift = joined.ship_shift();
@@ -121,19 +152,6 @@ impl Aboard {
         let ashore = dock::port(station).map(|p| joined.from_station(inside(p)));
         room.adopt(crew, vec2(shift.x as f32, shift.y as f32));
         let crew = room_crew(&room);
-        // A resident stood at a station point `p` now stands at the image
-        // of `p`; `adopt` takes one shift, so residents are moved to the
-        // joined frame first, one by one, and shifted by nothing.
-        let moved: Vec<Bim> = residents
-            .into_iter()
-            .map(|mut bim| {
-                let p = bim.character.pos;
-                let at = joined.from_station(dvec2(p.x as f64, p.y as f64));
-                bim.character.stand_at(vec2(at.x as f32, at.y as f32));
-                bim
-            })
-            .collect();
-        room.adopt(moved, bims::math::Vec2::ZERO);
         room.wind_clock(minutes as f32);
         room.render();
         Aboard {
@@ -143,19 +161,102 @@ impl Aboard {
             design: joined.design,
             ashore,
             gangway,
+            station_frame: Some((joined.station_origin, joined.station_ex, joined.station_ey)),
+            station_box,
         }
     }
 
+    /// The station's fixtures are the residents' to work and to draw —
+    /// their own room does both — so on the joined deck they are furniture
+    /// to walk round and nothing more: not a bay the crew would go and
+    /// tend, not a still painted over the residents' live picture of the
+    /// same hob. Told apart by where they stand, since the two hulls never
+    /// overlap. Nothing to do for a ship on its own. Asked at the join and
+    /// at every relayout after, since a part built relays the whole deck.
+    fn leave_the_station_s(station_box: Option<(DVec2, DVec2)>, layout: &mut bims::room::Layout) {
+        let Some((lo, hi)) = station_box else {
+            return;
+        };
+        let on_station = |r: &bims::math::Rect| {
+            let m = r.center();
+            (m.x as f64) >= lo.x
+                && (m.x as f64) <= hi.x
+                && (m.y as f64) >= lo.y
+                && (m.y as f64) <= hi.y
+        };
+        layout.extras.retain(|(_, r)| !on_station(r));
+        let more = &mut layout.more;
+        more.worktops.retain(|r| !on_station(r));
+        more.hobs.retain(|r| !on_station(r));
+        more.fridges.retain(|r| !on_station(r));
+        more.dishwashers.retain(|r| !on_station(r));
+        more.lockers.retain(|r| !on_station(r));
+        more.showers.retain(|(r, _)| !on_station(r));
+        more.bays.retain(|(r, _)| !on_station(r));
+        more.heads.retain(|(r, _)| !on_station(r));
+    }
+
+    /// Where the station's people are, in the station's own units, put on
+    /// this deck as bodies for the doors to open for. They are not in the
+    /// room — they walk in their own — but the room draws the doors, and a
+    /// resident walking through a shut-looking door would be a door lying.
+    pub fn visit(&mut self, residents: &[DVec2]) {
+        let Some((origin, ex, ey)) = self.station_frame else {
+            return;
+        };
+        let visitors: Vec<bims::math::Vec2> = residents
+            .iter()
+            .map(|p| {
+                let at = origin.add(ex.scale(p.x)).add(ey.scale(p.y));
+                vec2(at.x as f32, at.y as f32)
+            })
+            .collect();
+        self.room.set_visitors(visitors);
+    }
+
+    /// The station's people as targets, at those same positions, in the
+    /// room's units: one an index, `None` for one that is down. What the
+    /// room's Bims in combat mode shoot at — see `bims::combat`.
+    pub fn hostiles(&self, residents: &[DVec2], alive: &[bool]) -> Vec<Option<bims::math::Vec2>> {
+        let Some((origin, ex, ey)) = self.station_frame else {
+            return Vec::new();
+        };
+        residents
+            .iter()
+            .enumerate()
+            .map(|(who, p)| {
+                if !alive.get(who).copied().unwrap_or(false) {
+                    return None;
+                }
+                let at = origin.add(ex.scale(p.x)).add(ey.scale(p.y));
+                Some(vec2(at.x as f32, at.y as f32))
+            })
+            .collect()
+    }
+
+    /// Which of the station's people, at those same positions, the crew can
+    /// see from where they stand on the joined deck: one flag each, for
+    /// the station's own room to draw them by.
+    pub fn seen(&self, residents: &[DVec2]) -> Vec<bool> {
+        let Some((origin, ex, ey)) = self.station_frame else {
+            return vec![false; residents.len()];
+        };
+        residents
+            .iter()
+            .map(|p| {
+                let at = origin.add(ex.scale(p.x)).add(ey.scale(p.y));
+                self.room.seen_at(at.x as f32, at.y as f32)
+            })
+            .collect()
+    }
+
     /// Take the room apart again: the ship's crew back into a room of the
-    /// ship alone, and the residents handed back to whoever wants them.
-    /// Anybody of the crew still on the station's deck is stood at their
+    /// ship alone. Anybody still on the station's deck is stood at their
     /// bunk — `adopt` does that for a position the new room has no floor
     /// under — which is the ship leaving without waiting.
-    pub fn unjoined(self, ship: &ShipDesign, seed: u64, minutes: f64) -> (Aboard, Vec<Bim>) {
-        let crew_count = self.crew as usize;
+    pub fn unjoined(self, ship: &ShipDesign, seed: u64, minutes: f64) -> Aboard {
         let offset = self.offset;
-        let mut everybody = self.room.take_crew();
-        let residents = everybody.split_off(crew_count.min(everybody.len()));
+        let everybody = self.room.take_crew();
         let layout = bims::aboard::layout_of(ship);
         let (w, h) = (layout.bounds.width(), layout.bounds.height());
         let mut room = Room::with_layout(layout, seed, &[], w, h);
@@ -163,17 +264,30 @@ impl Aboard {
         room.wind_clock(minutes as f32);
         room.render();
         let crew = room_crew(&room);
-        (
-            Aboard {
-                room,
-                offset: DVec2::ZERO,
-                crew,
-                design: ship.clone(),
-                ashore: None,
-                gangway: None,
-            },
-            residents,
-        )
+        Aboard {
+            room,
+            offset: DVec2::ZERO,
+            crew,
+            design: ship.clone(),
+            ashore: None,
+            gangway: None,
+            station_frame: None,
+            station_box: None,
+        }
+    }
+
+    /// The room laid out again on `design` — the ship as it now is, or the
+    /// joined deck as it now is — under the crew, who keep their errands
+    /// and where they stand. What a part being built calls for, as against
+    /// docking, which takes the room apart: a wall is not a reason to
+    /// abandon everybody's afternoon. The ship's offset into the room does
+    /// not move — a join's shift is the station's corners against the
+    /// ship's build area, and neither changes when a part goes on.
+    pub fn relayout(&mut self, design: ShipDesign) {
+        let mut layout = bims::aboard::layout_of(&design);
+        Self::leave_the_station_s(self.station_box, &mut layout);
+        self.room.relayout(layout);
+        self.design = design;
     }
 
     /// Whether one of them is on the ship: standing on a tile of the
@@ -256,11 +370,6 @@ impl Aboard {
     /// The ship's own crew: the first `crew` of the room's Bims.
     pub fn crew_count(&self) -> u32 {
         self.crew
-    }
-
-    /// The station's residents aboard the joined room, if it is one.
-    pub fn resident_count(&self) -> u32 {
-        self.count().saturating_sub(self.crew)
     }
 
     /// One step of the crew: what stage 5 does. The simulation only — the
@@ -358,18 +467,28 @@ impl Residents {
     ) -> Residents {
         let mut aboard = Aboard::new(design, count, seed);
         aboard.room.wind_clock(minutes as f32);
-        // The station's coverall, so that on a joined deck who is going
-        // ashore can be told from who is staying.
+        // Looked at from outside: the crew see none of it, and nobody in
+        // it is drawn, until the ship docks and the rooms are joined.
+        aboard.room.set_fog(Fog::All);
+        // The station's coverall, so they can be told from the crew.
         for who in 0..aboard.count() {
             aboard.room.set_uniform(who as usize, Uniform::Station);
         }
+        // Their own manager's goals, a head each — the crew's Management tab
+        // is the crew's, and reaches nobody ashore — and a larder already
+        // at them, since they have been living here.
+        let each = aboard.count();
+        let (veg, tofu, stew) = (
+            data::RESIDENT_VEG_EACH * each,
+            data::RESIDENT_TOFU_EACH * each,
+            data::RESIDENT_STEW_EACH * each,
+        );
+        aboard.room.set_target(Stock::Veg, veg);
+        aboard.room.set_target(Stock::Tofu, tofu);
+        aboard.room.set_target(Stock::Stew, stew);
+        aboard.room.set_stock(veg, tofu, stew);
         aboard.room.render();
         Residents { station, aboard }
-    }
-
-    /// Everybody in it, out of it: for joining them to the ship's room.
-    pub fn take(self) -> Vec<Bim> {
-        self.aboard.room.take_crew()
     }
 }
 

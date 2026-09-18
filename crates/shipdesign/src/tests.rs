@@ -250,6 +250,7 @@ fn shielding_and_storage_are_where_they_are_meant_to_be() {
             (PartKind::Shelf, (Storage::Shelf, 100)),
             (PartKind::SuitLocker, (Storage::Locker, 2)),
             (PartKind::Armoury, (Storage::Locker, 4)),
+            (PartKind::DrugLab, (Storage::Locker, 6)),
         ],
     );
 }
@@ -2007,6 +2008,40 @@ fn building_without_the_materials_is_refused() {
     );
 }
 
+/// Deck plating is construction too, and it costs what it lays: the deck's
+/// recipe on a tile that already has frame, the deck's and the frame's on
+/// one that has not — `recipe_for` says which, and `build_from_cargo`
+/// spends exactly that.
+#[test]
+fn plating_from_the_hold_pays_for_the_frame_only_where_there_is_none() {
+    use crate::materials::recipe_for;
+    let yard = yard();
+    let metal = yard.carrying(ResourceId::Metal);
+    let deck = PartKind::Floor.def().recipe[0].1;
+    let frame = PartKind::Structure.def().recipe[0].1;
+
+    // The bare ring is frame with no deck on it.
+    let framed = Edit::Plate { origin: (1, 3) };
+    assert_eq!(recipe_for(&yard, framed), vec![(ResourceId::Metal, deck)]);
+    let plated = build_from_cargo(&yard, framed).unwrap();
+    assert_eq!(plated.carrying(ResourceId::Metal), metal - deck);
+    assert!(plated.grid().has_floor((1, 3)));
+
+    // The tile outside the frame has nothing in it at all.
+    let bare = Edit::Plate { origin: (0, 0) };
+    assert_eq!(
+        recipe_for(&yard, bare),
+        vec![(ResourceId::Metal, deck + frame)]
+    );
+    let plated = build_from_cargo(&yard, bare).unwrap();
+    assert_eq!(plated.carrying(ResourceId::Metal), metal - deck - frame);
+    assert!(plated.grid().has_structure((0, 0)));
+    assert!(plated.grid().has_floor((0, 0)));
+
+    // And what is not construction costs nothing.
+    assert!(recipe_for(&yard, Edit::Remove { part_id: 1 }).is_empty());
+}
+
 /// Materials have to have somewhere to go. A ship with no shelf cannot take
 /// a hob apart, and the one whose only shelf *is* the part coming off cannot
 /// either — the room is measured after the removal, which is the case that
@@ -2124,6 +2159,7 @@ fn the_playtest_ship_is_a_whole_ship_for_one() {
         (PartKind::Shelf, 2),
         (PartKind::Smelter, 1),
         (PartKind::Workbench, 1),
+        (PartKind::DrugLab, 1),
         (PartKind::SuitLocker, 1),
         (PartKind::ColdStore, 1),
         (PartKind::Worktop, 1),
@@ -2147,7 +2183,7 @@ fn the_playtest_ship_is_a_whole_ship_for_one() {
         (PartKind::Door, 2),
         (PartKind::Wall, 24),
         // The spine, bow to reactor, and the branches to every consumer.
-        (PartKind::PowerConduit, 53),
+        (PartKind::PowerConduit, 54),
     ] {
         assert_eq!(design.count(kind), want, "{kind:?}");
     }
@@ -2461,6 +2497,7 @@ fn power_is_made_held_and_drawn_where_it_is_meant_to_be() {
             (PartKind::Smelter, 40.0),
             (PartKind::Workbench, 15.0),
             (PartKind::Armoury, 10.0),
+            (PartKind::DrugLab, 5.0),
         ],
     );
     for kind in PartKind::ALL {
@@ -2665,8 +2702,8 @@ fn the_fixtures_are_wired() {
     let power = budget(&design);
     assert_eq!(power.supply, 120.0);
     // Life support, the helm, the array, the cold store, the bay, two
-    // doors, the smelter and the workbench.
-    assert_eq!(power.draw, 112.0);
+    // doors, the smelter, the workbench and the drug lab.
+    assert_eq!(power.draw, 117.0);
     assert_eq!(power.storage, crate::parts::BATTERY_CHARGE);
     let codes = all_codes(&design, 1);
     assert!(!codes.contains(&IssueCode::Unpowered.code()));
@@ -2681,7 +2718,7 @@ fn the_fixtures_are_wired() {
 fn every_recipe_holds_together() {
     use crate::recipes::{RECIPES, at, recipes_are_sound};
     assert!(recipes_are_sound());
-    assert_eq!(RECIPES.len(), 6);
+    assert_eq!(RECIPES.len(), 7);
 
     let smelt = &RECIPES[0];
     assert_eq!(smelt.station, PartKind::Smelter);
@@ -2713,6 +2750,7 @@ fn every_recipe_holds_together() {
     assert_eq!(at(PartKind::Smelter).count(), 1);
     assert_eq!(at(PartKind::Workbench).count(), 2);
     assert_eq!(at(PartKind::Armoury).count(), 3);
+    assert_eq!(at(PartKind::DrugLab).count(), 1);
     assert_eq!(at(PartKind::Hob).count(), 0);
     // The three the armoury makes, and what they are made of: the handgun
     // is the one thing that wants an emitter, so it is the one thing that
@@ -2728,13 +2766,50 @@ fn every_recipe_holds_together() {
     assert_eq!(handgun.output_mass(), handgun.input_mass());
     assert_eq!(RECIPES[4].output, (ResourceId::Vest, 1));
     assert_eq!(RECIPES[5].output, (ResourceId::Medkit, 1));
-    for r in &RECIPES[3..] {
+    for r in &RECIPES[3..6] {
         assert_eq!(r.station, PartKind::Armoury);
         assert!(!r.vents);
         assert_eq!(r.output_mass(), r.input_mass(), "{:?}", r.output);
     }
+    // The drug lab's one recipe: two fibre off the bay, one bandage, and
+    // the bandage weighs the fibre.
+    let bandage = &RECIPES[6];
+    assert_eq!(bandage.station, PartKind::DrugLab);
+    assert_eq!(bandage.inputs, &[(ResourceId::Fibre, 2)]);
+    assert_eq!(bandage.output, (ResourceId::Bandage, 1));
+    assert!(!bandage.vents);
+    assert_eq!(bandage.output_mass(), bandage.input_mass());
     // Every station draws, so every one of them stops in a brownout.
     for r in RECIPES.iter() {
         assert!(r.station.def().draws(), "{:?}", r.station);
+    }
+}
+
+/// `parts` is in ascending id order, on every design there is a fixture
+/// for and after a removal from the middle — which is what lets
+/// [`ShipDesign::part`] be a binary search.
+#[test]
+fn parts_are_in_id_order() {
+    let in_order = |design: &ShipDesign| design.parts.windows(2).all(|w| w[0].id < w[1].id);
+    let ship = crate::fixture::playtest_ship();
+    assert!(in_order(&ship));
+    assert!(in_order(&flyer(2)));
+    // Take one out of the middle: still in order, and still found by id.
+    // The first from the middle that comes off, that is — the one exactly
+    // there may be frame or deck with something standing on it, and which
+    // it is moves every time the ship does.
+    let budget = Budget::new(u64::MAX / 4);
+    let (middle, fewer) = ship.parts[ship.parts.len() / 2..]
+        .iter()
+        .find_map(|part| {
+            apply(&ship, &budget, Edit::Remove { part_id: part.id })
+                .ok()
+                .map(|fewer| (part.id, fewer))
+        })
+        .expect("a removal");
+    assert!(in_order(&fewer));
+    assert!(fewer.part(middle).is_none());
+    for part in &fewer.parts {
+        assert_eq!(fewer.part(part.id).map(|p| p.id), Some(part.id));
     }
 }

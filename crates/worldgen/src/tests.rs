@@ -33,6 +33,22 @@ fn the_checksum_notices_a_different_galaxy() {
     assert_ne!(a, c, "a different type should show");
 }
 
+/// The side a station is on is in the number: the same galaxy with one
+/// station turned is a different checksum.
+#[test]
+fn the_checksum_notices_a_station_changing_sides() {
+    let galaxy = reference(GalaxyType::Round);
+    let mut systems = galaxy.every_system();
+    let pinned = crate::galaxy_checksum(&galaxy, &systems);
+    let station = systems
+        .iter_mut()
+        .flat_map(|s| s.stations.iter_mut())
+        .find(|s| s.kind != crate::StationKind::Derelict)
+        .expect("a station somebody lives on");
+    station.hostile = !station.hostile;
+    assert_ne!(pinned, crate::galaxy_checksum(&galaxy, &systems));
+}
+
 /// The four pinned numbers are four *different* numbers, or a type is not
 /// reaching the generator.
 #[test]
@@ -41,5 +57,51 @@ fn every_type_is_pinned_to_its_own_number() {
         for b in &REFERENCE_CHECKSUMS[i + 1..] {
             assert_ne!(a, b);
         }
+    }
+}
+
+/// A station's shelf is the kind's rule with a roll under it: nothing the
+/// kind never sells, every staple the kind does, and — across the reference
+/// galaxy — at least two stations of the same kind that stock different
+/// things, or the roll is not reaching the shelf.
+#[test]
+fn a_station_stocks_the_staples_and_rolls_the_rest() {
+    use crate::data::{STAPLES, StationKind, Stock};
+    use physics::ResourceId;
+
+    let galaxy = reference(GalaxyType::Round);
+    let mut shelves: Vec<(StationKind, Stock)> = Vec::new();
+    for star in &galaxy.stars {
+        let system = galaxy.system(star.id).unwrap();
+        for station in &system.stations {
+            for &resource in ResourceId::ALL.iter() {
+                if !station.kind.sells(resource) {
+                    assert!(
+                        !station.stock.sells(resource),
+                        "{:?} {resource:?}",
+                        station.kind
+                    );
+                }
+                if STAPLES.contains(&resource) && station.kind.sells(resource) {
+                    assert!(
+                        station.stock.sells(resource),
+                        "{:?} {resource:?}",
+                        station.kind
+                    );
+                }
+            }
+            shelves.push((station.kind, station.stock));
+        }
+    }
+    let differ = shelves
+        .iter()
+        .any(|&(kind, stock)| shelves.iter().any(|&(k, s)| k == kind && s != stock));
+    assert!(differ, "every shelf of a kind came out the same");
+    // And the same station again is the same shelf.
+    let again = reference(GalaxyType::Round);
+    for star in &galaxy.stars {
+        let a = galaxy.system(star.id).unwrap();
+        let b = again.system(star.id).unwrap();
+        assert_eq!(a.stations, b.stations);
     }
 }

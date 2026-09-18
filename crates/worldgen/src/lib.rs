@@ -53,7 +53,7 @@ pub mod system;
 mod tests;
 
 pub use checksum::galaxy_checksum;
-pub use data::{BeltYield, BodyKind, HazardKind, StationKind, TravelBand, belt_yield};
+pub use data::{BodyKind, HazardKind, StationKind, Stock, TravelBand};
 pub use galaxy::{Galaxy, GalaxyType, Star, StarClass};
 pub use layout::Fault;
 pub use math::DVec2;
@@ -68,4 +68,4 @@ pub use system::{Body, Node, StarSystem, StationBlueprint};
 /// that alters where anything is has to be declared, because the alternative
 /// is two players on different builds walking around what they both think is
 /// the same station.
-pub const GENERATOR_VERSION: u32 = 2;
+pub const GENERATOR_VERSION: u32 = 3;

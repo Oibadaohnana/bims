@@ -38,7 +38,7 @@ pub const REFERENCE_POOL: Money = 10_000_000;
 /// hashing differently, and a test that compares two computed values would
 /// pass happily while both were wrong. Update them only when the reference
 /// design itself is meant to change.
-pub const REFERENCE_HASH: [u64; 2] = [0x876b_fd97_33ac_34e2, 0xb628_e9cd_04ee_4259];
+pub const REFERENCE_HASH: [u64; 2] = [0x04d0_3b42_677e_0042, 0xa74c_3d81_34dd_5789];
 
 /// What [`reference`] is carrying, whatever the crew size: a few days of
 /// vegetables and tofu, bought through [`apply`] like everything else.
@@ -312,12 +312,12 @@ pub fn flyer(crew: u32) -> ShipDesign {
 /// target that hashed the simulation's ship differently would start a
 /// different simulation. Update it only when the ship below is meant to
 /// change.
-pub const PLAYTEST_HASH: u64 = 0x3b40_2195_5ab2_4d6b;
+pub const PLAYTEST_HASH: u64 = 0x64f2_2b5f_6b72_08cb;
 
 /// How many parts [`playtest_ship`] ends up with. What notices a placement
 /// that was quietly refused — the builder skips rather than panics, for the
 /// reason [`REFERENCE_PARTS`] gives.
-pub const PLAYTEST_PARTS: u32 = 639;
+pub const PLAYTEST_PARTS: u32 = 641;
 
 /// The playtest hull, as columns of the grid: the west skin and the east,
 /// the bow row and the stern row. Sixteen tiles across and eighteen long,
@@ -357,7 +357,7 @@ const PLAYTEST_ENGINE_TILES: [(u32, u32); 2] = [(9, 18), (10, 18)];
 
 /// Where the playtest ship's conduit leaves its spine, column 8. See
 /// [`playtest_ship`].
-const PLAYTEST_BRANCHES: [(u32, u32); 37] = [
+const PLAYTEST_BRANCHES: [(u32, u32); 38] = [
     // the reactor, along row 16 to the spine
     (4, 16),
     (5, 16),
@@ -391,6 +391,8 @@ const PLAYTEST_BRANCHES: [(u32, u32); 37] = [
     (13, 16),
     (14, 16),
     (11, 17),
+    // the drug lab, to port of the engine, off the reactor's run
+    (7, 17),
     // the bay, the bridge door, and the aft door along its bulkhead
     (9, 10),
     (9, 6),
@@ -405,9 +407,11 @@ const PLAYTEST_BRANCHES: [(u32, u32); 37] = [
 
 /// What the playtest ship carries besides a full tank: enough metal and
 /// components to build with, some ore for the smelter, a few days of food,
-/// and one suit in the locker. Bought through
-/// [`apply`], so the shelf and the cold store are what bound it.
-pub const PLAYTEST_CARGO: [(ResourceId, u32); 7] = [
+/// one suit in the locker, and a few bandages with the fibre for a few
+/// more, so a wound can be dressed from the first minute and the lab
+/// tried. Bought through [`apply`], so the shelf, the cold store and the
+/// locker are what bound it.
+pub const PLAYTEST_CARGO: [(ResourceId, u32); 9] = [
     (ResourceId::Fuel, 200),
     (ResourceId::Metal, 60),
     (ResourceId::Components, 40),
@@ -415,6 +419,8 @@ pub const PLAYTEST_CARGO: [(ResourceId, u32); 7] = [
     (ResourceId::Vegetable, 40),
     (ResourceId::Tofu, 20),
     (ResourceId::Suit, 1),
+    (ResourceId::Bandage, 5),
+    (ResourceId::Fibre, 6),
 ];
 
 /// Whether a tile of the playtest grid is inside the hull's outline —
@@ -474,7 +480,8 @@ fn playtest_skin(x: u32, y: u32) -> bool {
 /// else (`T` thruster, `S` sensor array, `A` airlock, `E` engine, `H` helm,
 /// `L` life support, `B` battery, then `C` cold store, `W` worktop, `H` hob,
 /// `D` dishwasher, `B` locker, `T` table, `C` chair, `H` bay, `B` bunk,
-/// `F` tank, `S` shelf, `T` toilet, `B` basin, `S` shower, `R` reactor):
+/// `F` tank, `S` shelf, `T` toilet, `B` basin, `S` shower, `R` reactor,
+/// `D` drug lab, `W` workbench, `S` smelter):
 ///
 /// ```text
 ///  1       \##S###/
@@ -490,10 +497,10 @@ fn playtest_skin(x: u32, y: u32) -> bool {
 /// 11   #.C............A
 /// 12   #..............A
 /// 13   #============++#
-/// 14   #FF.S....TBS...#
+/// 14   #FF.SS...TBS...#
 /// 15   #FF............#
-/// 16   TRR....EE......T
-/// 17   #RR....EE......#
+/// 16   TRR....EE...SS.T
+/// 17   #RR.DD.EEWW.SS.#
 /// 18   #######EE#######
 /// ```
 pub fn playtest_ship() -> ShipDesign {
@@ -625,6 +632,9 @@ pub fn playtest_ship() -> ShipDesign {
     put(&mut design, PartKind::Workbench, (11, 17), Rotation::R180);
     put(&mut design, PartKind::Smelter, (14, 16), Rotation::R180);
     put(&mut design, PartKind::Shelf, (7, 14), Rotation::R0);
+    // The drug lab in the stern row to port of the engine, turned the
+    // same way for the same reason.
+    put(&mut design, PartKind::DrugLab, (6, 17), Rotation::R180);
 
     // The wiring: a spine of conduit from the reactor up the middle of the
     // ship to the bow, through the bulkheads — conduit shares a tile with

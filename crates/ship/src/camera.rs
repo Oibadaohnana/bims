@@ -17,7 +17,7 @@
 //! `Game::camera_turn` is the whole of the difference.
 //!
 //! The transform is the same one the design phase's [`crate::view::View`]
-//! hands out (`screen = world * scale + offset`), so `web/ship.js` paints
+//! hands out (`screen = world * scale + offset`), so `crates/app` paints
 //! either page with one loop. The difference is what the origin is: the design
 //! phase's is the corner of the build area, and this one is **the ship** —
 //! everything in the ship view is drawn in the camera's units about the
@@ -122,6 +122,14 @@ impl Camera {
 
     pub fn focus(&self) -> (f32, f32) {
         (self.focus_x, self.focus_y)
+    }
+
+    /// Put `(x, y)` in the middle of the canvas: the focus set there and the
+    /// shove undone. Works tethered or loose, and changes neither.
+    pub fn recentre(&mut self, x: f32, y: f32) {
+        self.set_focus(x, y);
+        self.pan_x = 0.0;
+        self.pan_y = 0.0;
     }
 
     /// Let the camera go, or tether it again. Letting it go moves nothing:

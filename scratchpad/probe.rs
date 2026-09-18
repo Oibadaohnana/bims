@@ -171,12 +171,12 @@ fn main() {
 
     let mut lifted_at = None;
     let mut stored_at = None;
-    let mut ripe_before = game.hydro_ripe();
+    let mut ripe_before = game.hydro_ripe_all();
     let mut store_before = game.store_veg() + game.store_tofu();
     let mut carried_past = 0;
     for frame in 0..(6 * FRAMES_PER_DAY) {
         game.update(STEP);
-        let ripe_now = game.hydro_ripe();
+        let ripe_now = game.hydro_ripe_all();
         let store_now = game.store_veg() + game.store_tofu();
         // A tray that was ripe and is not: something came out of it.
         if ripe_now < ripe_before && lifted_at.is_none() {

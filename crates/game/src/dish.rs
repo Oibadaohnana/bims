@@ -112,7 +112,10 @@ impl Dishwasher {
         1.0 - self.cycle_left / CYCLE_MINUTES
     }
 
-    pub fn update(&mut self, dt: f32) {
+    /// A tick of the clock. Returns the plates that came out clean this
+    /// tick — the whole rack, the tick a cycle finishes, and nothing any
+    /// other — for the room to put back in the drawer.
+    pub fn update(&mut self, dt: f32) -> u32 {
         self.time += dt;
         let step = DOOR_RATE * dt;
         self.open += clamp(self.target - self.open, -step, step);
@@ -120,10 +123,11 @@ impl Dishwasher {
         if self.cycle_left > 0.0 {
             self.cycle_left = (self.cycle_left - dt * MINUTES_PER_SECOND).max(0.0);
             if self.cycle_left == 0.0 {
-                // Done: the clean rack goes back into the galley stores.
-                self.washing = 0;
+                // Done: the clean rack goes back into the drawer.
+                return core::mem::take(&mut self.washing);
             }
         }
+        0
     }
 
     // --- drawing ---------------------------------------------------------

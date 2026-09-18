@@ -29,6 +29,13 @@ const CELLS_PER_TILE: f32 = 5.0;
 const STRAIGHT: u32 = 10;
 const DIAGONAL: u32 = 14;
 
+/// How far the outside grid reaches from the body it is built about, in
+/// tiles, every way. A hundred: further than any rock of a site, so a walk
+/// is planned whole, and rebuilt about the body once it has moved
+/// [`OUTSIDE_RECENTRE`] tiles from the middle. See [`Nav::outside`].
+pub const OUTSIDE_RADIUS: i32 = 100;
+pub const OUTSIDE_RECENTRE: f32 = 25.0;
+
 pub struct Nav {
     cols: usize,
     rows: usize,
@@ -38,6 +45,15 @@ pub struct Nav {
     /// aboard.
     cell: f32,
     blocked: Vec<bool>,
+    /// Which connected patch of free cells each cell is in — the same
+    /// number for every cell a body could walk between, by the same steps
+    /// the search takes — and nought for a blocked one. Labelled once, when
+    /// the grid is built, so "can a body get from here to there" is two
+    /// lookups rather than a search of the whole grid: the room asks that
+    /// question of every shelf, every site and every fixture for every
+    /// idle Bim every step, and a search that comes back empty has walked
+    /// every cell it could reach first.
+    region: Vec<u32>,
 }
 
 impl Nav {
@@ -69,6 +85,49 @@ impl Nav {
         Nav::build(cols, rows, origin, cell, interior, solids, clearance)
     }
 
+    /// The grid for the outside of a ship: [`OUTSIDE_RADIUS`] tiles every
+    /// way from `centre`, one cell a tile, with `solids` — the hull and the
+    /// rocks — the only things in it. A cell a tile rather than five,
+    /// because space is wide and the grid is rebuilt as the body moves: a
+    /// tile's middle is a body's radius clear of its neighbour's edge, so a
+    /// mined-out tile is a cell a body can stand in, and a tunnel a tile
+    /// wide is walked. `interior()` is what the grid covers.
+    pub fn outside(centre: Vec2, solids: &[Rect], clearance: f32, tile: f32) -> Nav {
+        let side = (2 * OUTSIDE_RADIUS + 1) as f32 * tile;
+        let corner = vec2(
+            (centre.x / tile).floor() * tile - OUTSIDE_RADIUS as f32 * tile,
+            (centre.y / tile).floor() * tile - OUTSIDE_RADIUS as f32 * tile,
+        );
+        let interior = Rect::from_min_size(corner, vec2(side, side));
+        let cols = (2 * OUTSIDE_RADIUS + 1) as usize;
+        let origin = corner + vec2(tile * 0.5, tile * 0.5);
+        // The margin the classic grid keeps from its walls is nothing out
+        // here: the edge of the grid is not a wall, only where the grid
+        // stops, and a body at the edge is a body a rebuild will follow.
+        Nav::build(
+            cols,
+            cols,
+            origin,
+            tile,
+            interior.expand(clearance),
+            solids,
+            clearance,
+        )
+    }
+
+    /// What the grid covers, in world units.
+    pub fn interior(&self) -> Rect {
+        Rect::from_min_size(
+            self.origin - vec2(self.cell * 0.5, self.cell * 0.5),
+            vec2(self.cols as f32 * self.cell, self.rows as f32 * self.cell),
+        )
+    }
+
+    /// The middle of the grid, in world units.
+    pub fn middle(&self) -> Vec2 {
+        self.interior().center()
+    }
+
     /// Either grid: a cell is blocked if a body centred on it would overlap
     /// a solid or stick out past the walls.
     fn build(
@@ -87,6 +146,7 @@ impl Nav {
             origin,
             cell,
             blocked: vec![false; cols * rows],
+            region: Vec::new(),
         };
         // The classic grid is cut to the walkable area and never has a cell
         // outside it; the tiled one covers the whole interior, so the
@@ -118,7 +178,82 @@ impl Nav {
                 }
             }
         }
+        nav.label();
         nav
+    }
+
+    /// Number the patches: a flood from every free cell not yet numbered,
+    /// stepping exactly as [`Nav::search`] does — eight ways, and never
+    /// diagonally between two blocked cells — so two cells share a number
+    /// exactly when a search between them would succeed.
+    fn label(&mut self) {
+        let n = self.cols * self.rows;
+        self.region = vec![0; n];
+        let mut next = 0u32;
+        let mut stack: Vec<usize> = Vec::new();
+        for start in 0..n {
+            if self.blocked[start] || self.region[start] != 0 {
+                continue;
+            }
+            next += 1;
+            self.region[start] = next;
+            stack.push(start);
+            while let Some(here) = stack.pop() {
+                let (c, r) = (here % self.cols, here / self.cols);
+                let steps: Vec<(usize, usize)> = self.steps_from(c, r).collect();
+                for (nc, nr) in steps {
+                    let i = nr * self.cols + nc;
+                    if self.region[i] == 0 {
+                        self.region[i] = next;
+                        stack.push(i);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The free cells a body may step to from `(c, r)`: the eight
+    /// neighbours, less the blocked ones and less a diagonal that would
+    /// squeeze between two blocked cells. The one rule, for the search and
+    /// the labelling both.
+    fn steps_from(&self, c: usize, r: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
+        [
+            (1isize, 0isize),
+            (-1, 0),
+            (0, 1),
+            (0, -1),
+            (1, 1),
+            (1, -1),
+            (-1, 1),
+            (-1, -1),
+        ]
+        .into_iter()
+        .filter_map(move |(dc, dr)| {
+            let nc = c as isize + dc;
+            let nr = r as isize + dr;
+            if nc < 0 || nr < 0 || nc >= self.cols as isize || nr >= self.rows as isize {
+                return None;
+            }
+            let (nc, nr) = (nc as usize, nr as usize);
+            if self.is_blocked(nc, nr) {
+                return None;
+            }
+            if dc != 0 && dr != 0 && (self.is_blocked(nc, r) || self.is_blocked(c, nr)) {
+                return None;
+            }
+            Some((nc, nr))
+        })
+    }
+
+    /// Whether a body could walk from `from` to `to` at all: what
+    /// [`Nav::path`] would find a route for, answered without finding it.
+    /// Both ends are snapped to the nearest free cell exactly as `path`
+    /// snaps them, so the two agree.
+    pub fn can_reach(&self, from: Vec2, to: Vec2) -> bool {
+        let (c0, r0) = self.cell_at(self.nearest_free(from));
+        let (c1, r1) = self.cell_at(self.nearest_free(to));
+        let a = self.region[r0 * self.cols + c0];
+        a != 0 && a == self.region[r1 * self.cols + c1]
     }
 
     fn centre(&self, c: usize, r: usize) -> Vec2 {
@@ -185,6 +320,43 @@ impl Nav {
         p
     }
 
+    /// The middles of the free cells within `radius` of `centre`, one every
+    /// `spacing` units along each axis (rounded to whole cells, never
+    /// fewer than one), for something that wants places to stand rather
+    /// than a route — the enemy's tactics, which score every spot it could
+    /// shoot from. Tile-spaced rather than cell-spaced because a ship's
+    /// grid is five cells a tile and the fight is worked out on tiles: at
+    /// a weapon's twelve-tile reach the lattice is a few hundred spots,
+    /// where every cell would be fourteen thousand, each a trace of sight.
+    /// The lattice is phased on the grid, not on `centre`, so two calls a
+    /// step apart offer the same spots and a choice made once is offered
+    /// again — and on the middle cell of each run, which on a tiled grid
+    /// is the tile's middle.
+    pub fn free_cells_within(&self, centre: Vec2, radius: f32, spacing: f32) -> Vec<Vec2> {
+        let step = (spacing / self.cell).round().max(1.0) as usize;
+        let span = (radius / self.cell).ceil() as isize;
+        let (c0, r0) = self.cell_at(centre);
+        let mut out = Vec::new();
+        for r in (r0 as isize - span).max(0)..=(r0 as isize + span).min(self.rows as isize - 1) {
+            let r = r as usize;
+            if r % step != step / 2 {
+                continue;
+            }
+            for c in (c0 as isize - span).max(0)..=(c0 as isize + span).min(self.cols as isize - 1)
+            {
+                let c = c as usize;
+                if c % step != step / 2 || self.is_blocked(c, r) {
+                    continue;
+                }
+                let at = self.centre(c, r);
+                if (at - centre).len() <= radius {
+                    out.push(at);
+                }
+            }
+        }
+        out
+    }
+
     /// Waypoints from `from` to `to`, not including `from`. Empty if there is
     /// nowhere to go; a single point when the way is already clear.
     pub fn path(&self, from: Vec2, to: Vec2) -> Vec<Vec2> {
@@ -197,6 +369,11 @@ impl Nav {
         // from the nearest cell the search can actually reach.
         let start = self.cell_at(self.nearest_free(from));
         let end = self.cell_at(goal);
+        // Two patches: no route, and no point walking every cell of one to
+        // find that out.
+        if self.region[start.1 * self.cols + start.0] != self.region[end.1 * self.cols + end.0] {
+            return Vec::new();
+        }
         let Some(cells) = self.search(start, end) else {
             return Vec::new();
         };
@@ -242,34 +419,8 @@ impl Nav {
                 return Some(route);
             }
 
-            for (dc, dr) in [
-                (1isize, 0isize),
-                (-1, 0),
-                (0, 1),
-                (0, -1),
-                (1, 1),
-                (1, -1),
-                (-1, 1),
-                (-1, -1),
-            ] {
-                let nc = c as isize + dc;
-                let nr = r as isize + dr;
-                if nc < 0 || nr < 0 || nc >= self.cols as isize || nr >= self.rows as isize {
-                    continue;
-                }
-                let (nc, nr) = (nc as usize, nr as usize);
-                if self.is_blocked(nc, nr) {
-                    continue;
-                }
-                // No squeezing diagonally between two blocked cells.
-                let diagonal = dc != 0 && dr != 0;
-                if diagonal
-                    && (self.is_blocked((c as isize + dc) as usize, r)
-                        || self.is_blocked(c, (r as isize + dr) as usize))
-                {
-                    continue;
-                }
-
+            for (nc, nr) in self.steps_from(c, r) {
+                let diagonal = nc != c && nr != r;
                 let step = if diagonal { DIAGONAL } else { STRAIGHT };
                 let next = cost[here].saturating_add(step);
                 if next < cost[idx(nc, nr)] {
@@ -342,6 +493,10 @@ impl Nav {
 pub struct Maps {
     open: Nav,
     shut: Nav,
+    /// The outside of the hull, while there is an outside to walk: built
+    /// about whoever is out there by `Game::refresh_outside`, and `None` in
+    /// a room with nothing outside it. See [`Nav::outside`].
+    outside: Option<Nav>,
 }
 
 impl Maps {
@@ -365,10 +520,34 @@ impl Maps {
         Maps {
             open: grid(solids),
             shut: grid(&with_door),
+            outside: None,
         }
     }
 
     pub fn pick(&self, door_open: bool) -> &Nav {
         if door_open { &self.open } else { &self.shut }
+    }
+
+    /// The grid a body is on: the outside's while it is out there, the
+    /// deck's otherwise. A body outside with no outside grid — the ship has
+    /// left the site under it — gets the deck's, which has no route for it
+    /// and says so, the way a shut door does.
+    pub fn for_body(&self, outside: bool, door_open: bool) -> &Nav {
+        match (outside, &self.outside) {
+            (true, Some(nav)) => nav,
+            _ => self.pick(door_open),
+        }
+    }
+
+    pub fn outside(&self) -> Option<&Nav> {
+        self.outside.as_ref()
+    }
+
+    pub fn set_outside(&mut self, nav: Option<Nav>) {
+        self.outside = nav;
+    }
+
+    pub fn take_outside(&mut self) -> Option<Nav> {
+        self.outside.take()
     }
 }

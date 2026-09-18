@@ -1,9 +1,9 @@
-//! The hydroponic bay: five trays, and the standing order that fills them.
+//! The hydroponic bay: six trays, and the standing order that fills them.
 //!
-//! The bay grows what the cold store is short of. The manager sets a target in
-//! food units (`manager.rs`), that target becomes a number of vegetables and a
-//! number of blocks of tofu, and the bay plants whichever of the two it is
-//! furthest behind on. When both are met it **hibernates**: nothing grows,
+//! The bay grows what the cold store is short of. The manager sets three
+//! targets (`manager.rs`) — vegetables, blocks of tofu and fibre, the crop
+//! a bandage is made of — and the bay plants whichever of the three it is
+//! furthest behind on. When all are met it **hibernates**: nothing grows,
 //! nothing is planted, and whatever is in the trays is kept exactly as it is
 //! until the store falls back under the mark.
 //!
@@ -26,23 +26,31 @@ pub enum Crop {
     Veg,
     /// Soy, which is pressed into the tofu a bowl is built on.
     Soy,
+    /// Fibre: nothing anybody eats. What the drug lab makes a bandage out
+    /// of, two stalks to a roll — see `shipdesign::recipes`. It goes into
+    /// the cold store like the other two, counted apart, and the world
+    /// carries the harvest into the hold.
+    Fibre,
 }
 
 impl Crop {
     /// Game minutes from planting to ripe. Soy takes half again as long as
-    /// greens do, which is the whole reason the bay has to choose.
+    /// greens do, which is the whole reason the bay has to choose; fibre
+    /// comes up in a day like greens.
     pub fn ripens_in(self) -> f32 {
         match self {
             Crop::Veg => DAY,
             Crop::Soy => 1.5 * DAY,
+            Crop::Fibre => DAY,
         }
     }
 
-    /// 1 and 2; 0 means an empty tray. The host names them.
+    /// 1, 2 and 3; 0 means an empty tray. The host names them.
     pub fn code(self) -> u32 {
         match self {
             Crop::Veg => 1,
             Crop::Soy => 2,
+            Crop::Fibre => 3,
         }
     }
 
@@ -50,6 +58,7 @@ impl Crop {
         match code {
             1 => Some(Crop::Veg),
             2 => Some(Crop::Soy),
+            3 => Some(Crop::Fibre),
             _ => None,
         }
     }
@@ -109,10 +118,11 @@ pub struct Bay {
     forced: Option<Crop>,
     /// Set while the store is at or over target and there is nothing to do.
     hibernating: bool,
-    /// What the manager asked for, in vegetables and blocks of tofu. Pushed
-    /// in rather than read out, so everything the bay needs to decide with is
-    /// in the bay and a tray can be worked without the manager in reach.
-    want: (u32, u32),
+    /// What the manager asked for, in vegetables, blocks of tofu and fibre.
+    /// Pushed in rather than read out, so everything the bay needs to
+    /// decide with is in the bay and a tray can be worked without the
+    /// manager in reach.
+    want: (u32, u32, u32),
     /// Seconds of glow left after the Bim works a tray, so the bay reads as
     /// having been touched.
     stir: f32,
@@ -163,7 +173,7 @@ impl Bay {
             automated: true,
             forced: None,
             hibernating: false,
-            want: (0, 0),
+            want: (0, 0, 0),
             stir: 0.0,
         }
     }
@@ -238,13 +248,24 @@ impl Bay {
 
     /// Grow what is planted, and work out whether the bay has anything left to
     /// do. Hibernation is exactly "automated, nothing forced, and the store is
-    /// at or over both marks": the trays hold what they hold and the clock
-    /// stops for them.
-    pub fn update(&mut self, dt: f32, minutes: f32, veg: u32, tofu: u32, want: (u32, u32)) {
+    /// at or over all three marks": the trays hold what they hold and the
+    /// clock stops for them.
+    pub fn update(
+        &mut self,
+        dt: f32,
+        minutes: f32,
+        veg: u32,
+        tofu: u32,
+        fibre: u32,
+        want: (u32, u32, u32),
+    ) {
         self.want = want;
         self.stir = (self.stir - dt).max(0.0);
-        self.hibernating =
-            self.automated && self.forced.is_none() && veg >= want.0 && tofu >= want.1;
+        self.hibernating = self.automated
+            && self.forced.is_none()
+            && veg >= want.0
+            && tofu >= want.1
+            && fibre >= want.2;
         if self.hibernating {
             return;
         }
@@ -256,24 +277,24 @@ impl Bay {
     }
 
     /// Whether the bay is asking for anything at all.
-    fn running(&self, veg: u32, tofu: u32) -> bool {
+    fn running(&self, veg: u32, tofu: u32, fibre: u32) -> bool {
         if self.forced.is_some() {
             return true;
         }
-        self.automated && (veg < self.want.0 || tofu < self.want.1)
+        self.automated && (veg < self.want.0 || tofu < self.want.1 || fibre < self.want.2)
     }
 
     /// The next tray wanting a hand, if any: anything ripe first — it is grown
     /// already and leaving it there serves nobody — then the empty trays.
-    pub fn wants_work(&self, veg: u32, tofu: u32) -> Option<Job> {
-        if !self.running(veg, tofu) {
+    pub fn wants_work(&self, veg: u32, tofu: u32, fibre: u32) -> Option<Job> {
+        if !self.running(veg, tofu, fibre) {
             return None;
         }
         if let Some(i) = self.spots.iter().position(|s| s.is_some_and(|p| p.ripe())) {
             return Some(Job::Harvest(i));
         }
         let empty = self.spots.iter().position(|s| s.is_none())?;
-        Some(Job::Plant(empty, self.wanted(veg, tofu)))
+        Some(Job::Plant(empty, self.wanted(veg, tofu, fibre)))
     }
 
     /// Which crop the bay is furthest behind on, as a *share* of what was
@@ -286,7 +307,7 @@ impl Bay {
     /// far behind on never does. Measured proportionally the trays come out at
     /// roughly the ratio that was asked for, which is the whole point of a
     /// food unit having two halves.
-    fn wanted(&self, veg: u32, tofu: u32) -> Crop {
+    fn wanted(&self, veg: u32, tofu: u32, fibre: u32) -> Crop {
         if let Some(crop) = self.forced {
             return crop;
         }
@@ -305,10 +326,27 @@ impl Bay {
         };
         // Greens on a tie: they are the half of a food unit there is twice as
         // much of, and they come up in a day rather than a day and a half.
-        if short(tofu, self.want.1, Crop::Soy) > short(veg, self.want.0, Crop::Veg) {
+        let food = if short(tofu, self.want.1, Crop::Soy) > short(veg, self.want.0, Crop::Veg) {
             Crop::Soy
         } else {
             Crop::Veg
+        };
+        // Fibre only when it was asked for. A target of nought reads as a
+        // shortfall of nought above, and a store over-committed on food —
+        // greens short by one with two coming up — reads as *less* than
+        // nought, so without this a bay nobody asked for fibre would plant
+        // it the moment the food was in hand. That would re-roll every
+        // probe seed pinned on the bay, for a crop nobody wanted.
+        let (food_have, food_want) = match food {
+            Crop::Veg => (veg, self.want.0),
+            _ => (tofu, self.want.1),
+        };
+        if self.want.2 > 0
+            && short(fibre, self.want.2, Crop::Fibre) > short(food_have, food_want, food)
+        {
+            Crop::Fibre
+        } else {
+            food
         }
     }
 
@@ -396,6 +434,9 @@ const LEAF: Color = Color::rgb(0.44, 0.68, 0.24);
 const LEAF_DARK: Color = Color::rgb(0.30, 0.50, 0.16);
 const BEAN: Color = Color::rgb(0.86, 0.84, 0.62);
 const STEM: Color = Color::rgb(0.36, 0.55, 0.28);
+/// Fibre is a paler, taller stalk: straw rather than greens, so a tray of
+/// it reads as not-food across the room.
+const STRAW: Color = Color::rgb(0.80, 0.86, 0.60);
 /// A ripe tray is ringed, so "ready" reads across the room.
 const RIPE: Color = Color::rgb(0.98, 0.82, 0.35);
 
@@ -412,13 +453,15 @@ fn draw_plant(list: &mut DrawList, tray: Rect, crop: Crop, share: f32, lit: f32)
     // Everything grows out of the soil line: a seedling is a stem and nothing
     // else, and the leaves come in as it fills out.
     let base = vec2(at.x, tray.max.y - 10.0);
-    let height = (5.0 + 20.0 * share) * lit.max(0.55);
+    // Fibre grows a third taller than the food, and in straw.
+    let tall = if crop == Crop::Fibre { 1.35 } else { 1.0 };
+    let height = (5.0 + 20.0 * share) * tall * lit.max(0.55);
     list.rect(
         base - vec2(0.0, height * 0.5),
         vec2(2.0, height),
         0.0,
         0.0,
-        STEM,
+        if crop == Crop::Fibre { STRAW } else { STEM },
     );
 
     match crop {
@@ -453,6 +496,29 @@ fn draw_plant(list: &mut DrawList, tray: Rect, crop: Crop, share: f32, lit: f32)
                         BEAN,
                     );
                 }
+            }
+        }
+        Crop::Fibre => {
+            // A sheaf: two more stalks leaning out from the first, and no
+            // leaves to speak of — it is the stalk that is the crop.
+            let lean = 0.12 + 0.18 * share;
+            for side in [-1.0f32, 1.0] {
+                list.rect(
+                    base - vec2(-side * height * 0.18, height * 0.45),
+                    vec2(1.6, height * 0.9),
+                    side * lean,
+                    0.0,
+                    STRAW,
+                );
+            }
+            // The seed head, once it is well on.
+            if share > 0.5 {
+                list.ellipse(
+                    base - vec2(0.0, height * 0.98),
+                    vec2(3.0, 5.0),
+                    0.0,
+                    BEAN,
+                );
             }
         }
     }

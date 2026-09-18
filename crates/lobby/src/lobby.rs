@@ -16,6 +16,18 @@
 //! afresh from `Galaxy::system`, which costs nothing and means the harness's
 //! comparison of "reported as having a station" against "what inspecting it
 //! lists" is a comparison of two paths rather than of one path with itself.
+//!
+//! # A crew cannot start at an enemy's
+//!
+//! Some of the stations somebody lives on are hostile
+//! (`StationBlueprint::hostile`): docked there the crew are the enemy and
+//! the people aboard shoot. The map still shows the star as having a
+//! station — it does, and it is somewhere to fly to — but the start has to
+//! be somewhere else, so `can_start` is kept beside `has_station`, and the
+//! two ways a start gets picked ([`Lobby::random_start`] and
+//! [`Lobby::can_start_at`], which the page asks before it offers "Start
+//! here") both refuse a hostile station. The rule is here rather than on the
+//! page so that a page and a server agree about it.
 
 use worldgen::{Galaxy, GalaxyType, StarSystem};
 
@@ -31,6 +43,9 @@ pub struct Lobby {
     pub galaxy: Galaxy,
     /// Indexed by star id.
     pub has_station: Vec<bool>,
+    /// Indexed by star id: has a station a crew can start at — one that is
+    /// not hostile. A subset of `has_station`.
+    pub can_start: Vec<bool>,
     pub checksum: u64,
     pub preview: Preview,
     pub hovered: Option<u32>,
@@ -48,11 +63,16 @@ impl Lobby {
         let galaxy = Galaxy::new(seed, galaxy_type);
         let systems = galaxy.every_system();
         let has_station = systems.iter().map(|s| !s.stations.is_empty()).collect();
+        let can_start = systems
+            .iter()
+            .map(|s| s.stations.iter().any(|st| !st.hostile))
+            .collect();
         let checksum = worldgen::galaxy_checksum(&galaxy, &systems);
         let preview = Preview::new(width, height, &galaxy.stars);
         Lobby {
             galaxy,
             has_station,
+            can_start,
             checksum,
             preview,
             hovered: None,
@@ -85,6 +105,55 @@ impl Lobby {
     /// galaxy closes it.
     pub fn inspect(&mut self, star: u32) {
         self.inspected = self.galaxy.system(star).map(|s| (star, s));
+    }
+
+    /// Whether a station of the inspected system is somebody else's: ringed
+    /// in red on the diagram, and not somewhere a crew can start. `false`
+    /// when nothing is inspected or the id is not a station of it.
+    pub fn station_hostile(&self, station: u32) -> bool {
+        self.inspected
+            .as_ref()
+            .and_then(|(_, system)| system.station(station))
+            .is_some_and(|s| s.hostile)
+    }
+
+    /// Whether the game may start at this station of this star: it exists,
+    /// and it is not hostile. The page asks before it offers "Start here",
+    /// and a start handed in from elsewhere is checked the same way.
+    ///
+    /// Generates the system rather than reading the inspected one, because
+    /// the star asked about is not always the one open in the panel.
+    pub fn can_start_at(&self, star: u32, station: u32) -> bool {
+        self.galaxy
+            .system(star)
+            .and_then(|s| s.station(station).map(|st| !st.hostile))
+            .unwrap_or(false)
+    }
+
+    /// A random start: a star that can be started at, and one of its
+    /// stations that is not hostile. `roll` is the page's own randomness —
+    /// the star off the low word, the station off the high one, which is
+    /// how the page picked before the rule moved here. `None` only in a
+    /// galaxy with nowhere to start at all.
+    pub fn random_start(&self, roll: u64) -> Option<(u32, u32)> {
+        let stars: Vec<u32> = (0..self.galaxy.stars.len() as u32)
+            .filter(|&s| self.can_start.get(s as usize).copied().unwrap_or(false))
+            .collect();
+        if stars.is_empty() {
+            return None;
+        }
+        let star = stars[(roll % stars.len() as u64) as usize];
+        let system = self.galaxy.system(star)?;
+        let open: Vec<u32> = system
+            .stations
+            .iter()
+            .filter(|st| !st.hostile)
+            .map(|st| st.id)
+            .collect();
+        if open.is_empty() {
+            return None;
+        }
+        Some((star, open[((roll >> 32) % open.len() as u64) as usize]))
     }
 
     pub fn ping(&mut self, star: u32) {

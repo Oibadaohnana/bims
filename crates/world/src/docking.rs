@@ -20,9 +20,10 @@
 //! The room has one galley, one heads, one bay and one locker, and takes
 //! the **first** of each by id — which is the ship's, since the ship is
 //! laid down first. The station's galley is furniture to walk round while
-//! the ship is docked, and its residents eat aboard. Every bunk and every
-//! chair of both is a berth and a seat, the ship's first, so the crew keep
-//! their own beds and the residents theirs.
+//! the ship is docked. Its residents are **not** in the joined room: they
+//! keep a room of their own on the station's design, where that galley is
+//! the galley — see `World::join_rooms` — so nothing of theirs is lost;
+//! what the crew cannot do is use the station's fixtures from this deck.
 
 use flight::angle;
 use shipdesign::parts::{Rotation, TILE, covered};

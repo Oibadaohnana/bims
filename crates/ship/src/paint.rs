@@ -1,10 +1,12 @@
 //! Drawing a design, as rectangles and ellipses.
 //!
-//! Placeholder art throughout: one colour per kind and a bar showing which
-//! way it faces. The room's fixtures are drawn properly, tile by tile, in
-//! `crates/game/src/room.rs`, and **none of that is reused** — a designer
-//! showing a ship at eight pixels a tile wants a legible block, not a
-//! hand-drawn hob, and the two would have to be kept in step for no gain.
+//! The parts are drawn as the game draws them: the hull's skin and engines
+//! by `hull`, the fittings by `fittings`, and the room's own fixtures —
+//! the galley, the heads, the bunks — by the room, laid out from the design
+//! as it stands ([`fixtures`], cached on the editor and redone with the
+//! issues). What has no picture yet is a block of its colour with a bar on
+//! the side it is used from, and so is the ghost of whatever is about to be
+//! placed.
 //!
 //! The palette is the repo's: the deck greys and the cyan glow out of
 //! `room.rs`, so the designer and the room look like one game.
@@ -40,7 +42,7 @@ const FLAME: Color = Color::rgb(1.0, 0.62, 0.22);
 /// Index 0 is the deck and index 15 is the frame; both are drawn as tiles
 /// rather than as objects, and both are in the table anyway so the palette
 /// buttons for them have swatches.
-pub static PART_COLORS: [Color; 35] = [
+pub static PART_COLORS: [Color; 36] = [
     Color::rgb(0.13, 0.15, 0.18), // Floor
     Color::rgb(0.30, 0.34, 0.40), // Wall
     Color::rgb(0.38, 0.86, 0.95), // Door
@@ -76,16 +78,13 @@ pub static PART_COLORS: [Color; 35] = [
     Color::rgb(0.56, 0.50, 0.38), // Workbench
     Color::rgb(0.78, 0.80, 0.84), // SuitLocker — suit-white
     Color::rgb(0.42, 0.38, 0.44), // Armoury — gunmetal
+    Color::rgb(0.74, 0.82, 0.78), // DrugLab — clinical, a pale green-white
 ];
 
 /// The frame, drawn as the tile under everything. Dimmer than the deck and
 /// without its edge, so a floored tile still reads as floored.
 const FRAME: Color = Color::rgb(0.10, 0.11, 0.13);
 const FRAME_EDGE: Color = Color::rgba(0.55, 0.85, 0.95, 0.06);
-
-/// A conduit: a thin run across the tile rather than a block, because
-/// something else can be standing on the same tile.
-const CONDUIT: Color = Color::rgba(0.74, 0.66, 0.22, 0.75);
 
 /// Tile coordinates to world units.
 fn world(tile: i32) -> f32 {
@@ -248,20 +247,19 @@ fn frame(editor: &Editor, list: &mut DrawList) {
     }
 }
 
-/// What runs through a tile rather than filling it. A cross, so it reads as
-/// a run of conduit and is still visible under whatever is standing on it.
+/// What runs through a tile rather than filling it: the game's own picture
+/// of a run of conduit, reaching only towards the runs beside it, so a
+/// line of it reads as a line and a lone tile as a stub. Always drawn here,
+/// unlike in the game, because laying it is what the designer is for.
 fn conduit(editor: &Editor, list: &mut DrawList) {
-    let t = TILE as f32;
-    let thick = 4.0;
+    let grid = editor.design.grid();
     for part in &editor.design.parts {
-        if part.layer() != Layer::Utility {
+        if part.kind != PartKind::PowerConduit {
             continue;
         }
-        for (x, y) in part.tiles() {
-            let (x0, y0) = (world(x as i32), world(y as i32));
-            let (cx, cy) = (x0 + t / 2.0, y0 + t / 2.0);
-            list.box_between(x0, cy - thick / 2.0, x0 + t, cy + thick / 2.0, 0.0, CONDUIT);
-            list.box_between(cx - thick / 2.0, y0, cx + thick / 2.0, y0 + t, 0.0, CONDUIT);
+        for tile in part.tiles() {
+            let links = crate::fittings::conduit_links(&editor.design, &grid, tile);
+            crate::fittings::conduit(list, tile, links);
         }
     }
 }
@@ -294,9 +292,21 @@ fn deck(editor: &Editor, list: &mut DrawList) {
     }
 }
 
+/// Everything standing on the deck, with the game's own pictures where
+/// there are pictures. The parts the room draws for itself are left to it
+/// — they come in as one picture at the end, from [`fixtures`] — and a part
+/// with no picture anywhere is its colour with the bar of where it is used
+/// from.
 fn objects(editor: &Editor, list: &mut DrawList) {
+    let grid = editor.design.grid();
+    let rooms = bims::aboard::drawn_by_room(&editor.design);
     for part in &editor.design.parts {
-        if part.layer() != Layer::Object {
+        if part.layer() != Layer::Object || rooms.contains(&part.id) {
+            continue;
+        }
+        if crate::hull::part(list, part, &grid, crate::hull::Firing::NONE, None)
+            || crate::fittings::part(list, part)
+        {
             continue;
         }
         let (w, h) = footprint(part.kind, part.rotation);
@@ -321,6 +331,39 @@ fn objects(editor: &Editor, list: &mut DrawList) {
         list.box_between(x0, y0, x1, y1, 5.0, color);
         facing_bar(part.kind, part.rotation, (x0, y0, x1, y1), list);
     }
+    list.append(editor.fixtures());
+}
+
+/// The room's fixtures, as the room draws them, on the design as it stands:
+/// the room is laid out from it the way it will be when the game starts,
+/// and asked for the pictures of the fixtures the design has got. Only
+/// those, because a layout puts every fixture it has not got on the worktop.
+pub fn fixtures(design: &ShipDesign) -> DrawList {
+    use bims::room::Fixtures;
+    let has = |kind: PartKind| design.parts.iter().any(|p| p.kind == kind);
+    let wanted = Fixtures {
+        counter: has(PartKind::Worktop),
+        stove: has(PartKind::Hob),
+        fridge: has(PartKind::ColdStore),
+        dishwasher: has(PartKind::Dishwasher),
+        table: has(PartKind::Table),
+        chairs: has(PartKind::Chair),
+        locker: has(PartKind::BroomLocker),
+        beds: has(PartKind::Bunk),
+        bay: has(PartKind::HydroBay),
+        toilet: has(PartKind::Toilet),
+        basin: has(PartKind::Basin),
+        doors: has(PartKind::Door),
+    };
+    let mut list = DrawList::default();
+    if wanted == Fixtures::default() {
+        return list;
+    }
+    let room = bims::room::Room::from_layout(bims::aboard::layout_of(design));
+    let mut picture = bims::draw::DrawList::new();
+    room.draw_fixtures(&mut picture, wanted);
+    list.append(picture.data());
+    list
 }
 
 /// A darker bar along the side a part is approached from.

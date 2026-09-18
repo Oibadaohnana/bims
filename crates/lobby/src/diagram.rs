@@ -15,7 +15,7 @@
 
 use worldgen::{BodyKind, StarSystem, StationKind};
 
-use crate::draw::{Color, DrawList, KIND_ELLIPSE, KIND_RECT};
+use crate::draw::{Color, DrawList, ENEMY, KIND_ELLIPSE, KIND_RECT};
 
 /// Pixels kept clear round the edge, so a marker on the furthest body is
 /// whole rather than clipped.
@@ -62,10 +62,18 @@ pub struct Placed {
     pub stations: Vec<(f32, f32)>,
 }
 
+/// The ring round a station somebody else holds: a little wider than the
+/// icon, so it reads as a warning about the station rather than as a
+/// different kind of station. The spawn ring is wider still and never on
+/// the same icon — a crew cannot start at an enemy's.
+const HOSTILE_RING: f32 = 14.0;
+
 /// Paint the system into `list`, and say where everything went.
 ///
 /// `spawn` is the id of the station that is the pending start, if it is in
-/// this system; it is ringed.
+/// this system; it is ringed. A hostile station is ringed in [`ENEMY`] red
+/// whatever else it is, so the map says who lives where before anybody
+/// flies there.
 pub fn paint(
     system: &StarSystem,
     spawn: Option<u32>,
@@ -136,6 +144,19 @@ pub fn paint(
         // on top of its planet, and the edge is what keeps it legible there.
         list.rect(x, y, 11.0, 11.0, 1.5, OUTLINE);
         list.rect(x, y, 8.0, 8.0, 1.0, station_color(station.kind));
+        if station.hostile {
+            list.push(
+                KIND_RECT,
+                x,
+                y,
+                HOSTILE_RING,
+                HOSTILE_RING,
+                0.0,
+                2.0,
+                1.5,
+                ENEMY,
+            );
+        }
         if spawn == Some(station.id) {
             list.push(KIND_RECT, x, y, 18.0, 18.0, 0.0, 2.0, 2.0, SPAWN);
         }

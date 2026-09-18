@@ -4,7 +4,7 @@
 //! not an edit, nothing is told about it, and two players looking at
 //! different corners of the same ship is the normal case.
 //!
-//! `screen = world * scale + offset`, which is the transform `web/ship.js`
+//! `screen = world * scale + offset`, which is the transform `crates/app`
 //! hands straight to the canvas. Everything below exists to keep that
 //! transform pointing at the ship: zoom out far enough and the build area is
 //! centred, zoom in and it can be dragged about but not off the edge.
@@ -65,6 +65,14 @@ impl View {
     pub fn resize(&mut self, width: f32, height: f32) {
         self.width = width.max(1.0);
         self.height = height.max(1.0);
+        self.settle();
+    }
+
+    /// Resize, and start looking at the whole thing again. For a host that
+    /// only learns the canvas's size after the phase has opened.
+    pub fn fit(&mut self, width: f32, height: f32) {
+        self.resize(width, height);
+        self.scale = self.fit_scale();
         self.settle();
     }
 

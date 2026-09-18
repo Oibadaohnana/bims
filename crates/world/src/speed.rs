@@ -14,7 +14,7 @@
 /// The speeds the world will run at.
 ///
 /// The discriminants cross the wasm boundary and index the speed buttons in
-/// `web/ship.js`, so they are written out and not renumbered. The multiplier
+/// `crates/app/src/names.rs`, so they are written out and not renumbered. The multiplier
 /// is the interesting half and it is deliberately not the discriminant: a
 /// pause is a speed of nothing, not a missing speed.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]

@@ -1,9 +1,13 @@
 # The workspace. Nothing is built from here directly — every crate is in
 # `crates/`:
 #
-#   game        the room: the Bims and their world, and its wasm exports. A
-#               cdylib and a library — the ship game runs it aboard.
-#   ship        the design phase and the game it starts. The other cdylib.
+#   app         the game as a desktop window: Bevy, the panels, the pointer.
+#               The only binary, and the only crate that knows what a window is.
+#   game        the room: the Bims and their world. A library the ship game
+#               runs aboard, and the behaviour test room on its own.
+#   ship        the design phase and the game it starts: the editor, the two
+#               cameras, and the painters that turn a world into shapes.
+#   lobby       the World tab: a galaxy, a system diagram, a camera and a pick.
 #   world       one system, the ship in it, and the clock they both run on.
 #   flight      ship dynamics and the closed-form plan that flies a trip.
 #   shipdesign  what a ship is made of and the rules for building one.
@@ -14,7 +18,7 @@
 #   time        how long a minute, an hour and a day are. Defined once.
 #
 # The split is not tidiness. `worldgen` has to produce the same world on the
-# wasm client and on the native server that will one day be authoritative,
+# client and on the native server that will one day be authoritative,
 # `physics` has to give the same answers to the world generator that it gives
 # the designer and the flight step, `shipdesign` and `economy` have to admit
 # the same ships and charge the same prices on both, and `world` and `flight`
@@ -23,15 +27,28 @@
 [workspace]
 members = ["crates/*"]
 resolver = "3"
+# `cargo run` is the game. Every bare workspace command then means the app
+# alone — use `cargo test --workspace`, which is what ./check runs.
+default-members = ["crates/app"]
+
+[workspace.dependencies]
+# Pinned to 0.19.x; upgrading Bevy is its own task.
+bevy = { version = "0.19", default-features = false }
+bevy_egui = "0.42"
 
 # Profiles live here rather than in a member: cargo reads them from the
 # workspace root only, and a `[profile]` in a member is silently ignored.
-[profile.release]
-opt-level = "z"
-lto = true
-codegen-units = 1
-panic = "abort"
-strip = true
-
+#
+# A debug build of a game engine is unplayably slow, so the dependencies —
+# which is Bevy — are optimised even in dev, and our own crates lightly, so
+# they stay quick to recompile.
 [profile.dev]
-panic = "abort"
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

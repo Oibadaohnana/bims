@@ -44,18 +44,21 @@
 //!
 //! # What is not here
 //!
-//! Construction labour, hauling, construction sites, loose items on the deck,
-//! scrap, and any attempt to balance an instant part's price against what its
-//! materials cost. [`build_from_cargo`] and [`deconstruct_to_cargo`] are the
-//! **rule**, not the mechanism: they are wired to nothing, no UI calls them,
-//! and the construction step will drive the same arithmetic with a Bim and a
-//! site in the middle of it.
+//! Loose items on the deck, scrap, and any attempt to balance an instant
+//! part's price against what its materials cost. [`build_from_cargo`] and
+//! [`deconstruct_to_cargo`] are the **rule**, not the mechanism: the
+//! construction step in `world` drives the first with a Bim and a site in
+//! the middle of it — materials hauled to a site are *reserved* in the hold,
+//! never taken out of it, so the sum above holds at every step, and the
+//! whole recipe leaves the hold in the one call that puts the part down.
+//! Nothing calls the second yet.
 
 use economy::{Money, storage};
 use physics::ResourceId;
 
 use crate::budget::Budget;
 use crate::design::{CARGO_SLOTS, Edit, EditError, ShipDesign, apply};
+use crate::parts::PartKind;
 
 /// Materials already welded into the ship: units of each resource, indexed by
 /// [`ResourceId`], summed over every part's recipe.
@@ -102,6 +105,32 @@ fn free() -> Budget {
     Budget::new(Money::MAX)
 }
 
+/// What building `edit` costs in materials: the part's recipe for a
+/// placement, and for deck plating the deck's recipe plus the frame's when
+/// the tile has no frame yet — [`Edit::Plate`] lays both. Empty for
+/// anything that is not construction. The construction step reads this to
+/// know what to haul to a site, and [`build_from_cargo`] spends exactly it,
+/// so the two cannot disagree about what a wall is made of.
+pub fn recipe_for(design: &ShipDesign, edit: Edit) -> Vec<(ResourceId, u32)> {
+    match edit {
+        Edit::Place { kind, .. } => kind.def().recipe.to_vec(),
+        Edit::Plate { origin } => {
+            let tile = (origin.0 as i32, origin.1 as i32);
+            let mut recipe = PartKind::Floor.def().recipe.to_vec();
+            if !design.grid().has_structure(tile) {
+                for &(id, units) in PartKind::Structure.def().recipe {
+                    match recipe.iter_mut().find(|(r, _)| *r == id) {
+                        Some((_, have)) => *have += units,
+                        None => recipe.push((id, units)),
+                    }
+                }
+            }
+            recipe
+        }
+        Edit::Remove { .. } | Edit::Buy { .. } | Edit::Sell { .. } => Vec::new(),
+    }
+}
+
 /// Build a part out of what is in the hold.
 ///
 /// The placement rules are [`apply`]'s, unchanged. What is different is the
@@ -109,27 +138,29 @@ fn free() -> Budget {
 /// price coming out of the pool, and the ship weighs exactly what it weighed
 /// before.
 ///
-/// Only [`Edit::Place`] means anything here — the other three are not
-/// construction — and anything else is [`EditError::BadCode`], the same
-/// answer the boundary gives for an edit it cannot make sense of.
+/// Only [`Edit::Place`] and [`Edit::Plate`] mean anything here — the other
+/// three are not construction — and anything else is [`EditError::BadCode`],
+/// the same answer the boundary gives for an edit it cannot make sense of.
 ///
 /// Geometry is checked before materials, the way [`apply`] checks it before
 /// money: "that will not fit there" is the more useful of the two answers
 /// when both are true.
 pub fn build_from_cargo(design: &ShipDesign, edit: Edit) -> Result<ShipDesign, EditError> {
-    let Edit::Place { kind, .. } = edit else {
+    if !matches!(edit, Edit::Place { .. } | Edit::Plate { .. }) {
         return Err(EditError::BadCode);
-    };
+    }
 
+    // What it costs is read off the design *before* the edit: plating a
+    // bare tile lays the frame as well, and the frame is there afterwards.
+    let recipe = recipe_for(design, edit);
     let mut next = apply(design, &free(), edit)?;
 
     // Every material checked before any is spent: half a recipe taken out of
     // the hold for a part that was then refused is mass vanishing.
-    let recipe = kind.def().recipe;
     if recipe.iter().any(|&(id, units)| next.carrying(id) < units) {
         return Err(EditError::MaterialsShort);
     }
-    for &(id, units) in recipe {
+    for &(id, units) in &recipe {
         next.cargo[id as usize] -= units;
     }
     Ok(next)

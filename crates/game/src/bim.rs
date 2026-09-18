@@ -12,9 +12,10 @@
 
 use crate::character::{Character, Look};
 use crate::clock;
+use crate::combat::Gear;
 use crate::filth::Ordeal;
 use crate::health::Health;
-use crate::math::Vec2;
+use crate::math::{Vec2, vec2};
 use crate::memory::Memory;
 use crate::needs::Needs;
 use crate::rng::Rng;
@@ -39,9 +40,26 @@ pub const TRAIL_INTERVAL: f32 = 0.08;
 /// had, not something from the week before last.
 pub const TALKS_ABOUT: usize = 8;
 
+/// How often a bleeding Bim leaves a drop of blood on the deck, in
+/// seconds, with one open wound — with more it is that many times as
+/// often — and how long a drop stays, in seconds, before it has faded.
+/// Real seconds at 1x: the trail is a picture, and the world's speed
+/// leaves a longer one the way it leaves more of everything.
+pub const DRIP_EVERY: f32 = 1.2;
+pub const DRIP_LIFE: f32 = 90.0;
+/// How far from the body's middle a drop lands, in room units, either way.
+const DRIP_SCATTER: f32 = 10.0;
+
 pub struct Footprint {
     pub pos: Vec2,
     pub age: f32,
+}
+
+/// A drop of blood on the deck, where a bleeding Bim stood.
+pub struct Drip {
+    pub pos: Vec2,
+    pub age: f32,
+    pub size: f32,
 }
 
 pub struct Bim {
@@ -83,6 +101,10 @@ pub struct Bim {
     pub pending_move: Option<Vec2>,
     pub trail: Vec<Footprint>,
     pub trail_timer: f32,
+    /// Where it was last frame and how long it has been marching without
+    /// getting anywhere, for `Game::unstick`.
+    pub last_pos: Vec2,
+    pub stuck: f32,
 
     /// When it was born: a year in [`BORN_FROM`]..=[`BORN_TO`], and a day of
     /// that year. Rolled at the start and never changing, which is the whole
@@ -98,6 +120,20 @@ pub struct Bim {
     /// Game minutes of food poisoning left, nothing when well. Its own clock,
     /// like the ordeal's: it is this body that is ill. See `Game::poison`.
     pub poisoned_for: f32,
+
+    /// What it wears and what it shoots with. See `crate::combat`.
+    pub gear: Gear,
+    /// Seconds until the weapon can fire again.
+    pub reload: f32,
+    /// Seconds left of the flash a hit puts on the body.
+    pub hit_flash: f32,
+    /// The blood it has left on the deck, and how long until the next
+    /// drop. See [`Bim::tick_drips`].
+    pub drips: Vec<Drip>,
+    pub drip_timer: f32,
+    /// Seconds until an enemy at war next chooses where to stand. Its
+    /// own clock, so a room of enemies does not all replan on one frame.
+    pub plan_wait: f32,
 }
 
 /// The years the crew were born in. Everyone aboard is somewhere between
@@ -123,12 +159,20 @@ impl Bim {
             pending_move: None,
             trail: Vec::new(),
             trail_timer: 0.0,
+            last_pos: at,
+            stuck: 0.0,
             born_year: BORN_FROM + rng.below(BORN_TO - BORN_FROM + 1),
             born_day: rng.below(clock::DAYS_IN_YEAR),
             memory: Memory::new(),
             worst_hunger: 0,
             worst_weariness: 0,
             poisoned_for: 0.0,
+            gear: Gear::issued(),
+            reload: 0.0,
+            hit_flash: 0.0,
+            drips: Vec::new(),
+            drip_timer: 0.0,
+            plan_wait: 0.0,
         }
     }
 
@@ -163,5 +207,34 @@ impl Bim {
             f.age += dt;
         }
         self.trail.retain(|f| f.age < TRAIL_LIFE);
+    }
+
+    /// Lay and age the blood on the deck. A drop every [`DRIP_EVERY`]
+    /// seconds over the open wounds while it bleeds and lives — a dead
+    /// Bim has stopped — scattered a little about the body so a Bim
+    /// standing still leaves a pool rather than a dot. The scatter is
+    /// rolled off the room's stream: a Bim only bleeds after a fight, and
+    /// no seed-pinned probe has one, so nothing they pin is re-rolled.
+    pub fn tick_drips(&mut self, dt: f32, rng: &mut Rng) {
+        let wounds = self.health.bleeding();
+        if wounds > 0 && self.is_alive() {
+            self.drip_timer -= dt;
+            if self.drip_timer <= 0.0 {
+                self.drip_timer = DRIP_EVERY / wounds as f32;
+                let at = self.character.pos
+                    + vec2(rng.signed() * DRIP_SCATTER, rng.signed() * DRIP_SCATTER);
+                self.drips.push(Drip {
+                    pos: at,
+                    age: 0.0,
+                    size: rng.range(3.5, 6.5),
+                });
+            }
+        } else {
+            self.drip_timer = 0.0;
+        }
+        for d in &mut self.drips {
+            d.age += dt;
+        }
+        self.drips.retain(|d| d.age < DRIP_LIFE);
     }
 }

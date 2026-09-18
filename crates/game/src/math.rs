@@ -140,7 +140,7 @@ pub fn approach(rate: f32, dt: f32) -> f32 {
 
 /// An axis-aligned box. Used for furniture footprints, marquee selection and
 /// the collision push-out.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Rect {
     pub min: Vec2,
     pub max: Vec2,

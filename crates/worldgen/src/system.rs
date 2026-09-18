@@ -24,7 +24,7 @@
 //! the system it is joining, so the whole thing is connected before anybody
 //! checks.
 
-use crate::data::{self, BodyKind, HazardKind, StationKind};
+use crate::data::{self, BodyKind, HazardKind, StationKind, Stock};
 use crate::galaxy::Galaxy;
 use crate::layout;
 use crate::math::{DVec2, dvec2};
@@ -71,6 +71,15 @@ pub struct StationBlueprint {
     /// For the map generator, and derived rather than drawn, so a station's
     /// interior does not move when the station beside it gains a hazard.
     pub map_seed: u64,
+    /// What is on its shelves. Its own branch of the contents stream, so
+    /// the shelf does not change when the hazards do.
+    pub stock: Stock,
+    /// Whose side the people aboard are on. Docked at a hostile station the
+    /// crew are the enemy: the world's stance machinery draws its people in
+    /// the enemy colours and they shoot. Rolled off its own branch like the
+    /// shelf ([`data::HOSTILE_SHARE`]), and never true of a derelict, which
+    /// has nobody aboard to take a side. A crew cannot start at one.
+    pub hostile: bool,
 }
 
 /// One thing in a system that can be flown to.
@@ -335,21 +344,25 @@ fn place_stations(
     if let Some(kind) = promised {
         wanted.push(kind);
     } else if rolled {
-        if let Some(kind) = pick_kind(&mut rng, desolation, bodies, &[]) {
+        if let Some(kind) = pick_kind(&mut rng, desolation, bodies) {
             wanted.push(kind);
         }
     }
-    // A second and a third, where the rolls fall and only where there is
-    // room. This is what gives "at most one station per parent body"
-    // something to bite on — with one station a system it could never be
-    // broken. Each roll is drawn whether or not the last one took, so the
-    // stream stays in step between systems that stopped at one and at two.
+    // A second, a third and on up to six, where the rolls fall and only
+    // where there is room. This is what gives "at most one station per
+    // parent body" something to bite on — with one station a system it
+    // could never be broken. Each roll is drawn whether or not the last one
+    // took, so the stream stays in step between systems that stopped at one
+    // and at two. A kind already wanted is wanted again as readily as any
+    // other: two orbitals round two planets is a system with somewhere to
+    // go when one of them turns out to be hostile. Where the second has no
+    // free body left to sit on, `site` says so and it is simply not there.
     for &chance in &data::MORE_STATIONS {
         let more = rng.chance(chance);
         if wanted.is_empty() || !more {
             continue;
         }
-        if let Some(kind) = pick_kind(&mut rng, desolation, bodies, &wanted) {
+        if let Some(kind) = pick_kind(&mut rng, desolation, bodies) {
             wanted.push(kind);
         }
     }
@@ -391,12 +404,12 @@ fn place_stations(
 }
 
 /// Which kind of station could stand here, weighted by what the system has.
-fn pick_kind(
-    rng: &mut Rng,
-    desolation: f64,
-    bodies: &[Body],
-    already: &[StationKind],
-) -> Option<StationKind> {
+///
+/// Whether a body of the right kind is still *free* is not asked here: what
+/// is already wanted has not been sited yet, so which bodies it will take
+/// is not known. `site` answers that, and a kind that finds every body of
+/// its sort taken is dropped there.
+fn pick_kind(rng: &mut Rng, desolation: f64, bodies: &[Body]) -> Option<StationKind> {
     let free_parent = |kind: StationKind| {
         bodies
             .iter()
@@ -404,7 +417,6 @@ fn pick_kind(
     };
     let candidates: Vec<StationKind> = StationKind::ALL
         .into_iter()
-        .filter(|&k| !already.contains(&k))
         .filter(|&k| match k {
             // A relay wants nowhere, and wants nowhere *quiet*.
             StationKind::Relay => desolation >= data::RELAY_DESOLATION,
@@ -590,6 +602,14 @@ fn furnish(
         })
         .collect();
 
+    // Whose side it is on: its own branch, like the shelf, so a station
+    // does not change sides when the hazards or the stock are reworked. A
+    // derelict draws nothing — there is nobody aboard to take one.
+    let hostile = kind != StationKind::Derelict
+        && base
+            .branch(0x_484f_5354_0000_0000 ^ id as u64)
+            .chance(data::HOSTILE_SHARE);
+
     StationBlueprint {
         id,
         kind,
@@ -598,6 +618,8 @@ fn furnish(
         name: station_name(&base, id),
         salvage_sites,
         hazard_sites,
+        stock: Stock::roll(kind, &mut base.branch(0x_5354_4f43_4b00_0000 ^ id as u64)),
+        hostile,
         // Its own stream, so an interior does not change when anything about
         // the station outside it does.
         map_seed: Rng::stream(seed, star_id, version, Purpose::MapSeed)
@@ -724,12 +746,86 @@ mod tests {
             (0.5..0.7).contains(&share),
             "{share} of systems had a station"
         );
-        // And a good many of those have more than one: somewhere to go.
+        // And most of those have more than one: somewhere to go, and
+        // somewhere else to go when the first turns out to be hostile.
         let several = systems.iter().filter(|s| s.stations.len() > 1).count();
         assert!(
-            several as f64 / with as f64 > 0.25,
+            several as f64 / with as f64 > 0.5,
             "{several} of {with} systems with a station had a second"
         );
+    }
+
+    /// The point of [`data::MORE_STATIONS`] being five long: a system with
+    /// a station has two or more on average, in every reference galaxy,
+    /// and never more than the rolls allow.
+    #[test]
+    fn a_system_with_a_station_has_two_on_average() {
+        for &t in &GalaxyType::ALL {
+            let systems = crate::fixture::reference(t).every_system();
+            let with: Vec<usize> = systems
+                .iter()
+                .map(|s| s.stations.len())
+                .filter(|&n| n > 0)
+                .collect();
+            let mean = with.iter().sum::<usize>() as f64 / with.len().max(1) as f64;
+            assert!(mean >= 2.0, "{t:?}: {mean} stations a system with one");
+            let most = with.iter().copied().max().unwrap_or(0);
+            assert!(
+                most <= 1 + data::MORE_STATIONS.len(),
+                "{t:?}: a system with {most} stations"
+            );
+        }
+    }
+
+    /// Some of the stations somebody lives on are somebody else's, in every
+    /// galaxy — about three in ten — and a derelict is never one of them.
+    #[test]
+    fn some_stations_are_hostile_and_derelicts_never_are() {
+        for &t in &GalaxyType::ALL {
+            let systems = crate::fixture::reference(t).every_system();
+            let (mut lived_on, mut hostile) = (0, 0);
+            for s in &systems {
+                for st in &s.stations {
+                    if st.kind == StationKind::Derelict {
+                        assert!(!st.hostile, "a hostile derelict at star {}", s.star_id);
+                        continue;
+                    }
+                    lived_on += 1;
+                    hostile += usize::from(st.hostile);
+                }
+            }
+            assert!(hostile > 0, "{t:?}: nobody hostile anywhere");
+            let share = hostile as f64 / lived_on as f64;
+            assert!(
+                (0.2..0.4).contains(&share),
+                "{t:?}: {share} of {lived_on} lived-on stations were hostile"
+            );
+        }
+    }
+
+    /// Whose side a station is on is its own roll: the same station comes
+    /// out on the same side however often it is asked for, and every kind
+    /// somebody lives on has stations on both sides — it is not the kind
+    /// read a second way.
+    #[test]
+    fn a_hostile_station_stays_hostile_and_any_kind_can_be() {
+        let g = Galaxy::new(31, GalaxyType::Round);
+        let mut sides: HashSet<(StationKind, bool)> = HashSet::new();
+        for id in 0..STAR_COUNT {
+            let a = g.system(id).unwrap();
+            let b = g.system(id).unwrap();
+            for (x, y) in a.stations.iter().zip(&b.stations) {
+                assert_eq!(x.hostile, y.hostile);
+                sides.insert((x.kind, x.hostile));
+            }
+        }
+        for &k in &StationKind::ALL {
+            if k == StationKind::Derelict {
+                continue;
+            }
+            assert!(sides.contains(&(k, true)), "no hostile {k:?}");
+            assert!(sides.contains(&(k, false)), "no friendly {k:?}");
+        }
     }
 
     /// The galaxy-wide promise. Every kind exists somewhere, in every galaxy.

@@ -14,7 +14,7 @@
 //!
 //! No strings cross the wasm boundary, so the ship knows [`Job::Clean`] and
 //! the host knows "Cleaning". **Adding a job is three edits**: a variant here,
-//! a name in `JOB_NAMES` in `web/bims.js`, and the range in
+//! a name in `JOB_NAMES` in `crates/app/src/names.rs`, and the range in
 //! `scratchpad/work.rs` that checks every job is nameable. Miss the second and
 //! the row renders blank; miss the third and the probe passes on a job nobody
 //! can read.
@@ -31,11 +31,13 @@ pub enum Job {
     Plant,
     /// Lifting a ripe one out of it.
     Cut,
-    /// Carrying what was lifted to the cold store. It has no errand of its
-    /// own yet — nothing aboard is fetched or moved except a harvest — so
-    /// this is the back half of a [`Job::Cut`], and a cutting waits on
-    /// whichever of the two is set later. When something else worth hauling
-    /// arrives, this is the row it goes under.
+    /// Carrying things: what was lifted out of a tray to the cold store,
+    /// and materials from a shelf to a construction site. The first has no
+    /// errand of its own — it is the back half of a [`Job::Cut`], so a
+    /// cutting waits on whichever of the two is set later. The second is an
+    /// errand in its own right: a load off a shelf, walked to the site and
+    /// put down there, one trip at a time, while the world says a site
+    /// still wants something (`game::Build`).
     Haul,
     /// Cooking: a meal for a hungry Bim, and stew for the cold store while
     /// the shelf holds fewer than the manager asked for — one vegetable and
@@ -60,10 +62,17 @@ pub enum Job {
     /// at a belt with a suit aboard and room for what comes back. The world
     /// says when — `game::Eva` — and what a walk yields is the belt's.
     Mine,
+    /// Putting a part of the ship together at a construction site the
+    /// player laid out, once everything it is made of has been carried
+    /// there — [`Job::Haul`] is the carrying. The world says what there is
+    /// to build and what each site still wants (`game::Build`); the room
+    /// walks a Bim to a shelf and to the site, in a suit if the site is
+    /// outside the hull.
+    Build,
 }
 
 impl Job {
-    pub const ALL: [Job; 8] = [
+    pub const ALL: [Job; 9] = [
         Job::Clean,
         Job::Plant,
         Job::Cut,
@@ -72,6 +81,7 @@ impl Job {
         Job::Helm,
         Job::Craft,
         Job::Mine,
+        Job::Build,
     ];
 
     /// 0, then one per job. The host names them.

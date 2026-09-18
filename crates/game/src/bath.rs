@@ -277,10 +277,20 @@ impl Bath {
         if !self.bare {
             self.draw_shell(list);
         }
-        self.draw_toilet(list);
-        self.draw_sink(list);
+        self.draw_fittings(list, true, true);
         if !self.bare {
             self.draw_door(list);
+        }
+    }
+
+    /// The pan and the basin, either without the other: a ship being built
+    /// may have only one of them yet.
+    pub fn draw_fittings(&self, list: &mut DrawList, toilet: bool, sink: bool) {
+        if toilet {
+            self.draw_toilet(list);
+        }
+        if sink {
+            self.draw_sink(list);
         }
     }
 

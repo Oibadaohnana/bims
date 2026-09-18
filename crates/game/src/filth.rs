@@ -354,6 +354,27 @@ impl Filth {
         }
     }
 
+    /// The same deck over a different interior — one that grew a tile when
+    /// deck was laid, or shrank — with every mess kept where it lies. Tiles
+    /// carry across by position, so a stain by the hob stays by the hob;
+    /// what the new interior does not reach is gone, and what it reaches
+    /// afresh is clean.
+    pub fn resized(&self, interior: Rect) -> Filth {
+        let mut next = Filth::new(interior);
+        for r in 0..next.rows {
+            for c in 0..next.cols {
+                let at = next.centre(c as i32, r as i32);
+                let (oc, or) = self.cell(at);
+                if let (Some(from), Some(to)) = (self.index(oc, or), next.index(c as i32, r as i32))
+                {
+                    next.tiles[to] = self.tiles[from];
+                    next.kinds[to] = self.kinds[from];
+                }
+            }
+        }
+        next
+    }
+
     fn cell(&self, at: Vec2) -> (i32, i32) {
         (
             ((at.x - self.origin.x) / TILE).floor() as i32,

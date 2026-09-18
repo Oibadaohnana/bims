@@ -87,7 +87,7 @@ impl Target {
 /// Which part of a trip the ship is in.
 ///
 /// The discriminants cross the wasm boundary and index `PHASE_NAMES` in
-/// `web/ship.js`, so they are written out and not renumbered.
+/// `crates/app/src/names.rs`, so they are written out and not renumbered.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u32)]
 pub enum Phase {
@@ -112,7 +112,7 @@ impl Phase {
 /// Why a trip could not be planned.
 ///
 /// The discriminants cross the wasm boundary and index `PLAN_ERRORS` in
-/// `web/ship.js`; `0` is left free for "nothing went wrong", the shape every
+/// `crates/app/src/names.rs`; `0` is left free for "nothing went wrong", the shape every
 /// other code in this workspace has.
 ///
 /// Two of them are never returned by [`plan_trip`] and live here anyway, for

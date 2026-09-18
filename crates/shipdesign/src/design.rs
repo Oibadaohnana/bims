@@ -25,7 +25,7 @@ use crate::parts::{Layer, PartKind, Rotation, covered, footprint};
 /// `physics::ResourceId::ALL.len()`, written out because it sizes an array
 /// and an array length has to be a constant. `cargo_is_the_right_length`
 /// pins the two together.
-pub const CARGO_SLOTS: usize = 12;
+pub const CARGO_SLOTS: usize = 15;
 
 /// One part, placed. `origin` is the top-left tile of the **turned**
 /// footprint, so a part's origin is where you clicked whichever way round it
@@ -127,8 +127,18 @@ impl ShipDesign {
             .collect()
     }
 
+    /// The part with this id. A binary search, because `parts` is always in
+    /// ascending id order: every part is appended by [`apply`] with
+    /// `next_id`, which only ever climbs, and a removal keeps the order.
+    /// `parts_are_in_id_order` in the tests pins it. It matters because the
+    /// painters ask this for every tile of every hull every frame — a
+    /// station is sixteen hundred tiles over as many parts, and a scan
+    /// for each was most of a frame.
     pub fn part(&self, id: u32) -> Option<&PlacedPart> {
-        self.parts.iter().find(|p| p.id == id)
+        self.parts
+            .binary_search_by_key(&id, |p| p.id)
+            .ok()
+            .map(|i| &self.parts[i])
     }
 
     pub fn count(&self, kind: PartKind) -> u32 {
@@ -264,7 +274,7 @@ pub enum Edit {
 /// Why an edit was refused.
 ///
 /// The discriminants cross the wasm boundary and index `EDIT_LINES` in
-/// `web/ship.js`, so they are written out and not renumbered. `0` is not a
+/// `crates/app/src/names.rs`, so they are written out and not renumbered. `0` is not a
 /// variant: it is "no error", which is what the export returns on success.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u32)]

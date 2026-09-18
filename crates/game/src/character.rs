@@ -82,6 +82,10 @@ const VEG: Color = Color::rgb(0.44, 0.68, 0.24);
 const VEG_DARK: Color = Color::rgb(0.30, 0.50, 0.16);
 const TOFU: Color = Color::rgb(0.93, 0.91, 0.82);
 const TOFU_EDGE: Color = Color::rgb(0.78, 0.76, 0.66);
+/// A crate of materials on the way to a construction site, and the strap
+/// round it.
+const CRATE: Color = Color::rgb(0.55, 0.47, 0.32);
+const CRATE_STRAP: Color = Color::rgb(0.32, 0.27, 0.19);
 /// What a Bim that has had an accident is covered in. The same colour as the
 /// mess on the deck, so the two read as the same substance.
 const GRIME: Color = Color::rgb(0.24, 0.18, 0.09);
@@ -98,6 +102,16 @@ pub const ACCENT: Color = Color::rgb(0.50, 0.82, 0.66);
 /// A Bim under direct orders. Its own colour, so being recruited reads at a
 /// glance and does not have to be told apart from being merely selected.
 const COMMAND: Color = Color::rgb(1.0, 0.82, 0.35);
+/// An enemy: the ring under one, in the colour its shots are.
+const ENEMY: Color = crate::combat::HOSTILE_BOLT;
+/// Blood: the blotch on a part with an open wound, and the drops on the
+/// deck. Dark, so it reads as blood and not as the enemy's red.
+pub const BLOOD: Color = Color::rgb(0.55, 0.05, 0.05);
+/// The hand laser, drawn: the body of it, and the emitter at the muzzle in
+/// the colour a friendly bolt is.
+const GUN: Color = Color::rgb(0.15, 0.17, 0.20);
+const GUN_EDGE: Color = Color::rgb(0.42, 0.47, 0.53);
+const GUN_LIT: Color = crate::combat::FRIENDLY_BOLT;
 
 /// Whose coverall a Bim is wearing: the ship's or the station's.
 ///
@@ -202,15 +216,28 @@ pub enum Held {
     /// A block of tofu, which is a vegetable as far as the chain is concerned
     /// and a different shape as far as the eye is.
     Tofu,
-    Slices,
+    /// What came off the board: rounds of vegetable and cubes of tofu, in
+    /// two hands on the way to the pot.
+    Chopped {
+        rounds: u32,
+        cubes: u32,
+    },
+    /// A plain fork, for eating at the table.
+    Fork,
     Knife,
     Spoon,
     /// The broom, out of its locker.
     Broom,
+    /// A pick, for a rock outside. In the tool hand, and swung the way the
+    /// knife is.
+    Pick,
     /// A plate or a bowl, carrying how full it is and which it is.
     Plate(f32, Dish),
     /// A pot of stew in a tub, on its way to the cold store or back from it.
     Stew,
+    /// A crate of materials off a shelf, on its way to a construction site.
+    /// The room never knows what is in it: the count is the world's.
+    Crate,
 }
 
 /// What the hands are busy doing. Each one drives its own arm animation.
@@ -327,6 +354,20 @@ pub struct Character {
     /// Seconds left of a hop or a heave. Both are short and both end by
     /// themselves, so nothing else has to remember to stop them.
     antic: f32,
+    /// Weapon drawn: in combat mode, with something to draw. Drawing only —
+    /// `Game::tick_combat` sets it every step from the gear and the orders.
+    armed: bool,
+    /// An enemy, to whoever is looking: ringed in red under the body.
+    /// Drawing only; the world says who is.
+    hostile: bool,
+    /// Out cold for want of blood: lying where it dropped, alive, doing
+    /// nothing until it comes round. Set by `Game::tick_bim` off the
+    /// health, the way napping is set off drowsiness; unlike a nap it
+    /// drops the route and stands the body up out of whatever it sat in.
+    unconscious: bool,
+    /// Which parts have an open wound — head, body, legs — for the blotch
+    /// drawn on each. Drawing only; `Game::wound` and the bandage set it.
+    wounds: [bool; 3],
 }
 
 impl Character {
@@ -363,6 +404,10 @@ impl Character {
             worn: Uniform::Crew,
             filth: 0.0,
             antic: 0.0,
+            armed: false,
+            hostile: false,
+            unconscious: false,
+            wounds: [false; 3],
         };
         c.begin_walk(rng);
         c
@@ -397,6 +442,12 @@ impl Character {
     /// A route is planned once and not replanned, so anything that would put
     /// something in the Bim's way — a door shutting itself, say — has to know
     /// where it was going before it does.
+    /// The route as it stands, for the probes.
+    #[allow(dead_code)]
+    pub fn path_for_probe(&self) -> &[Vec2] {
+        &self.path
+    }
+
     pub fn destination(&self) -> Option<Vec2> {
         self.path.last().copied()
     }
@@ -470,16 +521,22 @@ impl Character {
         self.seated = false;
     }
 
-    /// Out through the airlock: held at `at`, beyond the hull, in the suit.
-    /// Sitting, mechanically, so nothing shoves the body back onto the deck
-    /// and nothing walking the deck is slowed by it.
-    pub fn go_outside(&mut self, at: Vec2, facing: f32) {
+    /// Out through the airlock: standing at `at`, beyond the hull, in the
+    /// suit, and from there walking the outside — `Game` hands the body the
+    /// outside's grid and solids while it is out, so nothing shoves it back
+    /// onto the deck; see `Game::tick_bim`. `pick` is whether it takes the
+    /// pick out with it: a walk to mine does, a walk to build does not.
+    pub fn go_outside(&mut self, at: Vec2, facing: f32, pick: bool) {
         if !self.outside {
             self.worn = self.uniform;
         }
         self.outside = true;
         self.uniform = Uniform::Suit;
-        self.sit(at, facing);
+        if pick {
+            self.tool = Held::Pick;
+        }
+        self.stand_at(at);
+        self.face(facing);
         self.set_action(Action::Reach);
     }
 
@@ -492,6 +549,10 @@ impl Character {
         }
         self.outside = false;
         self.uniform = self.worn;
+        // The pick goes with the suit.
+        if self.tool == Held::Pick {
+            self.tool = Held::Nothing;
+        }
         self.stand_at(at);
         self.set_action(Action::None);
     }
@@ -578,6 +639,44 @@ impl Character {
         self.uniform
     }
 
+    pub fn set_armed(&mut self, armed: bool) {
+        self.armed = armed;
+    }
+
+    pub fn is_armed(&self) -> bool {
+        self.armed
+    }
+
+    pub fn set_hostile(&mut self, hostile: bool) {
+        self.hostile = hostile;
+    }
+
+    /// Out cold, or come round. Going out drops the walk — whatever it
+    /// was doing with its hands is the chain's to put down, and `Game`
+    /// interrupts the errand first — and it lies where it stood: not
+    /// seated, so nothing holds it in a bunk it has fallen out of.
+    pub fn knock_out(&mut self, out: bool) {
+        self.unconscious = out;
+        if out {
+            self.path.clear();
+            self.activity = Activity::Pausing;
+            self.speed = 0.0;
+            self.target_speed = 0.0;
+            self.seated = false;
+            self.antic = 0.0;
+            self.set_action(Action::None);
+        }
+    }
+
+    pub fn is_unconscious(&self) -> bool {
+        self.unconscious
+    }
+
+    /// Which parts bleed — head, body, legs — for the blotch drawn on each.
+    pub fn set_wounds(&mut self, wounds: [bool; 3]) {
+        self.wounds = wounds;
+    }
+
     /// It stops where it stands, and stays there.
     pub fn die(&mut self) {
         self.dead = true;
@@ -631,7 +730,7 @@ impl Character {
     /// refused outright while it is in the middle of a scripted step, where
     /// the pose belongs to the chain.
     pub fn antic(&mut self, action: Action, seconds: f32) {
-        if self.scripted || self.seated || self.dead || self.napping {
+        if self.scripted || self.seated || self.dead || self.napping || self.unconscious {
             return;
         }
         self.set_action(action);
@@ -795,7 +894,7 @@ impl Character {
     }
 
     pub fn update(&mut self, dt: f32, interior: Rect, solids: &[Rect], rng: &mut Rng) {
-        if self.dead || self.napping {
+        if self.dead || self.napping || self.unconscious {
             // Nothing moves, but the clock still runs so the shadow, the
             // breathing and the selection ring do not freeze mid-pulse.
             self.idle += dt;
@@ -992,6 +1091,11 @@ impl Character {
             self.draw_fallen(list);
             return;
         }
+        self.draw_rings(list);
+        if self.unconscious {
+            self.draw_lying(list);
+            return;
+        }
         let swing = self.stride.sin();
         let moving = clamp(self.speed / 60.0, 0.0, 1.0);
         // Breathing while still, a light bounce while walking.
@@ -1007,28 +1111,6 @@ impl Character {
             0.0
         };
         let pose = self.pose(swing, moving);
-
-        if self.selected && !self.dead {
-            // A ring on the ground under the Bim, breathing gently so it stays
-            // legible against the floor.
-            let pulse = (1.0 + self.select_pulse.sin() * 0.04) * BODY_SCALE;
-            list.circle(self.pos, 40.0 * pulse, ACCENT.alpha(0.10));
-            list.ring(self.pos, 40.0 * pulse, 2.5, ACCENT.alpha(0.85));
-        }
-
-        if self.recruited && !self.dead {
-            // A wider ring outside the selection one, broken into four arcs so
-            // the two never read as the same thing. Shown whether or not the
-            // Bim is selected: being under orders outlasts a click elsewhere.
-            let pulse = (1.0 + self.select_pulse.sin() * 0.05) * BODY_SCALE;
-            let span = 52.0 * pulse;
-            list.ring(self.pos, span, 1.5, COMMAND.alpha(0.35));
-            for i in 0..4 {
-                let a = i as f32 * (TAU / 4.0) + self.select_pulse * 0.25;
-                let at = self.pos + Vec2::from_angle(a) * (span * 0.5);
-                list.rect(at, vec2(9.0, 3.0), a + PI * 0.5, 1.5, COMMAND.alpha(0.9));
-            }
-        }
 
         // Hopping on the spot, or doubled over. Seen from above a jump is the
         // figure growing and its shadow shrinking away underneath it, and a
@@ -1061,6 +1143,10 @@ impl Character {
             for side in [-1.0f32, 1.0] {
                 let step = swing * 8.0 * side * moving;
                 b.ellipse(vec2(step, 7.0 * side), vec2(13.5, 9.0), 0.0, BOOT);
+                // A wounded leg bleeds onto the boot.
+                if self.wounds[2] {
+                    b.ellipse(vec2(step - 2.0, 7.0 * side), vec2(8.0, 6.0), 0.0, BLOOD);
+                }
             }
         }
 
@@ -1088,6 +1174,11 @@ impl Character {
             0.0,
             self.look.trim(),
         );
+
+        // A wound on the body: a blotch in the middle of the coverall.
+        if self.wounds[1] {
+            b.ellipse(vec2(1.0, 0.0), vec2(11.0, 9.0), 0.3, BLOOD);
+        }
 
         // What it has got on itself. Down the front and around the legs, where
         // it would be, and in the same colour as the mess on the deck so the
@@ -1150,6 +1241,10 @@ impl Character {
             self.look.hair(),
         );
         b.ellipse(at(vec2(5.6, 0.0)), vec2(4.0, 3.2), look, NOSE);
+        // A wound on the head: a blotch over the crown.
+        if self.wounds[0] {
+            b.ellipse(at(vec2(-1.0, 2.0)), vec2(7.0, 6.0), look, BLOOD);
+        }
         // The visor over all of that, in the suit: a helmet from above is
         // a bigger circle than the head, and the face shows through it.
         if self.uniform == Uniform::Suit {
@@ -1179,34 +1274,125 @@ impl Character {
         }
     }
 
+    /// The rings on the deck under a living Bim: selected, an enemy, under
+    /// orders. Drawn before the body, standing or lying.
+    fn draw_rings(&self, list: &mut DrawList) {
+        if self.selected {
+            // A ring on the ground under the Bim, breathing gently so it stays
+            // legible against the floor.
+            let pulse = (1.0 + self.select_pulse.sin() * 0.04) * BODY_SCALE;
+            list.circle(self.pos, 40.0 * pulse, ACCENT.alpha(0.10));
+            list.ring(self.pos, 40.0 * pulse, 2.5, ACCENT.alpha(0.85));
+        }
+
+        if self.hostile {
+            // An enemy is ringed in the colour its shots are, thin and
+            // steady: a warning, not a selection.
+            list.ring(self.pos, 46.0 * BODY_SCALE, 2.0, ENEMY.alpha(0.75));
+        }
+
+        if self.recruited {
+            // A wider ring outside the selection one, broken into four arcs so
+            // the two never read as the same thing. Shown whether or not the
+            // Bim is selected: being under orders outlasts a click elsewhere.
+            let pulse = (1.0 + self.select_pulse.sin() * 0.05) * BODY_SCALE;
+            let span = 52.0 * pulse;
+            list.ring(self.pos, span, 1.5, COMMAND.alpha(0.35));
+            for i in 0..4 {
+                let a = i as f32 * (TAU / 4.0) + self.select_pulse * 0.25;
+                let at = self.pos + Vec2::from_angle(a) * (span * 0.5);
+                list.rect(at, vec2(9.0, 3.0), a + PI * 0.5, 1.5, COMMAND.alpha(0.9));
+            }
+        }
+    }
+
     /// Face down where it dropped. Drawn cold and flat — no bob, no breath,
     /// no glancing about — because every other state has one of those, and
     /// the absence is what reads as dead.
     fn draw_fallen(&self, list: &mut DrawList) {
+        self.draw_flat(
+            list,
+            BODY_SCALE,
+            (GONE_SHIRT, GONE_SLEEVE, GONE_SKIN, GONE_HAIR),
+        );
+    }
+
+    /// Out cold: the same figure as a fallen one, in its own colours, and
+    /// breathing — a slow swell of the whole body, since from above a chest
+    /// rising is the outline growing. No Zs: this is not sleep. The breath
+    /// is what says alive; the blotches say why it is down.
+    fn draw_lying(&self, list: &mut DrawList) {
+        let breath = 1.0 + 0.03 * (self.idle * TAU / BREATH_PERIOD).sin();
+        self.draw_flat(
+            list,
+            BODY_SCALE * breath,
+            (
+                self.uniform.shirt(),
+                self.uniform.sleeve(),
+                SKIN,
+                self.look.hair(),
+            ),
+        );
+    }
+
+    /// The figure lying flat, in the given shirt, sleeve, skin and hair,
+    /// with the blood on whichever parts bleed.
+    fn draw_flat(&self, list: &mut DrawList, scale: f32, colours: (Color, Color, Color, Color)) {
+        let (shirt, sleeve, skin, hair) = colours;
         list.ellipse(
             self.pos + vec2(3.0, 5.0),
             vec2(34.0, 40.0) * BODY_SCALE,
             self.heading,
             SHADOW,
         );
-        let mut b = list.brush(self.pos, self.heading, BODY_SCALE);
+        let mut b = list.brush(self.pos, self.heading, scale);
         b.ellipse(Vec2::ZERO, vec2(26.0, 34.0), 0.0, OUTLINE);
-        b.ellipse(Vec2::ZERO, vec2(22.0, 30.0), 0.0, GONE_SHIRT);
+        b.ellipse(Vec2::ZERO, vec2(22.0, 30.0), 0.0, shirt);
+        if self.wounds[1] {
+            b.ellipse(vec2(-1.0, -2.0), vec2(11.0, 9.0), 0.3, BLOOD);
+        }
         for side in [-1.0f32, 1.0] {
-            b.ellipse(vec2(-4.0, 14.0 * side), vec2(10.0, 10.0), 0.0, GONE_SLEEVE);
+            b.ellipse(vec2(-4.0, 14.0 * side), vec2(10.0, 10.0), 0.0, sleeve);
+            // The boots trail behind the body, and a wounded leg bleeds
+            // onto them.
+            if self.wounds[2] {
+                b.ellipse(vec2(-13.0, 7.0 * side), vec2(8.0, 6.0), 0.0, BLOOD);
+            }
         }
         // Head turned aside, face down.
         b.ellipse(vec2(3.0, 4.0), vec2(15.5, 15.5), 0.0, OUTLINE);
-        b.ellipse(vec2(3.0, 4.0), vec2(13.0, 13.0), 0.0, GONE_SKIN);
-        b.ellipse(vec2(1.0, 4.0), vec2(11.0, 12.5), 0.4, GONE_HAIR);
+        b.ellipse(vec2(3.0, 4.0), vec2(13.0, 13.0), 0.0, skin);
+        b.ellipse(vec2(1.0, 4.0), vec2(11.0, 12.5), 0.4, hair);
+        if self.wounds[0] {
+            b.ellipse(vec2(2.0, 5.0), vec2(7.0, 6.0), 0.4, BLOOD);
+        }
     }
 
     /// Whatever is in the hands, placed in front of the body.
     fn draw_held(&self, list: &mut DrawList, pose: Pose) {
         let to_world = |local: Vec2| self.pos + (local * BODY_SCALE).rotate(self.heading);
 
+        // The weapon, drawn: held out in the right hand, the barrel along
+        // the way the body faces and the emitter lit at the end of it.
+        if self.armed && !self.dead {
+            let hand = vec2(pose.right + 8.0, 12.5);
+            let barrel = to_world(hand + vec2(9.0, 0.0));
+            list.rect(barrel, vec2(22.0, 6.0), self.heading, 1.5, GUN_EDGE);
+            list.rect(barrel, vec2(20.0, 4.0), self.heading, 1.0, GUN);
+            list.rect(
+                to_world(hand + vec2(1.0, 2.5)),
+                vec2(6.0, 9.0),
+                self.heading,
+                1.0,
+                GUN,
+            );
+            list.circle(to_world(hand + vec2(19.5, 0.0)), 4.0, GUN_LIT.alpha(0.9));
+        }
+
         match self.main {
-            Held::Nothing => {}
+            // The tools are drawn from the tool hand below; the main hand
+            // never holds one.
+            Held::Nothing | Held::Fork | Held::Pick => {}
             Held::Vegetable => {
                 let at = to_world(vec2(18.0 + pose.reach * 13.0, -6.0));
                 list.ellipse(at, vec2(30.0, 17.0), self.heading, VEG);
@@ -1217,15 +1403,32 @@ impl Character {
                     VEG_DARK,
                 );
             }
-            Held::Slices => {
-                // A handful of rounds, cupped in both hands.
-                for i in 0..5 {
+            Held::Chopped { rounds, cubes } => {
+                // A handful of what came off the board, cupped in both hands:
+                // rounds and cubes in turn, as many as will show.
+                let mut left = (rounds, cubes);
+                for i in 0..(rounds + cubes).min(6) {
+                    let cube = match left {
+                        (0, _) => true,
+                        (_, 0) => false,
+                        _ => i % 2 == 1,
+                    };
+                    if cube {
+                        left.1 -= 1;
+                    } else {
+                        left.0 -= 1;
+                    }
                     let at = to_world(vec2(
                         16.0 + pose.reach * 13.0 + (i % 2) as f32 * 7.0,
-                        -8.0 + i as f32 * 4.0,
+                        -9.0 + i as f32 * 3.6,
                     ));
-                    list.circle(at, 9.0, VEG);
-                    list.circle(at, 4.0, VEG_DARK);
+                    if cube {
+                        list.rect(at, vec2(8.0, 8.0), self.heading, 2.0, TOFU);
+                        list.stroke_rect(at, vec2(8.0, 8.0), self.heading, 2.0, 1.0, TOFU_EDGE);
+                    } else {
+                        list.circle(at, 9.0, VEG);
+                        list.circle(at, 4.0, VEG_DARK);
+                    }
                 }
             }
             Held::Tofu => {
@@ -1249,6 +1452,14 @@ impl Character {
                 to_world(vec2(20.0 + pose.reach * 8.0, 0.0)),
                 self.heading,
             ),
+            // A crate in both arms, square to the body, with a strap
+            // across it so it reads as a box and not a plate.
+            Held::Crate => {
+                let at = to_world(vec2(21.0 + pose.reach * 8.0, 0.0));
+                list.rect(at, vec2(26.0, 30.0), self.heading, 2.0, CRATE);
+                list.stroke_rect(at, vec2(26.0, 30.0), self.heading, 2.0, 1.5, CRATE_STRAP);
+                list.rect(at, vec2(26.0, 5.0), self.heading, 0.0, CRATE_STRAP);
+            }
             Held::Broom => {
                 // Held out in front and across, the way anyone carries one:
                 // the pole running away from the body and the head on the
@@ -1280,8 +1491,8 @@ impl Character {
         match self.tool {
             Held::Knife => draw_knife(list, tool_at, tool_rot),
             Held::Spoon => draw_spoon(list, tool_at, tool_rot),
-            // A plain fork, for eating at the table.
-            Held::Slices => {
+            Held::Pick => draw_pick(list, tool_at, tool_rot),
+            Held::Fork => {
                 list.rect(tool_at, vec2(22.0, 4.0), tool_rot, 2.0, STEEL);
                 list.rect(
                     tool_at + Vec2::from_angle(tool_rot) * -10.0,
@@ -1294,6 +1505,15 @@ impl Character {
             _ => {}
         }
     }
+}
+
+/// A pick: a handle along `rot` with the head across its end, the point
+/// forward.
+fn draw_pick(list: &mut DrawList, at: Vec2, rot: f32) {
+    let dir = Vec2::from_angle(rot);
+    list.rect(at - dir * 4.0, vec2(30.0, 4.0), rot, 2.0, BROOM_POLE);
+    list.rect(at + dir * 12.0, vec2(6.0, 22.0), rot, 2.0, STEEL);
+    list.rect(at + dir * 16.0, vec2(6.0, 8.0), rot, 1.5, STEEL);
 }
 
 /// A letter Z, drawn from the three strokes you would write it with.

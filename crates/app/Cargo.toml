@@ -1,0 +1,41 @@
+# The game, as a window on a desk.
+#
+# The one binary in the workspace, and the one crate that knows what a
+# window, a pointer or a frame is. Everything it shows it gets from the
+# crates beside it as numbers and shapes — the room, the designer and the
+# lobby each build a list of rectangles and ellipses, and this crate turns
+# the list into a mesh and puts the words on top. The panels are egui.
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2024"
+description = "Bims — the desktop game: a Bevy window over the room, the designer, the lobby and the world"
+
+[[bin]]
+name = "bims"
+path = "src/main.rs"
+
+[dependencies]
+bevy = { workspace = true, features = [
+    "default_app",
+    "2d_bevy_render",
+    "bevy_winit",
+    "default_font",
+    "multi_threaded",
+    "png",
+    "std",
+    "wayland",
+    "x11",
+] }
+bevy_egui = { workspace = true }
+bims = { path = "../game" }
+economy = { path = "../economy" }
+flight = { path = "../flight" }
+health = { path = "../health" }
+lobby = { path = "../lobby" }
+physics = { path = "../physics" }
+ship = { path = "../ship" }
+shipdesign = { path = "../shipdesign" }
+time = { path = "../time" }
+world = { path = "../world" }
+worldgen = { path = "../worldgen" }

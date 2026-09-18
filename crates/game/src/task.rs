@@ -9,8 +9,9 @@
 use crate::character::{Action, BITE_PERIOD, CHOP_PERIOD, Character, Held, SCOOP_PERIOD};
 use crate::clock::{self, HOUR, MINUTES_PER_SECOND};
 use crate::filth;
+use crate::galley::closest_free;
 use crate::hydro::Crop;
-use crate::math::{PI, Vec2};
+use crate::math::{PI, Vec2, vec2};
 use crate::nav::Maps;
 use crate::needs::Need;
 use crate::rng::Rng;
@@ -84,13 +85,13 @@ const WASH_TAKES_OFF: f32 = 0.5;
 pub const NAP_MINUTES: f32 = 30.0;
 pub const SLEEP_MINUTES: f32 = 6.0 * HOUR;
 
+/// How long dressing a wound takes, in game minutes, hands on the patient.
+/// Carried on the task in `rest_minutes`, the way a craft's length is, so
+/// the chain has one clock for "for as long as it was told".
+pub const BANDAGE_MINUTES: f32 = 10.0;
+
 /// Facing for the fixtures along the top wall.
 const FACE_WALL: f32 = -PI * 0.5;
-/// Both bunks have the pillow at the top of the room, so a sleeper lies the
-/// same way up in either. Which way it *turns* to climb in is the berth's own
-/// business — see `Room::bed_facing` — because the two stand against opposite
-/// walls and the ladders face opposite ways.
-const FACE_PILLOW: f32 = -PI * 0.5;
 /// In the heads: the door is in the north bulkhead and the pan is against the
 /// hull on the east side, so the Bim turns its back on each in turn.
 const FACE_DOOR: f32 = -PI * 0.5;
@@ -249,20 +250,56 @@ pub enum Step {
     Work,
 
     // A walk outside: a suit out of its locker, over to the deck inside the
-    // port, out through the airlock, so many minutes out there gathering
-    // ore, back in, and the suit hung up again. The outside is a **clock,
-    // not a place**: the Bim is held at a spot beyond the hull and drawn in
-    // the suit, and what it brings back is the world's to add — the room
-    // counts finished walks in `Room::walks_done` and the world reads the
-    // belt. See `Kind::Eva`.
+    // port, out through the airlock, and then — on the outside's own grid,
+    // see `nav::Nav::outside` — to a marked rock, a pick swung at it until
+    // it is gone, the next rock, and so on until there is none it can get
+    // to; then back to the port, in, and the suit hung up again. `PickRock`
+    // is a step of no length between one rock and the next: the world
+    // takes the mined tile out and hands the room the rocks afresh, and
+    // the grid is rebuilt, before the next rock is chosen — so a tile just
+    // mined is a tile the Bim can now stand in to reach the one behind it.
+    // What a rock yields is the world's to add: the room puts the mined
+    // rock's middle on `Room::mined` and counts finished walks in
+    // `Room::walks_done`. See `Kind::Eva`.
     GoToSuitLocker,
     TakeSuit,
     GoToGangway,
     StepOut,
-    Outside,
+    PickRock,
+    WalkToRock,
+    Mine,
+    WalkToPort,
     StepIn,
     BackToSuitLocker,
     PutSuitBack,
+
+    // Building. A load off a shelf, carried to a construction site and put
+    // down there — one trip an errand, `Kind::Haul` — and, once everything
+    // is there, standing beside the site and putting it together for as
+    // long as the world says, `Kind::Build`. A site outside the hull is the
+    // same two errands with the suit and the airlock either side of the
+    // walk to it, on the outside's grid: the walk out borrows the walk
+    // outside's steps above, from `GoToSuitLocker` to `StepOut` and from
+    // `WalkToPort` to `PutSuitBack`. The room moves no materials and
+    // changes no ship: `TakeMaterials` says a load was taken, `DropMaterials`
+    // that it arrived and `Construct` that the site is built, on
+    // `Room::picked`, `Room::dropped` and `Room::built`, and the world
+    // moves the count and puts the part down.
+    GoToShelf,
+    TakeMaterials,
+    CarryToSite,
+    DropMaterials,
+    GoToSite,
+    Construct,
+
+    // Dressing a wound: over to the patient — a crewmate, or the spot the
+    // Bim already stands on for its own — and hands on the part for
+    // `BANDAGE_MINUTES`, riding in `rest_minutes` like a craft's. The room
+    // has the bandages but not the bodies, so `Dress` only says, on the way
+    // out, that a part was dressed (`Room::dressed`), and `Game` does the
+    // dressing: the patient's health is a `Bim`'s. See `Kind::Bandage`.
+    GoToPatient,
+    Dress,
 
     Done,
 }
@@ -349,12 +386,26 @@ impl Step {
             GoToSuitLocker => TakeSuit,
             TakeSuit => GoToGangway,
             GoToGangway => StepOut,
-            StepOut => Outside,
-            Outside => StepIn,
+            StepOut => PickRock,
+            PickRock => WalkToRock,
+            WalkToRock => Mine,
+            // Round again for the next rock; `next_step` is what sends the
+            // Bim home instead when there is none.
+            Mine => PickRock,
+            WalkToPort => StepIn,
             StepIn => BackToSuitLocker,
             BackToSuitLocker => PutSuitBack,
+            // The two building errands as they run inside the hull; the
+            // outside variants turn off through the airlock in
+            // `Kind::steps` and `Task::next_step`.
+            GoToShelf => TakeMaterials,
+            TakeMaterials => CarryToSite,
+            CarryToSite => DropMaterials,
+            GoToSite => Construct,
+            GoToPatient => Dress,
             StartDishwasher | FlipSwitch | ClimbOutOfBed | ShutDoorBehind | PutBroomBack | Talk
-            | ShutStoreOnStew | Shower | Work | PutSuitBack | Done => Done,
+            | ShutStoreOnStew | Shower | Work | PutSuitBack | DropMaterials | Construct | Dress
+            | Done => Done,
         }
     }
 
@@ -392,6 +443,7 @@ impl Step {
             Shower => clock::seconds(crate::needs::SHOWER_MINUTES),
             TakeSuit | PutSuitBack => 1.5,
             StepOut | StepIn => 1.0,
+            TakeMaterials | DropMaterials => 1.2,
             StowCrop => 0.7,
             OpenDoor | ShutDoor | UnlockDoor | ShutDoorBehind => 0.7,
             SitOnToilet | RiseFromToilet => 0.7,
@@ -442,7 +494,13 @@ impl Step {
                 | GoToBench
                 | GoToSuitLocker
                 | GoToGangway
+                | WalkToRock
+                | WalkToPort
                 | BackToSuitLocker
+                | GoToShelf
+                | CarryToSite
+                | GoToSite
+                | GoToPatient
         )
     }
 
@@ -500,10 +558,13 @@ pub enum Kind {
     /// and the broom away again. The only errand that undoes a mess rather
     /// than making or avoiding one.
     Clean,
-    /// One tray of the hydroponic bay: whatever that tray wants when the Bim
-    /// gets to it. One errand per tray, so an interruption costs a tray and
-    /// not the whole bay.
-    Tend(usize),
+    /// One tray of one hydroponic bay: whatever that tray wants when the
+    /// Bim gets to it. One errand per tray, so an interruption costs a
+    /// tray and not the whole bay.
+    Tend {
+        bay: usize,
+        spot: usize,
+    },
     /// Going over and having a word with the other one. The only errand that
     /// takes two Bims, and the only one that is **dropped rather than queued**
     /// when it is interrupted — half a conversation is worth nothing, and the
@@ -520,12 +581,43 @@ pub enum Kind {
         recipe: u32,
         bench: usize,
     },
-    /// A walk outside to gather ore off a belt, in a suit. How long it is
-    /// out there rides in `rest_minutes`. Only aboard a room with a suit
+    /// A walk outside to mine the marked rocks, in a suit. How long one
+    /// rock takes rides in `rest_minutes`. Only aboard a room with a suit
     /// locker and a port — see `Room::suit_locker` and `Room::gangway` —
-    /// and only when the world says the ship is at a belt with a suit
-    /// aboard; see `Game::set_eva`.
+    /// and only when the world says the ship is at a site with rocks
+    /// marked and a suit aboard; see `Game::set_eva`.
     Eva,
+    /// One load of materials from a shelf to construction site `site`, put
+    /// down there. `outside` is whether the site is beyond the hull, in
+    /// which case the walk goes out through the airlock in a suit and back
+    /// in again after — decided when the errand is begun, off whether any
+    /// tile beside the site can be stood on from the deck. Which materials
+    /// and how many is the world's: the room says a load was taken and a
+    /// load arrived, on `Room::picked` and `Room::dropped`.
+    Haul {
+        site: u32,
+        outside: bool,
+    },
+    /// Putting construction site `site` together, standing beside it, for
+    /// the minutes riding in `rest_minutes` the way a craft's do. `outside`
+    /// as for a haul. The room says it is done on `Room::built`; the world
+    /// puts the part down.
+    Build {
+        site: u32,
+        outside: bool,
+    },
+    /// Dressing every wound on one part of `patient` — a crewmate, or the
+    /// Bim itself — with a bandage out of the room's store. `part` is a
+    /// `health::Part` code, carried as a number because the room never
+    /// reads it: `Dress` hands the pair back on `Room::dressed` and the game
+    /// does the dressing. The walk goes to where the patient stands as the
+    /// walk is entered — `Room::crew` — and the game checks the two are
+    /// still together when the hands come off. How long it takes rides in
+    /// `rest_minutes`, [`BANDAGE_MINUTES`].
+    Bandage {
+        patient: usize,
+        part: u32,
+    },
 }
 
 impl Kind {
@@ -538,13 +630,70 @@ impl Kind {
             Kind::Rest => Step::GoToBed,
             Kind::Heads => Step::GoToDoor,
             Kind::Leftovers => Step::GoToDrawerForPlate,
-            Kind::Tend(_) => Step::GoToTray,
+            Kind::Tend { .. } => Step::GoToTray,
             Kind::Clean => Step::GoToLocker,
             Kind::Chat => Step::GoToMeet,
             Kind::Shower => Step::GoToShower,
             Kind::Craft { .. } => Step::GoToBench,
             Kind::Eva => Step::GoToSuitLocker,
+            Kind::Haul { .. } => Step::GoToShelf,
+            Kind::Build { outside: true, .. } => Step::GoToSuitLocker,
+            Kind::Build { outside: false, .. } => Step::GoToSite,
+            Kind::Bandage { .. } => Step::GoToPatient,
         }
+    }
+
+    /// The site a building errand is about, or `None` for every other
+    /// errand.
+    pub fn site(self) -> Option<u32> {
+        match self {
+            Kind::Haul { site, .. } | Kind::Build { site, .. } => Some(site),
+            _ => None,
+        }
+    }
+
+    /// Whether this errand goes out through the airlock.
+    fn goes_outside(self) -> bool {
+        matches!(
+            self,
+            Kind::Eva | Kind::Haul { outside: true, .. } | Kind::Build { outside: true, .. }
+        )
+    }
+
+    /// The step after `here` where this chain turns off the straight line
+    /// `Step::next` draws — the forks that are the same for `steps` and for
+    /// `Task::next_step`, so the two cannot disagree about the shape of a
+    /// chain. `None` where the line is followed.
+    fn fork(self, here: Step) -> Option<Step> {
+        Some(match (self, here) {
+            // A bowl turns off towards the drawer where a stew carries on
+            // to the pot.
+            (Kind::Meal(Dish::Bowl), Step::PutKnifeDown) => Step::GoToDrawerForBowl,
+            // Off the hob and into a tub, rather than onto a plate.
+            (Kind::Batch, Step::Cook) => Step::TurnStoveOff,
+            (Kind::Batch, Step::TurnStoveOff) => Step::PackStew,
+            // A tub out of the store, and from the pot on the meal chain
+            // takes over.
+            (Kind::Reheat, Step::OpenFridge) => Step::TakeStew,
+            (Kind::Reheat, Step::CloseFridge) => Step::CarryStewToPot,
+            // Nothing was lit, so there is no hob to turn off.
+            (Kind::Leftovers, Step::Serve) => Step::PickUpPlate,
+            // The bay borrows the meal chain's fridge steps and leaves by
+            // its own door: open, put the harvest in, shut, done. Without
+            // these two it would carry on into the meal chain and start
+            // chopping.
+            (Kind::Tend { .. }, Step::OpenFridge) => Step::StowCrop,
+            (Kind::Tend { .. }, Step::CloseFridge) => Step::Done,
+            // A load for a site outside goes out through the airlock with
+            // the Bim, and the Bim comes back in after putting it down; a
+            // build outside is the same walk round the work.
+            (Kind::Haul { outside: true, .. }, Step::TakeMaterials) => Step::GoToSuitLocker,
+            (Kind::Haul { outside: true, .. }, Step::StepOut) => Step::CarryToSite,
+            (Kind::Haul { outside: true, .. }, Step::DropMaterials) => Step::WalkToPort,
+            (Kind::Build { outside: true, .. }, Step::StepOut) => Step::GoToSite,
+            (Kind::Build { outside: true, .. }, Step::Construct) => Step::WalkToPort,
+            _ => return None,
+        })
     }
 
     /// Every step of the chain, in order, with the chopping counted once.
@@ -559,23 +708,10 @@ impl Kind {
             let here = at?;
             let next = match (self, here) {
                 (Kind::Meal(_), Step::Chop) => Step::PutKnifeDown,
-                (Kind::Meal(Dish::Bowl), Step::PutKnifeDown) => Step::GoToDrawerForBowl,
-                // Off the hob and into a tub, rather than onto a plate.
-                (Kind::Batch, Step::Cook) => Step::TurnStoveOff,
-                (Kind::Batch, Step::TurnStoveOff) => Step::PackStew,
-                // A tub out of the store, and from the pot on the meal chain
-                // takes over.
-                (Kind::Reheat, Step::OpenFridge) => Step::TakeStew,
-                (Kind::Reheat, Step::CloseFridge) => Step::CarryStewToPot,
-                // Nothing was lit, so there is no hob to turn off.
-                (Kind::Leftovers, Step::Serve) => Step::PickUpPlate,
-                // The bay borrows the meal chain's fridge steps and leaves by
-                // its own door: open, put the harvest in, shut, done. Without
-                // these two it would carry on into the meal chain and start
-                // chopping.
-                (Kind::Tend(_), Step::OpenFridge) => Step::StowCrop,
-                (Kind::Tend(_), Step::CloseFridge) => Step::Done,
-                _ => here.next(),
+                // One rock, counted once: the chain goes round for every rock
+                // it can reach, and how many that is nothing here can know.
+                (Kind::Eva, Step::Mine) => Step::WalkToPort,
+                _ => self.fork(here).unwrap_or_else(|| here.next()),
             };
             at = if next == Step::Done { None } else { Some(next) };
             Some(here)
@@ -585,6 +721,219 @@ impl Kind {
 
 /// A chain put down part-way through, and everything needed to pick it up.
 ///
+/// Which of the room's fixtures a chain is using, one index a kind, chosen
+/// as the chain first walks to one and kept for the rest of the errand.
+///
+/// This is how a second hob is a hob somebody cooks on: a step that goes
+/// to a fixture asks for the closest one nobody else has (`closest_free`),
+/// and every later step of the same errand goes back to that one — the
+/// slices are on *that* board, the pot is on *that* hob. What another Bim
+/// holds is [`Taken`], gathered by the game from every other Bim's errand
+/// and queue. A pick is kept across a suspend, since a half-cooked meal's
+/// pot is still on its hob. `None` is not yet chosen; a room always has at
+/// least one of each, so `unwrap_or(0)` is never wrong, only early.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub struct Picks {
+    pub worktop: Option<usize>,
+    pub hob: Option<usize>,
+    pub fridge: Option<usize>,
+    pub dishwasher: Option<usize>,
+    pub bath: Option<usize>,
+    pub shower: Option<usize>,
+    pub locker: Option<usize>,
+}
+
+impl Picks {
+    /// Whether any fixture this chain holds is one of `other`'s.
+    pub fn clashes(&self, other: &Taken) -> bool {
+        let held =
+            |mine: Option<usize>, theirs: &[usize]| mine.is_some_and(|i| theirs.contains(&i));
+        held(self.worktop, &other.worktops)
+            || held(self.hob, &other.hobs)
+            || held(self.fridge, &other.fridges)
+            || held(self.dishwasher, &other.dishwashers)
+            || held(self.bath, &other.baths)
+            || held(self.shower, &other.showers)
+            || held(self.locker, &other.lockers)
+    }
+}
+
+/// Every fixture the *other* Bims are using — their errands' picks and
+/// their queued chains' — so a pick can go to the next one along.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct Taken {
+    pub worktops: Vec<usize>,
+    pub hobs: Vec<usize>,
+    pub fridges: Vec<usize>,
+    pub dishwashers: Vec<usize>,
+    pub baths: Vec<usize>,
+    pub showers: Vec<usize>,
+    pub lockers: Vec<usize>,
+}
+
+impl Taken {
+    pub fn add(&mut self, picks: &Picks) {
+        let put = |list: &mut Vec<usize>, pick: Option<usize>| {
+            if let Some(i) = pick
+                && !list.contains(&i)
+            {
+                list.push(i);
+            }
+        };
+        put(&mut self.worktops, picks.worktop);
+        put(&mut self.hobs, picks.hob);
+        put(&mut self.fridges, picks.fridge);
+        put(&mut self.dishwashers, picks.dishwasher);
+        put(&mut self.baths, picks.bath);
+        put(&mut self.showers, picks.shower);
+        put(&mut self.lockers, picks.locker);
+    }
+}
+
+/// Which kind of fixture a step walks to, if any.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Fixture {
+    Worktop,
+    Hob,
+    Fridge,
+    Dishwasher,
+    Bath,
+    Shower,
+    Locker,
+}
+
+fn fixture_of(step: Step) -> Option<Fixture> {
+    use Step::*;
+    Some(match step {
+        GoToFridge | CarryCropToStore | CarryStewToStore => Fixture::Fridge,
+        CarryToBoard | BackToBoard | BackToBoardWithBowl | GoToDrawerForKnife
+        | GoToDrawerForPlate | GoToDrawerForBowl => Fixture::Worktop,
+        CarryToPot | CarryStewToPot | BackToStove => Fixture::Hob,
+        CarryToDishwasher => Fixture::Dishwasher,
+        GoToLocker | BackToLocker => Fixture::Locker,
+        GoToDoor | StepOutside | StepInside | BackToDoor | GoToToilet | GoToSink => Fixture::Bath,
+        GoToShower => Fixture::Shower,
+        _ => return None,
+    })
+}
+
+/// The fixture a step wants, picked if it has not been: the closest one
+/// nobody else has, from `from`. Some picks ask more of a fixture than
+/// being free — leftovers want a hob with something in the pot, a broom
+/// wants a locker with a broom in it. `false` when there is none to be
+/// had, which is a chain with nowhere to go.
+fn pick_for(
+    picks: &mut Picks,
+    kind: Kind,
+    step: Step,
+    room: &Room,
+    from: Vec2,
+    taken: &Taken,
+) -> bool {
+    let Some(fixture) = fixture_of(step) else {
+        return true;
+    };
+    match fixture {
+        Fixture::Fridge => {
+            if picks.fridge.is_none() {
+                picks.fridge = closest_free(room.fridges.iter().map(|f| f.frame), from, |i| {
+                    taken.fridges.contains(&i)
+                });
+            }
+            picks.fridge.is_some()
+        }
+        Fixture::Worktop => {
+            if picks.worktop.is_none() {
+                picks.worktop = closest_free(room.worktops.iter().map(|w| w.frame), from, |i| {
+                    taken.worktops.contains(&i)
+                });
+            }
+            picks.worktop.is_some()
+        }
+        Fixture::Hob => {
+            if picks.hob.is_none() {
+                let wants_leftovers = kind == Kind::Leftovers;
+                picks.hob = closest_free(room.hobs.iter().map(|h| h.frame), from, |i| {
+                    taken.hobs.contains(&i) || (wants_leftovers && room.hobs[i].pot_servings == 0)
+                });
+            }
+            picks.hob.is_some()
+        }
+        Fixture::Dishwasher => {
+            if picks.dishwasher.is_none() {
+                picks.dishwasher =
+                    closest_free(room.dishwashers.iter().map(|d| d.face), from, |i| {
+                        taken.dishwashers.contains(&i)
+                    });
+            }
+            picks.dishwasher.is_some()
+        }
+        Fixture::Locker => {
+            if picks.locker.is_none() {
+                picks.locker = closest_free(room.lockers.iter().map(|l| l.frame), from, |i| {
+                    taken.lockers.contains(&i) || room.lockers[i].broom_out
+                });
+            }
+            picks.locker.is_some()
+        }
+        Fixture::Bath => {
+            if picks.bath.is_none() {
+                picks.bath = closest_free(
+                    (0..room.baths()).map(|i| room.bath_at(i).toilet),
+                    from,
+                    |i| taken.baths.contains(&i),
+                );
+            }
+            picks.bath.is_some()
+        }
+        Fixture::Shower => {
+            if picks.shower.is_none() {
+                picks.shower = closest_free(room.showers.iter().map(|(f, _)| *f), from, |i| {
+                    taken.showers.contains(&i)
+                });
+            }
+            picks.shower.is_some()
+        }
+    }
+}
+
+/// Every kind of fixture an errand of `kind` walks to, in the order it
+/// walks to them. What `can_pick_all` checks before the errand starts.
+fn fixtures_used(kind: Kind) -> &'static [Fixture] {
+    match kind {
+        Kind::Meal(_) | Kind::Batch => &[Fixture::Fridge, Fixture::Worktop, Fixture::Hob],
+        Kind::Reheat => &[Fixture::Fridge, Fixture::Hob, Fixture::Worktop],
+        Kind::Leftovers => &[Fixture::Hob, Fixture::Worktop],
+        Kind::Tend { .. } => &[Fixture::Fridge],
+        Kind::Heads => &[Fixture::Bath],
+        Kind::Shower => &[Fixture::Shower],
+        Kind::Clean => &[Fixture::Locker],
+        _ => &[],
+    }
+}
+
+/// Whether an errand of `kind` could pick one of everything it walks to,
+/// from `from`, with what the others hold: what `Game::can_begin` asks
+/// before starting one, so a Bim does not set out for a galley with no
+/// free hob in it and drop its slices when it gets there. Each is picked
+/// as if from where the Bim stands now; the chain picks again, properly,
+/// step by step.
+pub fn can_pick_all(kind: Kind, room: &Room, from: Vec2, taken: &Taken) -> bool {
+    let mut picks = Picks::default();
+    fixtures_used(kind).iter().all(|&fixture| {
+        let step = match fixture {
+            Fixture::Fridge => Step::GoToFridge,
+            Fixture::Worktop => Step::CarryToBoard,
+            Fixture::Hob => Step::CarryToPot,
+            Fixture::Dishwasher => Step::CarryToDishwasher,
+            Fixture::Bath => Step::GoToToilet,
+            Fixture::Shower => Step::GoToShower,
+            Fixture::Locker => Step::GoToLocker,
+        };
+        pick_for(&mut picks, kind, step, room, from, taken)
+    })
+}
+
 /// The room remembers most of it by itself — a chopped vegetable stays
 /// chopped, a pot stays full — so what has to be carried here is the handful
 /// of things that live on the Bim and are thrown away when a task lets go of
@@ -619,6 +968,8 @@ pub struct Saved {
     tool: Held,
     /// Where it was sitting or lying, and which way it faced, if it was.
     seat: Option<(Vec2, f32)>,
+    /// The fixtures it was using, kept: its pot is still on its hob.
+    picks: Picks,
 }
 
 impl Saved {
@@ -642,7 +993,12 @@ impl Saved {
             main: Held::Nothing,
             tool: Held::Nothing,
             seat: None,
+            picks: Picks::default(),
         }
+    }
+
+    pub fn picks(&self) -> Picks {
+        self.picks
     }
 
     pub fn kind(&self) -> Kind {
@@ -680,6 +1036,7 @@ impl Saved {
             room,
             from,
             self.target,
+            self.picks,
         )
     }
 
@@ -708,15 +1065,29 @@ fn destination(
     room: &Room,
     from: Vec2,
     target: Option<Vec2>,
+    picks: Picks,
 ) -> Option<Vec2> {
     use Step::*;
+    // The fixtures this chain picked, or the first of each for a step asked
+    // about before any pick — a resume station, an opening walk.
+    let (w, h, f) = (
+        picks.worktop.unwrap_or(0),
+        picks.hob.unwrap_or(0),
+        picks.fridge.unwrap_or(0),
+    );
+    let (d, b, s, l) = (
+        picks.dishwasher.unwrap_or(0),
+        picks.bath.unwrap_or(0),
+        picks.shower.unwrap_or(0),
+        picks.locker.unwrap_or(0),
+    );
     match step {
-        GoToFridge | CarryCropToStore | CarryStewToStore => Some(room.fridge_station()),
-        CarryToBoard | BackToBoard | BackToBoardWithBowl => Some(room.board_station()),
-        GoToDrawerForKnife | GoToDrawerForPlate | GoToDrawerForBowl => Some(room.drawer_station()),
-        CarryToPot | CarryStewToPot => Some(room.stove_station()),
+        GoToFridge | CarryCropToStore | CarryStewToStore => Some(room.fridge_station(f)),
+        CarryToBoard | BackToBoard | BackToBoardWithBowl => Some(room.board_station(w)),
+        GoToDrawerForKnife | GoToDrawerForPlate | GoToDrawerForBowl => Some(room.drawer_station(w)),
+        CarryToPot | CarryStewToPot => Some(room.stove_station(h)),
         // Serving needs pot and plate either side, so it has its own spot.
-        BackToStove => Some(room.serve_station()),
+        BackToStove => Some(room.serve_station(h)),
         // The chair sits clear of the table footprint, so the Bim can actually
         // stand on it before sitting down — and it is this Bim's chair, not
         // the other one's.
@@ -726,11 +1097,11 @@ fn destination(
             _ => None,
         },
         GoToTray => match kind {
-            Kind::Tend(spot) => Some(room.bay.station(spot)),
+            Kind::Tend { bay, spot } => room.bays.get(bay).map(|b| b.station(spot)),
             _ => None,
         },
-        CarryToDishwasher => Some(room.dishwasher_station()),
-        GoToLocker | BackToLocker => Some(room.locker_station()),
+        CarryToDishwasher => Some(room.dishwasher_station(d)),
+        GoToLocker | BackToLocker => Some(room.locker_station(l)),
         // Wherever the broom is wanted next. Picked as the step is entered and
         // carried on the task: a tile is chosen off the deck, and this is
         // handed the room without being told where to look.
@@ -742,13 +1113,13 @@ fn destination(
         // never replanned.
         GoToMeet => target,
         GoToBed => Some(room.bed_station(who)),
-        GoToDoor | StepOutside => Some(room.bath.outside_station()),
-        StepInside | BackToDoor => Some(room.bath.inside_station()),
-        GoToToilet => Some(room.bath.toilet_station()),
-        GoToSink => Some(room.bath.sink_station()),
+        GoToDoor | StepOutside => Some(room.bath_at(b).outside_station()),
+        StepInside | BackToDoor => Some(room.bath_at(b).inside_station()),
+        GoToToilet => Some(room.bath_at(b).toilet_station()),
+        GoToSink => Some(room.bath_at(b).sink_station()),
         // A room without a shower has nowhere to send the Bim, and the errand
         // is not begun — `Game::take_shower` asks first.
-        GoToShower => room.shower_station(),
+        GoToShower => room.shower_station(s),
         GoToBench => match kind {
             Kind::Craft { bench, .. } => room.benches.get(bench).map(|b| b.at),
             _ => None,
@@ -757,6 +1128,17 @@ fn destination(
         // Bim, and the errand is not begun — `Game::can_go_outside` asks.
         GoToSuitLocker | BackToSuitLocker => room.suit_locker_station(),
         GoToGangway => room.gangway,
+        // Beside the rock chosen as the step was entered, the way a tile to
+        // sweep is; and back to the spot outside the port.
+        WalkToRock => target,
+        WalkToPort => room.outside,
+        // The nearest shelf, and a tile beside the site, both chosen as the
+        // step is entered — from wherever the Bim is standing, on whichever
+        // grid it is standing on.
+        GoToShelf | CarryToSite | GoToSite => target,
+        // Beside the patient, chosen as the walk is entered from where the
+        // patient stands then.
+        GoToPatient => target,
         _ => None,
     }
 }
@@ -784,12 +1166,200 @@ pub fn opening_step(kind: Kind, room: &Room, from: Vec2) -> Step {
 /// length that comes straight back round.
 fn next_dirty(room: &Room, maps: &Maps, from: Vec2) -> Option<Vec2> {
     let nav = maps.pick(room.bath.is_open());
-    room.filth
-        .worst_tile(from, |at| !nav.path(from, nav.nearest_free(at)).is_empty())
+    room.filth.worst_tile(from, |at| nav.can_reach(from, at))
 }
 
-pub fn first_station(who: usize, kind: Kind, room: &Room, from: Vec2) -> Option<Vec2> {
-    destination(who, kind, opening_step(kind, room, from), room, from, None)
+pub fn first_station(
+    who: usize,
+    kind: Kind,
+    room: &Room,
+    from: Vec2,
+    taken: &Taken,
+) -> Option<Vec2> {
+    let step = opening_step(kind, room, from);
+    let mut picks = Picks::default();
+    pick_for(&mut picks, kind, step, room, from, taken);
+    destination(who, kind, step, room, from, None, picks)
+}
+
+/// The steps of an errand outside that happen beyond the door: from
+/// stepping out to stepping in, for a walk to mine and for a load or a
+/// build at a site outside the hull alike. Nothing for an errand that
+/// stays aboard.
+fn outside_half(kind: Kind, step: Step) -> bool {
+    if !kind.goes_outside() {
+        return false;
+    }
+    matches!(
+        step,
+        Step::StepOut
+            | Step::PickRock
+            | Step::WalkToRock
+            | Step::Mine
+            | Step::CarryToSite
+            | Step::DropMaterials
+            | Step::GoToSite
+            | Step::Construct
+            | Step::WalkToPort
+    )
+}
+
+/// The construction site an errand is about, as the world described it
+/// this step, or `None` when the world no longer wants it — cancelled, or
+/// built by somebody else.
+fn site_of(room: &Room, site: u32) -> Option<&crate::game::Build> {
+    room.builds.iter().find(|b| b.site == site)
+}
+
+/// The middle of a site: of the box round its tiles.
+fn site_middle(build: &crate::game::Build) -> Vec2 {
+    let mut lo = vec2(f32::MAX, f32::MAX);
+    let mut hi = vec2(f32::MIN, f32::MIN);
+    for tile in &build.tiles {
+        lo = vec2(lo.x.min(tile.min.x), lo.y.min(tile.min.y));
+        hi = vec2(hi.x.max(tile.max.x), hi.y.max(tile.max.y));
+    }
+    (lo + hi) * 0.5
+}
+
+/// Where to stand to work site `site` from `from`, on the grid a body
+/// `outside` or not is on: the nearest tile beside its footprint — four
+/// ways, never a corner, like a rock — that the grid has a route to, and
+/// failing that the nearest tile *of* the footprint, since deck plating
+/// and conduit go under the Bim's own feet. `None` when the site is not
+/// there, or nothing beside it can be stood on from here — which, asked of
+/// the deck's grid, is what says a site is outside the hull.
+///
+/// One place, asked when the errand is begun and again as the walk to the
+/// site is entered, for the reason `next_dirty` gives: the two have to
+/// agree or the chain loops.
+pub fn site_stand(room: &Room, maps: &Maps, site: u32, from: Vec2, outside: bool) -> Option<Vec2> {
+    let build = site_of(room, site)?;
+    let nav = if outside {
+        maps.outside()?
+    } else {
+        maps.pick(room.bath.is_open())
+    };
+    let t = crate::filth::TILE;
+    let mut ring: Vec<Vec2> = Vec::new();
+    let mut own: Vec<Vec2> = Vec::new();
+    for tile in &build.tiles {
+        own.push(tile.center());
+        for (dx, dy) in [(0.0, -1.0), (-1.0, 0.0), (1.0, 0.0), (0.0, 1.0)] {
+            let p = tile.center() + vec2(dx * t, dy * t);
+            if !build.tiles.iter().any(|r| r.contains(p)) && !ring.contains(&p) {
+                ring.push(p);
+            }
+        }
+    }
+    let pick = |mut spots: Vec<Vec2>| {
+        spots.sort_by(|a, b| {
+            (*a - from)
+                .len()
+                .partial_cmp(&(*b - from).len())
+                .unwrap_or(core::cmp::Ordering::Equal)
+        });
+        spots
+            .into_iter()
+            .find(|&p| nav.interior().contains(p) && nav.is_free(p) && nav.can_reach(from, p))
+    };
+    pick(ring).or_else(|| pick(own))
+}
+
+/// Where to stand to dress `patient`, for `who` standing at `from`: the
+/// spot it is already on for its own wounds, else the nearest free cell to
+/// a point a tile from the patient towards the helper — beside the body,
+/// not on it, so two of them do not stand in one spot for ten minutes.
+/// `None` for a patient the room has no position for (dead, outside) or
+/// no route to.
+///
+/// Asked as the walk is entered, from where the patient stands *then*
+/// (`Room::crew`), so a chain picked up off the queue walks to where the
+/// patient has got to rather than where it was.
+fn patient_stand(room: &Room, maps: &Maps, who: usize, patient: usize, from: Vec2) -> Option<Vec2> {
+    if patient == who {
+        return Some(from);
+    }
+    let at = room.crew.get(patient).copied().flatten()?;
+    let nav = maps.pick(room.bath.is_open());
+    let toward = from - at;
+    let step = if toward.len() > 1e-3 {
+        toward * (crate::filth::TILE / toward.len())
+    } else {
+        vec2(crate::filth::TILE, 0.0)
+    };
+    let stand = nav.nearest_free(at + step);
+    nav.can_reach(from, stand).then_some(stand)
+}
+
+/// The nearest shelf the Bim can get to from `from`, and where it stands
+/// at it; `None` in a room with no shelf it can reach.
+pub fn nearest_shelf(room: &Room, maps: &Maps, from: Vec2) -> Option<Vec2> {
+    let nav = maps.pick(room.bath.is_open());
+    let mut shelves: Vec<Vec2> = room.shelves.iter().map(|&(_, at)| at).collect();
+    shelves.sort_by(|a, b| {
+        (*a - from)
+            .len()
+            .partial_cmp(&(*b - from).len())
+            .unwrap_or(core::cmp::Ordering::Equal)
+    });
+    shelves.into_iter().find(|&at| nav.can_reach(from, at))
+}
+
+/// The next marked rock the Bim can get to from `from`, and where to stand
+/// to mine it: the nearest marked rock with a tile beside it — four ways,
+/// never a diagonal — that the outside grid has a route to. `None` with no
+/// outside grid, no rocks marked, or none of them reachable.
+///
+/// Four ways and not eight because of what a dig is: the tile mined is the
+/// tile the Bim stands in to reach the one behind it, and a body cannot
+/// squeeze diagonally between two rocks into a tile that was mined from
+/// its corner — the grid refuses that, rightly — so a rock mined from a
+/// corner would be a pocket nothing can get into, and the rock behind it
+/// marked for nothing.
+///
+/// One place, asked both when the walk is set up and when the chain asks
+/// itself whether there is another, for the same reason as `next_dirty`:
+/// the two have to agree or the chain loops.
+pub fn next_rock(room: &Room, maps: &Maps, from: Vec2) -> Option<(Vec2, Vec2)> {
+    reachable_rocks(room, maps, from).into_iter().next()
+}
+
+/// Every marked rock the Bim can get to from `from`, nearest first, each
+/// with the tile to stand on. What `next_rock` picks the first of, and
+/// what the room counts to say how many marks are out of reach.
+pub fn reachable_rocks(room: &Room, maps: &Maps, from: Vec2) -> Vec<(Vec2, Vec2)> {
+    let mut found = Vec::new();
+    let Some(nav) = maps.outside() else {
+        return found;
+    };
+    let t = crate::filth::TILE;
+    let mut rocks: Vec<Vec2> = room.rock_targets.clone();
+    rocks.sort_by(|a, b| {
+        (*a - from)
+            .len()
+            .partial_cmp(&(*b - from).len())
+            .unwrap_or(core::cmp::Ordering::Equal)
+    });
+    for rock in rocks {
+        let mut beside: Vec<Vec2> = [(0.0, -1.0), (-1.0, 0.0), (1.0, 0.0), (0.0, 1.0)]
+            .into_iter()
+            .map(|(dx, dy)| rock + vec2(dx * t, dy * t))
+            .collect();
+        beside.sort_by(|a, b| {
+            (*a - from)
+                .len()
+                .partial_cmp(&(*b - from).len())
+                .unwrap_or(core::cmp::Ordering::Equal)
+        });
+        for stand in beside {
+            if nav.is_free(stand) && nav.can_reach(from, stand) {
+                found.push((rock, stand));
+                break;
+            }
+        }
+    }
+    found
 }
 
 /// The step to start at when picking `target` up again.
@@ -799,6 +1369,13 @@ pub fn first_station(who: usize, kind: Kind, room: &Room, from: Vec2) -> Option<
 /// step and lets the Bim walk back to the bench first. The steps skipped on
 /// the way are the ones whose work the room is already holding.
 fn rewind(kind: Kind, target: Step) -> Step {
+    // An errand outside put down out there — or at the door — starts its
+    // outside half again from the gangway: the body was brought in when
+    // the chain was put down, and the rock or the spot beside the site is
+    // chosen afresh once it is out again. See `Task::resume`.
+    if outside_half(kind, target) {
+        return Step::GoToGangway;
+    }
     let mut back_at = kind.first_step();
     for step in kind.steps() {
         if step.is_walk() {
@@ -819,7 +1396,10 @@ const NOMINAL_WALK: f32 = 3.0;
 fn weight(step: Step, rest_minutes: f32) -> f32 {
     if step.is_walk() {
         NOMINAL_WALK
-    } else if matches!(step, Step::Doze | Step::Work | Step::Outside) {
+    } else if matches!(
+        step,
+        Step::Doze | Step::Work | Step::Mine | Step::Construct | Step::Dress
+    ) {
         clock::seconds(rest_minutes)
     } else {
         step.duration().max(0.05)
@@ -907,6 +1487,11 @@ pub struct Task {
     /// dirt is somewhere a body cannot quite stand.
     target: Option<Vec2>,
     swept: u32,
+    /// The rock the Bim is walking to or swinging at, by its middle, while
+    /// `target` is the tile beside it that it stands on. Chosen as
+    /// `WalkToRock` is entered. Not on `Saved`: a walk put down out there
+    /// chooses its rock afresh when it goes out again.
+    rock: Option<Vec2>,
     /// What the Bim lifted out of a tray and has not put away yet.
     ///
     /// The hands carry it and this remembers what it is, because `Held` knows
@@ -931,6 +1516,8 @@ pub struct Task {
     /// Set while walking back to a chain that was put down: the step to drop
     /// into, with its progress, once the Bim is in position again.
     resume: Option<Saved>,
+    /// The fixtures this chain is using. See [`Picks`].
+    picks: Picks,
 }
 
 impl Task {
@@ -944,8 +1531,20 @@ impl Task {
         ch: &mut Character,
         room: &mut Room,
         maps: &Maps,
+        taken: &Taken,
     ) -> Task {
-        Task::starting_toward(who, kind, step, rest_minutes, None, 0.0, ch, room, maps)
+        Task::starting_toward(
+            who,
+            kind,
+            step,
+            rest_minutes,
+            None,
+            0.0,
+            ch,
+            room,
+            maps,
+            taken,
+        )
     }
 
     /// The same, for a chain that is walked to a spot rather than to a
@@ -964,6 +1563,7 @@ impl Task {
         ch: &mut Character,
         room: &mut Room,
         maps: &Maps,
+        taken: &Taken,
     ) -> Task {
         ch.set_scripted(true);
         let mut task = Task {
@@ -977,14 +1577,16 @@ impl Task {
             face,
             target,
             swept: 0,
+            rock: None,
             lifted: None,
             started_inside: false,
             blocked: false,
             stall: 0.0,
             fumbles: 0,
             resume: None,
+            picks: Picks::default(),
         };
-        task.enter(ch, room, maps);
+        task.enter(ch, room, maps, taken);
         task
     }
 
@@ -995,23 +1597,63 @@ impl Task {
         ch: &mut Character,
         room: &mut Room,
         maps: &Maps,
+        taken: &Taken,
     ) -> Task {
-        room.reset_for_cooking(dish);
-        Task::starting_at(who, Kind::Meal(dish), Step::GoToFridge, 0.0, ch, room, maps)
+        room.dish = dish;
+        Task::starting_at(
+            who,
+            Kind::Meal(dish),
+            Step::GoToFridge,
+            0.0,
+            ch,
+            room,
+            maps,
+            taken,
+        )
     }
 
     /// Cook a stew for the cold store: a vegetable and a block of tofu,
     /// chopped, through the pot, and put away in a tub.
-    pub fn batch(who: usize, ch: &mut Character, room: &mut Room, maps: &Maps) -> Task {
-        room.reset_for_cooking(Dish::Stew);
-        Task::starting_at(who, Kind::Batch, Step::GoToFridge, 0.0, ch, room, maps)
+    pub fn batch(
+        who: usize,
+        ch: &mut Character,
+        room: &mut Room,
+        maps: &Maps,
+        taken: &Taken,
+    ) -> Task {
+        room.dish = Dish::Stew;
+        Task::starting_at(
+            who,
+            Kind::Batch,
+            Step::GoToFridge,
+            0.0,
+            ch,
+            room,
+            maps,
+            taken,
+        )
     }
 
     /// Warm a stew from the cold store through and eat it. The same sit-down
     /// and clearing-up as a meal cooked from raw, and no knife.
-    pub fn reheat(who: usize, ch: &mut Character, room: &mut Room, maps: &Maps) -> Task {
-        room.reset_for_cooking(Dish::Stew);
-        Task::starting_at(who, Kind::Reheat, Step::GoToFridge, 0.0, ch, room, maps)
+    pub fn reheat(
+        who: usize,
+        ch: &mut Character,
+        room: &mut Room,
+        maps: &Maps,
+        taken: &Taken,
+    ) -> Task {
+        room.dish = Dish::Stew;
+        Task::starting_at(
+            who,
+            Kind::Reheat,
+            Step::GoToFridge,
+            0.0,
+            ch,
+            room,
+            maps,
+            taken,
+        )
     }
 
     /// Walk over to a switch and work it. Everything the Bim can operate goes
@@ -1023,6 +1665,7 @@ impl Task {
         ch: &mut Character,
         room: &mut Room,
         maps: &Maps,
+        taken: &Taken,
     ) -> Task {
         Task::starting_at(
             who,
@@ -1032,6 +1675,7 @@ impl Task {
             ch,
             room,
             maps,
+            taken,
         )
     }
 
@@ -1039,7 +1683,13 @@ impl Task {
     /// locked — the host greys the menu item out for the same reason.
     /// Help itself to what is left in the pot: a plate, the rest of the stew,
     /// and the same sit-down and clearing-up as a meal it cooked.
-    pub fn leftovers(who: usize, ch: &mut Character, room: &mut Room, maps: &Maps) -> Task {
+    pub fn leftovers(
+        who: usize,
+        ch: &mut Character,
+        room: &mut Room,
+        maps: &Maps,
+        taken: &Taken,
+    ) -> Task {
         Task::starting_at(
             who,
             Kind::Leftovers,
@@ -1048,17 +1698,50 @@ impl Task {
             ch,
             room,
             maps,
+            taken,
         )
     }
 
     /// Fetch the broom and put a few tiles of the deck right.
-    pub fn clean(who: usize, ch: &mut Character, room: &mut Room, maps: &Maps) -> Task {
-        Task::starting_at(who, Kind::Clean, Step::GoToLocker, 0.0, ch, room, maps)
+    pub fn clean(
+        who: usize,
+        ch: &mut Character,
+        room: &mut Room,
+        maps: &Maps,
+        taken: &Taken,
+    ) -> Task {
+        Task::starting_at(
+            who,
+            Kind::Clean,
+            Step::GoToLocker,
+            0.0,
+            ch,
+            room,
+            maps,
+            taken,
+        )
     }
 
-    /// Walk to one tray of the bay and do whatever it wants doing.
-    pub fn tend(who: usize, spot: usize, ch: &mut Character, room: &mut Room, maps: &Maps) -> Task {
-        Task::starting_at(who, Kind::Tend(spot), Step::GoToTray, 0.0, ch, room, maps)
+    /// Walk to one tray of one bay and do whatever it wants doing.
+    pub fn tend(
+        who: usize,
+        bay: usize,
+        spot: usize,
+        ch: &mut Character,
+        room: &mut Room,
+        maps: &Maps,
+        taken: &Taken,
+    ) -> Task {
+        Task::starting_at(
+            who,
+            Kind::Tend { bay, spot },
+            Step::GoToTray,
+            0.0,
+            ch,
+            room,
+            maps,
+            taken,
+        )
     }
 
     /// Go and stand at `meet`, then turn to `face` and talk.
@@ -1075,6 +1758,7 @@ impl Task {
         ch: &mut Character,
         room: &mut Room,
         maps: &Maps,
+        taken: &Taken,
     ) -> Task {
         Task::starting_toward(
             who,
@@ -1086,23 +1770,53 @@ impl Task {
             ch,
             room,
             maps,
+            taken,
         )
     }
 
-    pub fn use_toilet(who: usize, ch: &mut Character, room: &mut Room, maps: &Maps) -> Task {
+    pub fn use_toilet(
+        who: usize,
+        ch: &mut Character,
+        room: &mut Room,
+        maps: &Maps,
+        taken: &Taken,
+    ) -> Task {
         let from = opening_step(Kind::Heads, room, ch.pos);
         let inside = from != Kind::Heads.first_step();
-        let mut task = Task::starting_at(who, Kind::Heads, from, 0.0, ch, room, maps);
+        let mut task = Task::starting_at(who, Kind::Heads, from, 0.0, ch, room, maps, taken);
         task.started_inside = inside;
         task
     }
 
-    pub fn shower(who: usize, ch: &mut Character, room: &mut Room, maps: &Maps) -> Task {
-        Task::starting_at(who, Kind::Shower, Step::GoToShower, 0.0, ch, room, maps)
+    pub fn shower(
+        who: usize,
+        ch: &mut Character,
+        room: &mut Room,
+        maps: &Maps,
+        taken: &Taken,
+    ) -> Task {
+        Task::starting_at(
+            who,
+            Kind::Shower,
+            Step::GoToShower,
+            0.0,
+            ch,
+            room,
+            maps,
+            taken,
+        )
     }
 
-    /// Out for a walk: the suit, the airlock, `minutes` outside, and back.
-    pub fn eva(who: usize, minutes: f32, ch: &mut Character, room: &mut Room, maps: &Maps) -> Task {
+    /// Out for a walk: the suit, the airlock, the marked rocks at `minutes`
+    /// each, and back.
+    pub fn eva(
+        who: usize,
+        minutes: f32,
+        ch: &mut Character,
+        room: &mut Room,
+        maps: &Maps,
+        taken: &Taken,
+    ) -> Task {
         Task::starting_at(
             who,
             Kind::Eva,
@@ -1111,6 +1825,62 @@ impl Task {
             ch,
             room,
             maps,
+            taken,
+        )
+    }
+
+    /// One load of materials from a shelf to site `site`, out through the
+    /// airlock and back if the site is `outside` the hull.
+    pub fn haul(
+        who: usize,
+        site: u32,
+        outside: bool,
+        ch: &mut Character,
+        room: &mut Room,
+        maps: &Maps,
+        taken: &Taken,
+    ) -> Task {
+        let kind = Kind::Haul { site, outside };
+        Task::starting_at(who, kind, kind.first_step(), 0.0, ch, room, maps, taken)
+    }
+
+    /// Off to put site `site` together, for `minutes` beside it, out
+    /// through the airlock and back if it is `outside` the hull.
+    pub fn build(
+        who: usize,
+        site: u32,
+        outside: bool,
+        minutes: f32,
+        ch: &mut Character,
+        room: &mut Room,
+        maps: &Maps,
+        taken: &Taken,
+    ) -> Task {
+        let kind = Kind::Build { site, outside };
+        Task::starting_at(who, kind, kind.first_step(), minutes, ch, room, maps, taken)
+    }
+
+    /// Off to dress `part` of `patient` — over to wherever it stands, and
+    /// [`BANDAGE_MINUTES`] with hands on it. The patient may be the Bim
+    /// itself, in which case the walk is to the spot it is on.
+    pub fn bandage(
+        who: usize,
+        patient: usize,
+        part: u32,
+        ch: &mut Character,
+        room: &mut Room,
+        maps: &Maps,
+        taken: &Taken,
+    ) -> Task {
+        Task::starting_at(
+            who,
+            Kind::Bandage { patient, part },
+            Step::GoToPatient,
+            BANDAGE_MINUTES,
+            ch,
+            room,
+            maps,
+            taken,
         )
     }
 
@@ -1123,6 +1893,7 @@ impl Task {
         ch: &mut Character,
         room: &mut Room,
         maps: &Maps,
+        taken: &Taken,
     ) -> Task {
         Task::starting_at(
             who,
@@ -1132,6 +1903,7 @@ impl Task {
             ch,
             room,
             maps,
+            taken,
         )
     }
 
@@ -1143,8 +1915,18 @@ impl Task {
         ch: &mut Character,
         room: &mut Room,
         maps: &Maps,
+        taken: &Taken,
     ) -> Task {
-        Task::starting_at(who, Kind::Rest, Step::GoToBed, minutes, ch, room, maps)
+        Task::starting_at(
+            who,
+            Kind::Rest,
+            Step::GoToBed,
+            minutes,
+            ch,
+            room,
+            maps,
+            taken,
+        )
     }
 
     /// Game minutes until the Bim is back on its feet, for the host's
@@ -1171,7 +1953,7 @@ impl Task {
     /// machine came up full — so that one step asks the room first.
     fn next_step(&self, room: &Room, maps: &Maps, from: Vec2) -> Step {
         use Step::*;
-        if self.step == ShutDishwasher && !room.dishwasher.is_full() {
+        if self.step == ShutDishwasher && !room.dishwashers[self.dishwasher()].is_full() {
             return Done;
         }
         if laps(self.kind) > 1 {
@@ -1185,36 +1967,11 @@ impl Task {
                 _ => {}
             }
         }
-        // A bowl needs no pot and no heat: fetch it and fill it.
-        if self.kind == Kind::Meal(Dish::Bowl) && self.step == PutKnifeDown {
-            return GoToDrawerForBowl;
-        }
-        // Off the hob and into a tub, rather than onto a plate.
-        if self.kind == Kind::Batch {
-            match self.step {
-                Cook => return TurnStoveOff,
-                TurnStoveOff => return PackStew,
-                _ => {}
-            }
-        }
-        // A tub out of the store, into the pot, and from there the meal
-        // chain's own serving and sitting down.
-        if self.kind == Kind::Reheat {
-            match self.step {
-                OpenFridge => return TakeStew,
-                CloseFridge => return CarryStewToPot,
-                _ => {}
-            }
-        }
         // A trip that began inside ends at the basin: the steps that let the
         // Bim out are the undoing of the ones that let it in, and it did not
         // use those either.
         if self.kind == Kind::Heads && self.started_inside && self.step == WashHands {
             return Done;
-        }
-        // Helping itself to the pot lit nothing, so it turns nothing off.
-        if self.kind == Kind::Leftovers && self.step == Serve {
-            return PickUpPlate;
         }
         // Sweeping goes round: one tile, then the next worst, until the deck
         // is clean or the Bim has done its share and puts the broom away.
@@ -1230,36 +1987,57 @@ impl Task {
                 _ => {}
             }
         }
-        if let Kind::Tend(_) = self.kind {
+        // Out there, the chain goes round: after each rock — and straight
+        // after stepping out — a moment to count the rocks again, and then
+        // the nearest marked one it can get to, or home when there is none
+        // or the world says this Bim is to come in.
+        if self.kind == Kind::Eva {
             match self.step {
-                // A planting leaves nothing in the Bim's hands, so there is
-                // nothing to carry anywhere and the errand is over at the
-                // tray. Asked of what was actually lifted rather than of what
-                // the bay wanted when the Bim set off: a tray seen to in the
-                // meantime leaves the hands empty either way.
-                //
-                // `Kind::steps` still counts the carrying half, so a planting
-                // reads about half done on the agenda when its row vanishes.
-                // That is deliberate rather than overlooked: the alternative
-                // is to weigh the chain by what the Bim turns out to be
-                // holding, and since it is not holding anything until
-                // `WorkTray` has finished, the bar would run *backwards* the
-                // moment a harvest came up. A bar that stops short beats one
-                // that goes back.
-                WorkTray if self.lifted.is_none() => return Done,
-                OpenFridge => return StowCrop,
-                CloseFridge => return Done,
+                StepOut | Mine => return PickRock,
+                PickRock => {
+                    let may_stay = room.eva_allowed.get(self.who).copied().unwrap_or(false);
+                    return if may_stay && next_rock(room, maps, from).is_some() {
+                        WalkToRock
+                    } else {
+                        WalkToPort
+                    };
+                }
                 _ => {}
             }
         }
-        self.step.next()
+        // A planting leaves nothing in the Bim's hands, so there is nothing
+        // to carry anywhere and the errand is over at the tray. Asked of
+        // what was actually lifted rather than of what the bay wanted when
+        // the Bim set off: a tray seen to in the meantime leaves the hands
+        // empty either way.
+        //
+        // `Kind::steps` still counts the carrying half, so a planting reads
+        // about half done on the agenda when its row vanishes. That is
+        // deliberate rather than overlooked: the alternative is to weigh
+        // the chain by what the Bim turns out to be holding, and since it
+        // is not holding anything until `WorkTray` has finished, the bar
+        // would run *backwards* the moment a harvest came up. A bar that
+        // stops short beats one that goes back.
+        if let Kind::Tend { .. } = self.kind
+            && self.step == WorkTray
+            && self.lifted.is_none()
+        {
+            return Done;
+        }
+        // Everything else that turns off the straight line is the same
+        // fork `Kind::steps` takes, so the agenda and the chain agree.
+        self.kind
+            .fork(self.step)
+            .unwrap_or_else(|| self.step.next())
     }
 
     /// How long the step running now lasts. Everything but a doze is a fixed
     /// length; a doze runs for as long as the Bim was told to sleep.
     fn duration(&self) -> f32 {
         match self.step {
-            Step::Doze | Step::Work | Step::Outside => clock::seconds(self.rest_minutes),
+            Step::Doze | Step::Work | Step::Mine | Step::Construct | Step::Dress => {
+                clock::seconds(self.rest_minutes)
+            }
             step => step.duration(),
         }
     }
@@ -1326,6 +2104,7 @@ impl Task {
             self.step,
             self.lifted.take(),
             true,
+            self.picks,
             ch,
             room,
         );
@@ -1354,6 +2133,7 @@ impl Task {
                 main: ch.main_held(),
                 tool: ch.tool_held(),
                 seat: ch.seat(),
+                picks: self.picks,
             },
         };
         // `None`, deliberately: a suspended chain is kept, not given up, and
@@ -1362,7 +2142,9 @@ impl Task {
         // Bim gets back to the fridge with it. `false` for the same reason:
         // a tub of stew in the hands is on `saved.main` and comes back with
         // the chain.
-        Task::let_go(self.who, self.kind, self.step, None, false, ch, room);
+        Task::let_go(
+            self.who, self.kind, self.step, None, false, self.picks, ch, room,
+        );
         ch.set_scripted(false);
         saved
     }
@@ -1376,9 +2158,11 @@ impl Task {
         step: Step,
         lifted: Option<Crop>,
         for_good: bool,
+        picks: Picks,
         ch: &mut Character,
         room: &mut Room,
     ) {
+        let bath = picks.bath.unwrap_or(0);
         use Step::*;
         // A tub of stew, the same as a harvest: a chain given up for good
         // with one in hand puts it back on the shelf rather than nowhere.
@@ -1386,6 +2170,12 @@ impl Task {
         // otherwise have it twice.
         if for_good && ch.main_held() == Held::Stew {
             room.stew += 1;
+            ch.hold_main(Held::Nothing);
+        }
+        // And a plate, the same way: it is counted, and one that vanished
+        // with the chain would be a drawer that quietly empties.
+        if for_good && matches!(ch.main_held(), Held::Plate(..)) {
+            room.return_plate();
             ch.hold_main(Held::Nothing);
         }
         // A harvest in the hands of a chain that is being given up for good.
@@ -1407,6 +2197,19 @@ impl Task {
         if kind == Kind::Clean && ch.main_held() == Held::Broom {
             ch.hold_main(Held::Nothing);
         }
+        // A load for a site given up for good, once it is off the shelf,
+        // goes back on the shelf: the room says so and the world moves the
+        // count, the same way it took it off. Not a suspended one — the
+        // chain is kept and walks on with it — and not one that has not
+        // been taken yet, which is every step up to and including the
+        // reach into the shelf, since `TakeMaterials` says so as it ends.
+        if for_good
+            && let Kind::Haul { site, .. } = kind
+            && !matches!(step, GoToShelf | TakeMaterials)
+        {
+            room.returned.push(site);
+            ch.hold_main(Held::Nothing);
+        }
         // A walk outside given up brings the body back in through the door,
         // whatever it was doing out there: a suspended one resumes from the
         // gangway and goes out again, and an abandoned one is simply back.
@@ -1421,19 +2224,25 @@ impl Task {
                 ch.stand_at(room.bed_station(who));
             }
             SitOnToilet | UseToilet | RiseFromToilet => {
-                ch.stand_at(room.bath.toilet_station());
+                ch.stand_at(room.bath_at(bath).toilet_station());
             }
             _ => {}
         }
         if kind == Kind::Heads {
-            room.bath.set_locked(false);
-            room.bath.set_open(true);
+            room.bath_at_mut(bath).set_locked(false);
+            room.bath_at_mut(bath).set_open(true);
         }
     }
 
     /// Pick a chain back up. The Bim walks to the last place the chain had it
     /// standing, and only then drops back into the step it was on.
-    pub fn resume(saved: Saved, ch: &mut Character, room: &mut Room, maps: &Maps) -> Task {
+    pub fn resume(
+        saved: Saved,
+        ch: &mut Character,
+        room: &mut Room,
+        maps: &Maps,
+        taken: &Taken,
+    ) -> Task {
         let back_at = rewind(saved.kind, saved.step);
         ch.set_scripted(true);
         let mut task = Task {
@@ -1449,20 +2258,25 @@ impl Task {
             face: 0.0,
             target: saved.target,
             swept: saved.swept,
+            rock: None,
             lifted: saved.lifted,
             started_inside: saved.started_inside,
             blocked: false,
             stall: 0.0,
             fumbles: 0,
             // Interrupted on the walk itself: there is nothing to drop into
-            // afterwards, it simply walks it again.
-            resume: if back_at == saved.step {
+            // afterwards, it simply walks it again. A walk outside put down
+            // beyond the door is the same: it goes out again and picks its
+            // rock afresh, rather than dropping into a step at a rock it is
+            // no longer beside.
+            picks: saved.picks,
+            resume: if back_at == saved.step || outside_half(saved.kind, saved.step) {
                 None
             } else {
                 Some(saved)
             },
         };
-        task.enter(ch, room, maps);
+        task.enter(ch, room, maps, taken);
         task
     }
 
@@ -1470,11 +2284,64 @@ impl Task {
         self.step
     }
 
+    pub fn picks(&self) -> Picks {
+        self.picks
+    }
+
+    // The fixture each step works, by index: the pick, or the first before
+    // one is made.
+    fn worktop(&self) -> usize {
+        self.picks.worktop.unwrap_or(0)
+    }
+
+    fn hob(&self) -> usize {
+        self.picks.hob.unwrap_or(0)
+    }
+
+    fn fridge(&self) -> usize {
+        self.picks.fridge.unwrap_or(0)
+    }
+
+    fn dishwasher(&self) -> usize {
+        self.picks.dishwasher.unwrap_or(0)
+    }
+
+    fn bath(&self) -> usize {
+        self.picks.bath.unwrap_or(0)
+    }
+
+    fn shower_pick(&self) -> usize {
+        self.picks.shower.unwrap_or(0)
+    }
+
     /// Set the Bim and the room up for whichever step we just moved into.
-    fn enter(&mut self, ch: &mut Character, room: &mut Room, maps: &Maps) {
+    fn enter(&mut self, ch: &mut Character, room: &mut Room, maps: &Maps, taken: &Taken) {
         use Step::*;
         self.elapsed = 0.0;
         self.done_count = 0;
+
+        // The fixture this step walks to, picked now if it has not been:
+        // the closest one nobody else has. None free is nowhere to go, and
+        // the chain gives up the way it does at a shut door. A worktop
+        // picked for cooking is cleared of whatever the last meal left.
+        let (had_worktop, had_hob) = (self.picks.worktop, self.picks.hob);
+        if !pick_for(&mut self.picks, self.kind, self.step, room, ch.pos, taken) {
+            self.blocked = true;
+            return;
+        }
+        let cooking = matches!(self.kind, Kind::Meal(_) | Kind::Batch | Kind::Reheat);
+        if cooking
+            && had_worktop.is_none()
+            && let Some(w) = self.picks.worktop
+        {
+            room.reset_worktop(w);
+        }
+        if cooking
+            && had_hob.is_none()
+            && let Some(h) = self.picks.hob
+        {
+            room.reset_hob(h);
+        }
 
         // Walking steps: point the Bim at the right spot and let it march.
         // Which tile the broom is going to is chosen now, on the way into the
@@ -1483,12 +2350,71 @@ impl Task {
         if self.step == Step::CarryBroomTo {
             self.target = next_dirty(room, maps, ch.pos);
         }
+        // Which rock, likewise: the nearest marked one it can get to now,
+        // and the tile beside it to stand on.
+        if self.step == Step::WalkToRock {
+            let next = next_rock(room, maps, ch.pos);
+            self.rock = next.map(|(rock, _)| rock);
+            self.target = next.map(|(_, stand)| stand);
+        }
+        // The shelf and the spot beside the site, likewise: the nearest of
+        // each from here, on the grid the body is on. A site the world no
+        // longer wants — cancelled, built by the other one — has nowhere to
+        // walk to, and the errand is given up the way a shut door gives one
+        // up. The load is in hand on the walk to the site whatever the
+        // hands were doing before it: a walk picked up again starts with
+        // them empty.
+        match self.step {
+            Step::GoToShelf => {
+                self.target = nearest_shelf(room, maps, ch.pos);
+                if self.target.is_none() {
+                    self.blocked = true;
+                    return;
+                }
+            }
+            Step::CarryToSite | Step::GoToSite => {
+                if self.step == Step::CarryToSite {
+                    ch.hold_main(Held::Crate);
+                }
+                self.target = self
+                    .kind
+                    .site()
+                    .and_then(|site| site_stand(room, maps, site, ch.pos, ch.is_outside()));
+                if self.target.is_none() {
+                    self.blocked = true;
+                    return;
+                }
+            }
+            // Beside the patient, wherever it stands now. Nowhere — the
+            // patient dead since the order, or outside — and the errand is
+            // given up like any other walk with nowhere to go.
+            Step::GoToPatient => {
+                let Kind::Bandage { patient, .. } = self.kind else {
+                    unreachable!("GoToPatient is a Bandage's step")
+                };
+                self.target = patient_stand(room, maps, self.who, patient, ch.pos);
+                if self.target.is_none() {
+                    self.blocked = true;
+                    return;
+                }
+            }
+            _ => {}
+        }
 
-        if let Some(to) = destination(self.who, self.kind, self.step, room, ch.pos, self.target) {
+        if let Some(to) = destination(
+            self.who,
+            self.kind,
+            self.step,
+            room,
+            ch.pos,
+            self.target,
+            self.picks,
+        ) {
             // Routed around the furniture, same as a player order. The grid is
             // chosen here rather than by the caller because the step before
-            // this one may have just opened the door.
-            let nav = maps.pick(room.bath.is_open());
+            // this one may have just opened the door — or stepped out of the
+            // airlock, which puts the body on the outside's grid.
+            let nav = maps.for_body(ch.is_outside(), room.bath.is_open());
             let route = nav.path(ch.pos, nav.nearest_free(to));
             if route.is_empty() {
                 // Nowhere to walk — a door has been shut across the way. The
@@ -1548,7 +2474,7 @@ impl Task {
                 ch.set_action(Action::Talk);
             }
             Shower => {
-                ch.face(room.shower_facing());
+                ch.face(room.shower_facing(self.shower_pick()));
                 ch.set_action(Action::Wash);
             }
             // At the locker, facing it; at the port, facing out; outside,
@@ -1561,7 +2487,16 @@ impl Task {
                 ch.face(room.port_facing());
                 ch.set_action(Action::Reach);
             }
-            Outside => ch.set_action(Action::Reach),
+            // Between rocks: standing there a moment while the rocks are
+            // counted again. At a rock: turned to it, the pick going.
+            PickRock => ch.set_action(Action::None),
+            Mine => {
+                if let Some(rock) = self.rock {
+                    let d = rock - ch.pos;
+                    ch.face(d.y.atan2(d.x));
+                }
+                ch.set_action(Action::Chop);
+            }
             StepIn => {
                 if let Some(gangway) = room.gangway {
                     ch.come_inside(gangway);
@@ -1578,6 +2513,43 @@ impl Task {
                 }
                 ch.set_action(Action::Reach);
             }
+            // At the shelf, reaching in; at the site, turned to it — the
+            // load set down, or the arms going at it for the build.
+            TakeMaterials => {
+                if let Some((frame, _)) = self
+                    .target
+                    .and_then(|at| room.shelves.iter().find(|(_, spot)| *spot == at))
+                {
+                    let d = frame.center() - ch.pos;
+                    ch.face(d.y.atan2(d.x));
+                }
+                ch.set_action(Action::Reach);
+            }
+            DropMaterials | Construct => {
+                if let Some(build) = self.kind.site().and_then(|site| site_of(room, site)) {
+                    let d = site_middle(build) - ch.pos;
+                    ch.face(d.y.atan2(d.x));
+                }
+                ch.set_action(if self.step == Construct {
+                    Action::Chop
+                } else {
+                    Action::Reach
+                });
+            }
+            // Turned to the patient, hands on it. Its own wounds it dresses
+            // facing whichever way it arrived.
+            Dress => {
+                if let Kind::Bandage { patient, .. } = self.kind
+                    && patient != self.who
+                    && let Some(Some(at)) = room.crew.get(patient)
+                {
+                    let d = *at - ch.pos;
+                    if d.len() > 1e-3 {
+                        ch.face(d.y.atan2(d.x));
+                    }
+                }
+                ch.set_action(Action::Reach);
+            }
             // Working the door panel. From the deck the Bim faces the
             // bulkhead; from inside it turns round and faces it the other way.
             OpenDoor | ShutDoorBehind => {
@@ -1589,13 +2561,13 @@ impl Task {
                 ch.set_action(Action::Reach);
             }
             SitOnToilet => {
-                ch.sit(room.bath.toilet_seat(), FACE_OFF_PAN);
+                ch.sit(room.bath_at(self.bath()).toilet_seat(), FACE_OFF_PAN);
                 ch.set_action(Action::Reach);
             }
             // Sitting there. No animation is the point of it.
             UseToilet => ch.set_action(Action::None),
             RiseFromToilet => {
-                ch.stand_at(room.bath.toilet_station());
+                ch.stand_at(room.bath_at(self.bath()).toilet_station());
                 ch.set_action(Action::None);
             }
             FlushToilet => {
@@ -1612,7 +2584,7 @@ impl Task {
                 ch.set_action(Action::Reach);
             }
             Doze => {
-                ch.lie(room.bed_lie_pos(self.who), FACE_PILLOW);
+                ch.lie(room.bed_lie_pos(self.who), room.bed_lie_facing(self.who));
                 ch.set_action(Action::Sleep);
             }
             // A stretch, still lying down, before getting up.
@@ -1646,39 +2618,44 @@ impl Task {
 
         // Things that happen the moment a step begins.
         match self.step {
-            OpenFridge | OpenStoreForStew => room.set_fridge_open(true),
-            CloseFridge | ShutStoreOnStew => room.set_fridge_open(false),
+            OpenFridge | OpenStoreForStew => room.set_fridge_open(self.fridge(), true),
+            CloseFridge | ShutStoreOnStew => room.set_fridge_open(self.fridge(), false),
             GoToDrawerForKnife | GoToDrawerForPlate => {}
-            TakeKnife | TakePlateAndSpoon | TakeBowl => room.set_drawer_open(true),
+            TakeKnife | TakePlateAndSpoon | TakeBowl => room.set_drawer_open(self.worktop(), true),
             Doze => room.set_bed_occupied(self.who, true),
-            OpenDishwasher => room.dishwasher.set_open(true),
-            ShutDishwasher => room.dishwasher.set_open(false),
+            OpenDishwasher => room.dishwashers[self.dishwasher()].set_open(true),
+            ShutDishwasher => room.dishwashers[self.dishwasher()].set_open(false),
             // The door slides as the Bim touches the panel, so the walk that
             // follows already has somewhere to go.
             OpenDoor | UnlockDoor => {
-                room.bath.set_locked(false);
-                room.bath.set_open(true);
+                room.bath_at_mut(self.bath()).set_locked(false);
+                room.bath_at_mut(self.bath()).set_open(true);
             }
             // Shut behind itself, and locked: the point of a door.
             ShutDoor => {
-                room.bath.set_open(false);
-                room.bath.set_locked(true);
+                room.bath_at_mut(self.bath()).set_open(false);
+                room.bath_at_mut(self.bath()).set_locked(true);
             }
-            ShutDoorBehind => room.bath.set_open(false),
+            ShutDoorBehind => room.bath_at_mut(self.bath()).set_open(false),
             WashHands => {
-                room.bath.run_tap(WASH_TIME);
+                room.bath_at_mut(self.bath()).run_tap(WASH_TIME);
                 // A basin is a basin: it gets the worst of a mess off a Bim.
                 ch.wash(WASH_TAKES_OFF);
             }
             // A shower takes the lot off, whatever it was.
             Shower => ch.wash(1.0),
+            // Back through the door: a walk to mine finished, and the room
+            // counts it the moment the body is in, which is the same step
+            // the world reads the count. A trip out to a site is not a walk
+            // and brings nothing back.
+            StepIn if self.kind == Kind::Eva => room.walks_done += 1,
             SitDown => {
                 // The plate goes on the table as the Bim sits down to it.
                 if let Held::Plate(fill, _) = ch.main_held() {
                     room.set_plate_at(self.who, Some(fill));
                 }
                 ch.hold_main(Held::Nothing);
-                ch.hold_tool(Held::Slices); // stands in for a fork
+                ch.hold_tool(Held::Fork);
             }
             _ => {}
         }
@@ -1689,20 +2666,70 @@ impl Task {
         use Step::*;
         match self.step {
             // Out through the door: held beyond the hull, in the suit, until
-            // `StepIn` brings the body back.
+            // `StepIn` brings the body back. With the pick for a rock; with
+            // nothing, or the load, for a site.
             StepOut => {
                 if let Some(outside) = room.outside {
-                    ch.go_outside(outside, room.port_facing());
+                    ch.go_outside(outside, room.port_facing(), self.kind == Kind::Eva);
                 }
             }
-            // A walk finished: the room counts it and the world reads the
-            // belt. The room never touches a resource itself.
-            Outside => room.walks_done += 1,
+            // A load off the shelf: the room says so, and the world decides
+            // how much that is and takes it off the count. What the hands
+            // hold is a crate, whatever is in it.
+            TakeMaterials => {
+                if let Kind::Haul { site, .. } = self.kind
+                    && let Some(build) = site_of(room, site)
+                    && let Some((resource, units)) = build.haul
+                {
+                    room.picked.push((site, resource, units));
+                }
+                ch.hold_main(Held::Crate);
+            }
+            // Put down at the site: the world moves the load onto it. The
+            // room's own copy of the order is a step behind the world, so
+            // the site is marked wanting nothing here as well, or the same
+            // load is offered again before the world has spoken.
+            DropMaterials => {
+                ch.hold_main(Held::Nothing);
+                if let Some(site) = self.kind.site() {
+                    room.dropped.push(site);
+                    if let Some(build) = room.builds.iter_mut().find(|b| b.site == site) {
+                        build.haul = None;
+                    }
+                }
+            }
+            // Built: the world puts the part down. Off the room's list at
+            // once, for the same reason.
+            Construct => {
+                if let Some(site) = self.kind.site() {
+                    room.built.push(site);
+                    room.builds.retain(|b| b.site != site);
+                }
+            }
+            // A rock gone: the room writes down which and the world moves
+            // what it yields; the room never touches a resource itself. It
+            // comes off the room's own copy of the rocks and the marks too,
+            // so the next rock chosen is not this one again.
+            Mine => {
+                if let Some(rock) = self.rock.take() {
+                    room.mined.push(rock);
+                    room.rock_targets.retain(|&r| r != rock);
+                    room.rocks.retain(|r| !r.contains(rock));
+                }
+            }
             // Finished: the room writes it down and the world moves the
             // cargo. The room never touches a resource itself.
             Work => {
                 if let Kind::Craft { recipe, .. } = self.kind {
                     room.crafted.push(recipe);
+                }
+            }
+            // Hands off the patient: the room says which part of whom was
+            // dressed, and the game — which has the body and the count of
+            // bandages — does the dressing, if the two are still together.
+            Dress => {
+                if let Kind::Bandage { patient, part } = self.kind {
+                    room.dressed.push((patient, part));
                 }
             }
             // A shelf stew takes its two things one trip each — the
@@ -1715,8 +2742,8 @@ impl Task {
                     Crop::Soy
                 };
                 ch.hold_main(match crop {
-                    Crop::Veg => Held::Vegetable,
                     Crop::Soy => Held::Tofu,
+                    _ => Held::Vegetable,
                 });
                 room.take(crop);
             }
@@ -1733,11 +2760,10 @@ impl Task {
                 room.take_from_fridge(dish);
             }
             PutVegetableDown => {
-                // The board draws whatever was put on it: a block chops into
-                // cubes and a vegetable into rounds.
-                room.board_tofu = ch.main_held() == Held::Tofu;
+                // The board draws whatever was put on it, on its own side: a
+                // block chops into cubes and a vegetable into rounds.
+                room.put_on_board(self.worktop(), ch.main_held() == Held::Tofu);
                 ch.hold_main(Held::Nothing);
-                room.board_veg = 1.0;
             }
             // Out of the store and into the hands; the tub is the Bim's now
             // and the count says so, the same way a crop is off the tray the
@@ -1750,18 +2776,18 @@ impl Task {
             // it starts most of the way to done rather than raw.
             TipStewIntoPot => {
                 ch.hold_main(Held::Nothing);
-                room.pot_contents = 1.0;
-                room.pot_cooked = 0.6;
-                room.food_bad = false;
-                room.pot_servings = SERVINGS_PER_POT;
+                room.hobs[self.hob()].pot_contents = 1.0;
+                room.hobs[self.hob()].pot_cooked = 0.6;
+                room.hobs[self.hob()].food_bad = false;
+                room.hobs[self.hob()].pot_servings = SERVINGS_PER_POT;
             }
             // The whole pot into a tub. Nothing is left on the hob to come
             // back to: the pot is empty and the tub is what holds it now.
             PackStew => {
                 ch.hold_main(Held::Stew);
-                room.pot_contents = 0.0;
-                room.pot_cooked = 0.0;
-                room.pot_servings = 0;
+                room.hobs[self.hob()].pot_contents = 0.0;
+                room.hobs[self.hob()].pot_cooked = 0.0;
+                room.hobs[self.hob()].pot_servings = 0;
             }
             StowStew => {
                 ch.hold_main(Held::Nothing);
@@ -1769,25 +2795,27 @@ impl Task {
             }
             TakeKnife => {
                 ch.hold_tool(Held::Knife);
-                room.set_drawer_open(false);
+                room.set_drawer_open(self.worktop(), false);
             }
             PutKnifeDown => {
                 ch.hold_tool(Held::Nothing);
-                room.knife_on_board = true;
+                room.worktops[self.worktop()].knife_on_board = true;
             }
             GatherSlices => {
-                ch.hold_main(Held::Slices);
-                room.board_slices = 0;
+                // Everything on the board, both sides of it, in two hands.
+                let (rounds, cubes) = room.board_pieces(self.worktop());
+                ch.hold_main(Held::Chopped { rounds, cubes });
+                room.clear_board(self.worktop());
             }
             TipIntoPot => {
                 ch.hold_main(Held::Nothing);
-                room.pot_contents = 1.0;
-                room.pot_cooked = 0.0;
-                room.food_bad = false;
-                room.pot_servings = SERVINGS_PER_POT;
+                room.hobs[self.hob()].pot_contents = 1.0;
+                room.hobs[self.hob()].pot_cooked = 0.0;
+                room.hobs[self.hob()].food_bad = false;
+                room.hobs[self.hob()].pot_servings = SERVINGS_PER_POT;
             }
-            TurnStoveOn => room.set_stove(true),
-            TurnStoveOff => room.set_stove(false),
+            TurnStoveOn => room.set_stove(self.hob(), true),
+            TurnStoveOff => room.set_stove(self.hob(), false),
             // The player asked for a toggle, so read the state at the moment
             // the Bim's hand actually reaches it.
             FlipSwitch => {
@@ -1803,11 +2831,20 @@ impl Task {
             // aboard travels by itself. What is lifted here is carried,
             // and only `StowCrop` puts it away.
             WorkTray => {
-                if let Some(job) = room.bay.wants_work(room.veg, room.tofu) {
-                    if let Some(crop) = room.bay.work(job) {
+                let Kind::Tend { bay, .. } = self.kind else {
+                    unreachable!("WorkTray is a Tend's step")
+                };
+                let (veg, tofu, fibre) = (room.veg, room.tofu, room.fibre);
+                if let Some(bay) = room.bays.get_mut(bay)
+                    && let Some(job) = bay.wants_work(veg, tofu, fibre)
+                {
+                    if let Some(crop) = bay.work(job) {
                         self.lifted = Some(crop);
+                        // A sheaf of fibre in the hands is drawn as greens:
+                        // the hands know two shapes, and `lifted` is what
+                        // the store goes by.
                         ch.hold_main(match crop {
-                            Crop::Veg => Held::Vegetable,
+                            Crop::Veg | Crop::Fibre => Held::Vegetable,
                             Crop::Soy => Held::Tofu,
                         });
                     }
@@ -1837,38 +2874,42 @@ impl Task {
                     room.store(crop);
                 }
             }
+            // A plate out of the drawer, and one fewer in it.
             TakePlateAndSpoon => {
+                room.take_plate();
                 ch.hold_main(Held::Plate(0.0, room.dish));
                 ch.hold_tool(Held::Spoon);
-                room.set_drawer_open(false);
+                room.set_drawer_open(self.worktop(), false);
             }
             TakeBowl => {
+                room.take_plate();
                 ch.hold_main(Held::Plate(0.0, Dish::Bowl));
-                room.set_drawer_open(false);
+                room.set_drawer_open(self.worktop(), false);
             }
             // Chopped tofu and the salad go in together, and that is the meal.
             FillBowl => {
                 ch.hold_main(Held::Plate(1.0, Dish::Bowl));
-                room.board_slices = 0;
-                room.board_veg = 0.0;
+                room.clear_board(self.worktop());
                 // Nothing cooked, but made in the same galley: judged the
                 // same way as a pot.
-                room.made_a_bowl();
+                room.made_a_bowl(self.hob());
             }
             Chop => self.chopped += 1,
             SetPlateDown => {
                 ch.hold_main(Held::Nothing);
-                room.plate_on_counter = Some(0.0);
+                room.hobs[self.hob()].plate_on_counter = Some(0.0);
             }
             // The helping comes off the pot here rather than spoonful by
             // spoonful, so an interrupted serve costs the pot nothing: what
             // the scoops move is the picture, and this is the count.
             Serve => {
-                room.pot_servings = room.pot_servings.saturating_sub(1);
-                room.pot_contents = room.pot_servings as f32 / SERVINGS_PER_POT as f32;
+                room.hobs[self.hob()].pot_servings =
+                    room.hobs[self.hob()].pot_servings.saturating_sub(1);
+                room.hobs[self.hob()].pot_contents =
+                    room.hobs[self.hob()].pot_servings as f32 / SERVINGS_PER_POT as f32;
             }
             PickUpPlate => {
-                let fill = room.plate_on_counter.take().unwrap_or(0.0);
+                let fill = room.hobs[self.hob()].plate_on_counter.take().unwrap_or(0.0);
                 ch.hold_main(Held::Plate(fill, room.dish));
                 ch.hold_tool(Held::Spoon);
             }
@@ -1881,10 +2922,10 @@ impl Task {
             StackDishes => {
                 ch.hold_main(Held::Nothing);
                 ch.hold_tool(Held::Nothing);
-                room.dishwasher.stack();
+                room.dishwashers[self.dishwasher()].stack();
             }
-            StartDishwasher => room.dishwasher.start(),
-            FlushToilet => room.bath.flush(),
+            StartDishwasher => room.dishwashers[self.dishwasher()].start(),
+            FlushToilet => room.bath_at_mut(self.bath()).flush(),
             // Back down the ladder: the Bim was lying in the middle of the
             // bed, and the floor beside it is the only place it can stand.
             WakeUp => {
@@ -1913,9 +2954,7 @@ impl Task {
             return;
         }
         let nav = maps.pick(room.bath.is_open());
-        room.filth.spatter(at, rng, |tile| {
-            !nav.path(at, nav.nearest_free(tile)).is_empty()
-        });
+        room.filth.spatter(at, rng, |tile| nav.can_reach(at, tile));
     }
 
     /// Repeating steps do their work in discrete beats, so that each knife
@@ -1933,18 +2972,17 @@ impl Task {
         while self.done_count < want {
             self.done_count += 1;
             match self.step {
-                Chop => {
-                    room.board_veg = (1.0 - self.done_count as f32 / CHOPS as f32).max(0.0);
-                    room.board_slices += 1;
-                }
+                Chop => room.chop(self.worktop(), self.done_count, CHOPS),
                 Serve => {
-                    room.plate_on_counter = Some(self.done_count as f32 / SCOOPS as f32);
+                    room.hobs[self.hob()].plate_on_counter =
+                        Some(self.done_count as f32 / SCOOPS as f32);
                     // One helping out of however many are left, spread over the
                     // spoonfuls. Worked out from the count rather than taken
                     // off what is there, so a serve that was interrupted and
                     // started again does not drain the pot twice.
-                    let left = room.pot_servings as f32 - self.done_count as f32 / SCOOPS as f32;
-                    room.pot_contents = (left / SERVINGS_PER_POT as f32).max(0.0);
+                    let left = room.hobs[self.hob()].pot_servings as f32
+                        - self.done_count as f32 / SCOOPS as f32;
+                    room.hobs[self.hob()].pot_contents = (left / SERVINGS_PER_POT as f32).max(0.0);
                 }
                 Eat => {
                     let left = 1.0 - self.done_count as f32 / BITES as f32;
@@ -1974,6 +3012,7 @@ impl Task {
         rng: &mut Rng,
         fumble: f32,
         effort: f32,
+        taken: &Taken,
     ) {
         if self.step == Step::Done {
             return;
@@ -1995,6 +3034,7 @@ impl Task {
                 self.step,
                 self.lifted.take(),
                 true,
+                self.picks,
                 ch,
                 room,
             );
@@ -2047,7 +3087,7 @@ impl Task {
             if let Some(saved) = self.resume.take() {
                 saved.restore(ch);
                 self.step = saved.step;
-                self.enter(ch, room, maps);
+                self.enter(ch, room, maps, taken);
                 self.elapsed = saved.elapsed;
                 self.done_count = saved.done_count;
                 return;
@@ -2061,7 +3101,7 @@ impl Task {
                 ch.set_scripted(false);
                 return;
             }
-            self.enter(ch, room, maps);
+            self.enter(ch, room, maps, taken);
         }
     }
 }

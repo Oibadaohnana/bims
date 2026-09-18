@@ -54,7 +54,7 @@ pub struct Recipe {
 
 /// The table. Indexed by position, and the index is what crosses the wasm
 /// boundary — `ship_recipe_*` — so a recipe is appended, never inserted.
-pub static RECIPES: [Recipe; 6] = [
+pub static RECIPES: [Recipe; 7] = [
     Recipe {
         station: PartKind::Smelter,
         inputs: &[(ResourceId::Ore, 2)],
@@ -100,6 +100,15 @@ pub static RECIPES: [Recipe; 6] = [
         station: PartKind::Armoury,
         inputs: &[(ResourceId::Vegetable, 2), (ResourceId::Components, 1)],
         output: (ResourceId::Medkit, 1),
+        minutes: 15,
+        vents: false,
+    },
+    // The drug lab: two fibre off the bay rolled into a dressing. What
+    // closes a wound — see `bims::health`.
+    Recipe {
+        station: PartKind::DrugLab,
+        inputs: &[(ResourceId::Fibre, 2)],
+        output: (ResourceId::Bandage, 1),
         minutes: 15,
         vents: false,
     },

@@ -15,8 +15,10 @@
 //! name, and — because "does this star have a station" has to be answered by
 //! **generating the system** rather than by looking at the designations —
 //! every system's bodies and stations, with their kinds, parents, positions
-//! and names. A galaxy whose stars all matched and whose stations did not
-//! would put two players' spawn pickers on different stations.
+//! and names, what each station stocks and whose side it is on. A galaxy
+//! whose stars all matched and whose stations did not would put two
+//! players' spawn pickers on different stations — or one player's crew
+//! ashore at a station the other's is shooting its way out of.
 //!
 //! # Why the floats are rounded
 //!
@@ -110,6 +112,11 @@ pub fn galaxy_checksum(galaxy: &Galaxy, systems: &[StarSystem]) -> u64 {
             hash.eat(station.name.word as u64);
             hash.eat(station.name.number as u64);
             hash.eat(station.name.part as u64);
+            // The shelf and the side, which a player sees the moment they
+            // dock: two builds whose stations stood in the same places and
+            // disagreed about which of them shoot would be two galaxies.
+            hash.eat(station.stock.0 as u64);
+            hash.eat(u64::from(station.hostile));
         }
     }
 

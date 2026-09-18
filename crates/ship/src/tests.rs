@@ -371,8 +371,7 @@ fn the_sky_streams_on_the_world_s_clock_and_only_under_way() {
 
 /// The `rot` field of every shape in the buffer.
 fn shape_rotations(list: &crate::draw::DrawList) -> Vec<f32> {
-    let slice = unsafe { std::slice::from_raw_parts(list.as_ptr(), list.len()) };
-    slice
+    list.shapes()
         .chunks(crate::draw::STRIDE)
         .map(|shape| shape[5])
         .collect()
@@ -437,8 +436,10 @@ fn the_ship_is_in_the_middle_of_both_views() {
         assert!((game.camera().offset_y() - CANVAS.1 / 2.0).abs() < 1e-3);
     }
 
-    // And a pan cannot shove it off the edge, however hard it is shoved.
+    // And a pan cannot shove it off the edge, however hard it is shoved —
+    // once the view is tethered; it opens free, and free goes anywhere.
     game.set_mode(ViewMode::Ship);
+    game.set_follow(true);
     game.camera_mut().pan(100_000.0, -100_000.0);
     assert!(game.camera().offset_x() < CANVAS.0);
     assert!(game.camera().offset_y() > 0.0);
@@ -627,6 +628,8 @@ fn the_airlock_opens_for_whoever_comes_to_it_and_shuts_behind_them() {
 #[test]
 fn the_camera_follows_the_crew_member_the_player_steers() {
     let mut game = game();
+    // The view opens free; this is about it tethered.
+    game.set_follow(true);
     let middle = (CANVAS.0 / 2.0, CANVAS.1 / 2.0);
     let pixel = |game: &Game| {
         let (x, y) = world_paint::crew_on_screen(game, 0);
@@ -721,4 +724,67 @@ fn the_camera_follows_the_crew_member_the_player_steers() {
         (at.0 - middle.0).abs() < 1e-3 && (at.1 - middle.1).abs() < 1e-3,
         "following again did not bring them back: {at:?}"
     );
+}
+
+/// The blueprint in hand is the world's answer about the tile under the
+/// pointer, asked once per tile and kept: the same tile again is the same
+/// answer without the ship being validated again, a different tile or a
+/// turn is asked afresh, and the tool put down forgets it. A site laid out
+/// is found under its tiles.
+#[test]
+fn the_blueprint_asks_the_world_once_a_tile_and_finds_a_site_under_the_pointer() {
+    use shipdesign::parts::{PartKind, Rotation};
+    use world::world::Command;
+    let mut game = game();
+    assert!(game.ghost_check().is_none(), "no tool in hand");
+    game.set_placing(Some((PartKind::Wall, Rotation::R0)));
+    assert!(game.ghost_check().is_none(), "no tile under the pointer");
+
+    // A deck tile the wall may stand on: the flyer's deck, away from the
+    // fixtures. Found rather than named, so the fixture may move.
+    let design = game.world.ship.design.clone();
+    let grid = design.grid();
+    let tile = (1..design.build_area as i32 - 1)
+        .flat_map(|y| (1..design.build_area as i32 - 1).map(move |x| (x, y)))
+        .find(|&t| {
+            grid.has_floor(t)
+                && game
+                    .world
+                    .can_place_site(PartKind::Wall, (t.0 as u32, t.1 as u32), Rotation::R0)
+                    .is_ok()
+        })
+        .expect("somewhere on the deck a wall may go");
+    game.hover = Some(tile);
+    assert_eq!(game.ghost_check(), Some(Ok(())));
+    assert!(game.ghost_ok());
+    assert_eq!(game.ghost_answer(), Some(Ok(())));
+    // Off the hull it is refused, and the refusal is the rules' own.
+    game.hover = Some((-1, -1));
+    assert!(matches!(
+        game.ghost_check(),
+        Some(Err(world::SiteRefusal::WontFit(_)))
+    ));
+    assert!(!game.ghost_ok());
+    game.hover = Some(tile);
+    assert_eq!(game.ghost_check(), Some(Ok(())));
+
+    // Laid out, and found under the pointer.
+    assert!(game.site_at(tile).is_none());
+    game.send(Command::PlaceSite {
+        slot: 0,
+        kind: PartKind::Wall,
+        origin: (tile.0 as u32, tile.1 as u32),
+        rotation: Rotation::R0,
+    });
+    game.step();
+    let site = game.site_at(tile).expect("the site under the pointer");
+    assert_eq!(site.kind, PartKind::Wall);
+    // And the same tile is now refused: the site is already there.
+    assert!(matches!(
+        game.ghost_check(),
+        Some(Err(world::SiteRefusal::WontFit(_)))
+    ));
+    game.set_placing(None);
+    assert!(game.ghost_check().is_none());
+    assert!(!game.ghost_ok());
 }

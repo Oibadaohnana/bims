@@ -13,7 +13,7 @@
 //! that a minute-by-minute run would emit.
 //!
 //! No strings. The host names them, the way it names every other code that
-//! crosses the boundary — see `MEMORY_LINES` in `web/bims.js` for the shape
+//! crosses the boundary — see `MEMORY_LINES` in `crates/app/src/names.rs` for the shape
 //! this will take when it gets there.
 
 /// The discriminants are written out because they will cross the wasm

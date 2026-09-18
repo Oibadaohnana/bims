@@ -45,6 +45,9 @@ const HULL_RIM: Color = Color::rgba(0.90, 0.95, 1.0, 0.45);
 /// A station too far off to draw tile by tile: one plate the size of its
 /// hull, in the hull's own colour, with its icon on it.
 pub const HULL_FAR: Color = Color::rgb(0.36, 0.41, 0.48);
+/// A stranger's station, near or far: under the black fog of what the
+/// crew have not looked into, its plate is the fog's own colour.
+pub const HULL_UNKNOWN: Color = Color::rgb(0.05, 0.05, 0.06);
 const STEEL: Color = Color::rgb(0.20, 0.22, 0.26);
 const STEEL_LIGHT: Color = Color::rgb(0.30, 0.33, 0.38);
 const STEEL_DARK: Color = Color::rgb(0.13, 0.14, 0.17);

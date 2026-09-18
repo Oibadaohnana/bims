@@ -11,6 +11,8 @@ mod bim;
 mod character;
 #[path = "../crates/game/src/clock.rs"]
 mod clock;
+#[path = "../crates/game/src/combat.rs"]
+mod combat;
 #[path = "../crates/game/src/door.rs"]
 mod door;
 #[path = "../crates/game/src/dish.rs"]
@@ -19,6 +21,8 @@ mod dish;
 mod draw;
 #[path = "../crates/game/src/filth.rs"]
 mod filth;
+#[path = "../crates/game/src/galley.rs"]
+mod galley;
 #[path = "../crates/game/src/game.rs"]
 mod game;
 #[path = "../crates/game/src/health.rs"]
@@ -41,6 +45,8 @@ mod rng;
 mod room;
 #[path = "../crates/game/src/schedule.rs"]
 mod schedule;
+#[path = "../crates/game/src/sight.rs"]
+mod sight;
 #[path = "../crates/game/src/task.rs"]
 mod task;
 #[path = "../crates/game/src/work.rs"]

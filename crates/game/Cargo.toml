@@ -1,8 +1,6 @@
 # The room: the Bims, their needs and errands, the galley, the heads and the
-# bay, and the drawing of all of it — plus the wasm exports `web/bims.js`
-# drives it through as the behaviour test room.
-#
-# It is a library as well as a cdylib, because the ship game runs this very
+# bay, and the drawing of all of it as a buffer of shapes. `crates/app` runs
+# it on its own as the behaviour test room, and the ship game runs this very
 # simulation **aboard the designed ship**: `world` builds a room from a
 # `ShipDesign` through `aboard.rs` and steps it inside `World::step`. That
 # is the one dependency this crate has on the rest of the workspace, and it
@@ -11,10 +9,7 @@
 name = "bims"
 version = "0.1.0"
 edition = "2024"
-description = "Bims - a 2D top-down game that runs in the browser"
-
-[lib]
-crate-type = ["cdylib", "rlib"]
+description = "Bims — the room: the Bims' simulation, and the shapes it draws itself as"
 
 [dependencies]
 physics = { path = "../physics" }

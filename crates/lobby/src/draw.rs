@@ -21,6 +21,13 @@ pub const KIND_ELLIPSE: f32 = 1.0;
 /// A `line` width of zero means fill; anything greater strokes the outline.
 const FILLED: f32 = 0.0;
 
+/// The enemy's red: the ring round a hostile station on the system diagram.
+/// The same number the room draws a hostile body in and the world map rings
+/// a hostile station with, so one colour means one thing on every screen;
+/// it is written out here rather than imported because the lobby imports
+/// neither of those crates.
+pub const ENEMY: Color = Color::rgb(1.0, 0.28, 0.22);
+
 #[derive(Clone, Copy, Debug)]
 pub struct Color {
     pub r: f32,
@@ -59,8 +66,9 @@ impl DrawList {
         self.data.clear();
     }
 
-    pub fn as_ptr(&self) -> *const f32 {
-        self.data.as_ptr()
+    /// The shapes, twelve floats each, for the app to replay.
+    pub fn shapes(&self) -> &[f32] {
+        &self.data
     }
 
     pub fn len(&self) -> usize {
